@@ -1,0 +1,333 @@
+{
+  "commit": "no-git-repository",
+  "run_at": "2026-10-09T03:17:52.444Z",
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)"
+  },
+  "verdict": {
+    "STORAGE": "PASS",
+    "MEMORY": "PASS",
+    "USER_INTELLIGENCE": "PASS",
+    "WIKI": "PASS",
+    "DREAM": "PASS",
+    "QUERY": "PASS",
+    "UNIX": "PASS",
+    "INTELLIGENCE": "PASS",
+    "PERFORMANCE": "INCOMPLETE",
+    "PLATFORM": "PASS"
+  },
+  "mandatoryV1Gates": [
+    {
+      "id": "PREFERENCES",
+      "status": "FAIL",
+      "evidence": [
+        "verification/profile/report.json",
+        "verification/profile/real-model-evaluation.json",
+        "verification/profile/labeled-corpus.json",
+        "tests/profile/insights.test.ts"
+      ],
+      "detail": "Deterministic correction precedence, explicit-over-inferred notes, project scope, provenance, and sensitive-review tests pass. Labeled Claude CLI run: precision 1.00, recall 1.00, false-positive rate 0.00, scope accuracy 1.00, evidence grounding 1.00; model job completion 0.6875 misses the predeclared 0.90 threshold due malformed abstentions. External factual calibration is NOT_RUN."
+    },
+    {
+      "id": "REMOTE_CAPTURE",
+      "status": "INCOMPLETE",
+      "evidence": [
+        "verification/memory/report.json",
+        "verification/memory/remote-real-host-evaluation.json",
+        "tests/memory/remote-real-host.test.ts"
+      ],
+      "detail": "PASS on the opt-in live localhost integration: two authenticated Claude Code/Codex clients, server outage/restart, bounded buffering, duplicate/out-of-order replay, eventual drain, actor attribution, session closure, native task success, and staged real-model handoff. Cross-machine transit/TLS is NOT_RUN because both clients and server ran on one physical machine. Codex exec did not dispatch Stop; capture uses supported lifecycle events."
+    },
+    {
+      "id": "AGENT_IDENTITY",
+      "status": "PASS",
+      "evidence": [
+        "verification/security/report.json",
+        "verification/identity/report.json",
+        "docs/security.md",
+        "deploy/Caddyfile"
+      ],
+      "detail": "Security and identity tests pass for server-bound actors, spoof rejection, two independently scoped HTTP clients, cross-workspace denial, concurrent provisioning, creation/revocation/rotation/authorization-failure audit, atomic rotate-and-reissue with immediate old-token invalidation and scope narrowing, and the supported loopback-upstream Caddy HTTPS configuration."
+    },
+    {
+      "id": "DREAM_ENGINE",
+      "status": "FAIL",
+      "evidence": [
+        "verification/dream/report.json",
+        "verification/dream/labeled-scenarios.json",
+        "verification/dream/real-model-evaluation.json",
+        "tests/dream/retrieval.test.ts",
+        "tests/dream/dream.test.ts"
+      ],
+      "detail": "Real Claude evaluation: micro quality 0.833, deep 0.667, strategic 1.000; threshold >=0.75 per mode fails on deep. Evidence grounding 1.00; real Knowledge Critic rejected 3/3 adversarial cases and accepted 1/1 supported case. Deterministic accepted/rejected feedback ranking and optional semantic retrieval mechanics pass. No production embedding backend was configured for real semantic comparison."
+    }
+  ],
+  "decision": "BETA (not GA: PERFORMANCE not PASS)",
+  "gates": [
+    {
+      "id": "S1",
+      "title": "Lint passes",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 1,
+      "evidence": "npm run lint",
+      "limitation": ""
+    },
+    {
+      "id": "S2",
+      "title": "Crash recovery at every transaction fault point (kill / EIO / ENOSPC), idempotent recovery, no partial commits",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 124,
+      "evidence": "verification/acid/report.json",
+      "limitation": "Process-level faults only; power cut NOT_RUN"
+    },
+    {
+      "id": "S3",
+      "title": "No lost acknowledged write; no silent lost update (multi-process 10/50, shared-object RMW, same-revision race)",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 12,
+      "evidence": "verification/acid/report.json",
+      "limitation": "No real-time linearizability checker"
+    },
+    {
+      "id": "S4",
+      "title": "Immutability, history and invariants under randomized operation sequences with restarts",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 24,
+      "evidence": "verification/acid/report.json",
+      "limitation": "In-repo seeded generator, no shrinking"
+    },
+    {
+      "id": "S5",
+      "title": "Backup under write load, restore validation, corrupt backup refused",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 4,
+      "evidence": "verification/recovery/report.json",
+      "limitation": "Same host; purge does not reach existing backups"
+    },
+    {
+      "id": "S6",
+      "title": "Zero ACL / non-disclosure leaks in tested surfaces",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 8,
+      "evidence": "verification/security/report.json",
+      "limitation": "Local disk access bypasses ACLs"
+    },
+    {
+      "id": "S7",
+      "title": "Filesystem search correct; SQLite parity, stale fallback, corruption fallback, rebuild, integrity checks",
+      "severity": "P0",
+      "area": "STORAGE",
+      "status": "PASS",
+      "cases": 36,
+      "evidence": "verification/search/report.json",
+      "limitation": "No ranking-quality or semantic claim"
+    },
+    {
+      "id": "S8",
+      "title": "Supported platforms pass or release is explicitly restricted",
+      "severity": "P0",
+      "area": "PLATFORM",
+      "status": "PASS",
+      "cases": 7,
+      "evidence": "verification/release-matrix.json, verification/platforms/report.json",
+      "limitation": "Supported: darwin. Linux NOT_RUN, so Linux is NOT a supported release platform."
+    },
+    {
+      "id": "S9",
+      "title": "Power-loss durability",
+      "severity": "P1",
+      "area": "STORAGE",
+      "status": "NOT_RUN",
+      "cases": 0,
+      "evidence": "-",
+      "limitation": "No power-cut or fsync-fault-injection test was performed"
+    },
+    {
+      "id": "I1",
+      "title": "Deterministic pipelines (profile, retrospective, critic, privacy, budgets, errors) and provider adapter",
+      "severity": "P0",
+      "area": "INTELLIGENCE",
+      "status": "PASS",
+      "cases": 0,
+      "evidence": "verification/intelligence/report.json",
+      "limitation": "Fake and one local real model only"
+    },
+    {
+      "id": "M1",
+      "title": "Passive capture: redaction, spool, fail-open hook, identity binding, recall tools (M1)",
+      "severity": "P0",
+      "area": "MEMORY",
+      "status": "PASS",
+      "cases": 19,
+      "evidence": "verification/memory/report.json",
+      "limitation": "Claude and Codex payloads were live-tested; this single-host run does not prove remote cross-machine outage/restart delivery. Codex exec did not dispatch Stop."
+    },
+    {
+      "id": "U1",
+      "title": "Evidence-backed user insights: evidence classes, hypotheses, conflicts, correction, projection (M2)",
+      "severity": "P0",
+      "area": "USER_INTELLIGENCE",
+      "status": "PASS",
+      "cases": 13,
+      "evidence": "verification/profile/report.json",
+      "limitation": "One synthetic real-model sample matched four labeled facets and source/scope rules; independent precision/false-positive calibration is not measured. Sensitivity detection is a keyword heuristic."
+    },
+    {
+      "id": "W1",
+      "title": "Wiki compilation with citations, dependency-driven updates, retrospectives and handoffs (M3)",
+      "severity": "P0",
+      "area": "WIKI",
+      "status": "PASS",
+      "cases": 10,
+      "evidence": "verification/wiki/report.json",
+      "limitation": "Lint does not verify that a span supports its sentence; real-model run is opt-in"
+    },
+    {
+      "id": "Q1",
+      "title": "Typed query engine: operator families on SDK/CLI/MCP, reference-interpreter fuzz, ACL non-disclosure, crash recovery, filesystem-only (QG1-QG5)",
+      "severity": "P0",
+      "area": "QUERY",
+      "status": "PASS",
+      "cases": 74,
+      "evidence": "verification/query/report.json",
+      "limitation": "Semantic/hybrid require SQLite plus configured vectors; regex is JavaScript RegExp with safety guards, not RE2."
+    },
+    {
+      "id": "X1",
+      "title": "Unix text tools (cat head tail grep cut sort uniq wc tr paste comm diff find tree tee): system-tool parity, formats, exit codes, bounds, ACLs, tee guards, interop bridge",
+      "severity": "P0",
+      "area": "UNIX",
+      "status": "PASS",
+      "cases": 139,
+      "evidence": "verification/unix/report.json",
+      "limitation": "BSD tools only (GNU cases NOT_RUN); Linux NOT_RUN; awk/sed bridge execution NOT_RUN without gawk/GNU sed"
+    },
+    {
+      "id": "D1",
+      "title": "Dream modes, association retrieval, critic, feedback lifecycle and budgets (M4)",
+      "severity": "P0",
+      "area": "DREAM",
+      "status": "PASS",
+      "cases": 14,
+      "evidence": "verification/dream/report.json",
+      "limitation": "Real-model structural, evidence, status and critic flags were recorded; independent novelty/usefulness/hallucination scoring and longitudinal feedback impact remain unmeasured."
+    },
+    {
+      "id": "P-1k",
+      "title": "Benchmark 1k: correct results, filesystem/SQLite parity",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "PASS",
+      "cases": 20,
+      "evidence": "verification/benchmarks/1k.json",
+      "limitation": "Warm cache only"
+    },
+    {
+      "id": "P-10k",
+      "title": "Benchmark 10k: correct results, filesystem/SQLite parity",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "PASS",
+      "cases": 20,
+      "evidence": "verification/benchmarks/10k.json",
+      "limitation": "Warm cache only"
+    },
+    {
+      "id": "P-100k",
+      "title": "Benchmark 100k: correct results, filesystem/SQLite parity",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "NOT_RUN",
+      "cases": 0,
+      "evidence": "verification/benchmarks/100k.json",
+      "limitation": "No measurement exists"
+    },
+    {
+      "id": "QB-1k",
+      "title": "Query benchmark 1k: results match known counts",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "PASS",
+      "cases": 1,
+      "evidence": "verification/query/benchmarks/1k.json",
+      "limitation": "warm cache only"
+    },
+    {
+      "id": "QB-10k",
+      "title": "Query benchmark 10k: results match known counts",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "PASS",
+      "cases": 1,
+      "evidence": "verification/query/benchmarks/10k.json",
+      "limitation": "warm cache only"
+    },
+    {
+      "id": "QB-100k",
+      "title": "Query benchmark 100k: results match known counts",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "NOT_RUN",
+      "cases": 0,
+      "evidence": "verification/query/benchmarks/100k.json",
+      "limitation": "warm cache only"
+    },
+    {
+      "id": "PB-keyword p95",
+      "title": "100k budget: keyword p95 (<150 ms)",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "NOT_RUN",
+      "cases": 0,
+      "evidence": "verification/benchmarks/100k.json",
+      "limitation": "No 100k measurement"
+    },
+    {
+      "id": "PB-grep p95",
+      "title": "100k budget: grep p95 (<200 ms)",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "NOT_RUN",
+      "cases": 0,
+      "evidence": "verification/benchmarks/100k.json",
+      "limitation": "No 100k measurement"
+    },
+    {
+      "id": "PB-durable write p95",
+      "title": "100k budget: durable write p95 (<50 ms)",
+      "severity": "P1",
+      "area": "PERFORMANCE",
+      "status": "NOT_RUN",
+      "cases": 0,
+      "evidence": "verification/benchmarks/100k.json",
+      "limitation": "No 100k measurement"
+    }
+  ],
+  "decisionNotes": [
+    "Release is explicitly restricted to macOS (APFS, tested). Linux/ext4 was NOT_RUN and is not a supported release platform until the reliability lane passes there.",
+    "Process-crash atomicity and recovery are verified; power-loss durability is not.",
+    "Writes are serialized by one vault-wide lock; per-workspace write parallelism is not offered."
+  ]
+}

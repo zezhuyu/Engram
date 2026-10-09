@@ -1,0 +1,80 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import YAML from 'yaml';
+import { disposableVault } from '../helpers/disposable-vault.js';
+import { conceptVector } from '../helpers/embedder.js';
+import { run } from '../helpers/host.js';
+import { recordCase } from '../helpers/report.js';
+import { CancelledError } from '../../packages/models/errors.js';
+import { createEmbedder, describeEmbedding, OpenAICompatibleEmbedder } from '../../packages/search-semantic/embedder.js';
+import type { Scope } from '../../packages/core/types.js';
+
+const rec = (name: string) => recordCase({ suite: 'embedder', name, status: 'PASS' });
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+const vectorsFor = (texts: string[]) => ({ data: texts.map((t, i) => ({ index: i, embedding: conceptVector(t) })) });
+const make = (fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) => new OpenAICompatibleEmbedder({ id: 'x', baseUrl: 'http://127.0.0.1:9/v1', model: 'm', locality: 'local', timeoutMs: 400, maxRetries: 2, batchSize: 2, fetch, sleep: async () => undefined, ...extra } as ConstructorParameters<typeof OpenAICompatibleEmbedder>[0]);
+
+test('HTTP embedder: request shape, batching, ordering, retries with backoff, and strict response validation', async () => {
+  const seen: Array<{ url: string; auth: string | null; body: { model: string; input: string[]; encoding_format: string } }> = [];
+  const fetcher: typeof fetch = async (url, init) => { const body = JSON.parse(String(init!.body)); seen.push({ url: String(url), auth: new Headers(init!.headers).get('authorization'), body }); const v = vectorsFor(body.input); v.data.reverse(); return json(v); };
+  const e = make(fetcher, { apiKey: 'sk-test' });
+  const out = await e.embed(['car', 'deploy', 'cat', 'invoice', 'sql']); assert.equal(out.length, 5); assert.deepEqual(out[0], conceptVector('car'), 'vectors come back in input order even if the server reorders them');
+  assert.equal(seen.length, 3, 'batches of two'); assert.equal(seen[0]!.url, 'http://127.0.0.1:9/v1/embeddings'); assert.equal(seen[0]!.auth, 'Bearer sk-test'); assert.equal(seen[0]!.body.model, 'm'); assert.equal(seen[0]!.body.encoding_format, 'float');
+  assert.equal(e.dimensions, conceptVector('x').length);
+  let n = 0; const flaky: typeof fetch = async (_u, init) => { n++; if (n < 3) return json({}, n === 1 ? 429 : 503, { 'retry-after': '0' }); return json(vectorsFor(JSON.parse(String(init!.body)).input)); };
+  assert.equal((await make(flaky).embed(['car'])).length, 1); assert.equal(n, 3, 'two retries then success');
+  await assert.rejects(make(async () => json({}, 500)).embed(['a']), /retries exhausted/);
+  await assert.rejects(make(async () => json({}, 401), { apiKey: 'sk-secret' }).embed(['a']), (err: Error) => /rejected the credentials/.test(err.message) && !err.message.includes('sk-secret'));
+  await assert.rejects(make(async () => json({}, 404)).embed(['a']), /not found/);
+  let calls = 0; await assert.rejects(make(async () => { calls++; return json({}, 400); }).embed(['a']), /rejected the request/); assert.equal(calls, 1, '4xx is not retried');
+  for (const bad of [{ data: [] }, { data: [{ index: 0, embedding: 'nope' }] }, { data: [{ index: 0, embedding: [1, 'x'] }] }, { nothing: true }, { data: [{ index: 0, embedding: [] }] }]) await assert.rejects(make(async () => json(bad)).embed(['a']), (err: Error & { code?: string }) => err.code === 'INVALID_MODEL_OUTPUT', JSON.stringify(bad));
+  await assert.rejects(make(async () => new Response('<html>', { status: 200 })).embed(['a']), (err: Error & { code?: string }) => err.code === 'INVALID_MODEL_OUTPUT');
+  let first = true; await assert.rejects(make(async (_u, init) => { const input = JSON.parse(String(init!.body)).input as string[]; const v = vectorsFor(input); if (!first) v.data[0]!.embedding = [1, 2]; first = false; return json(v); }).embed(['car', 'cat', 'sql']), /dimensions, expected/);
+  rec('http-embedder');
+});
+test('HTTP embedder: timeouts, cancellation, redirects, oversize responses and transport errors are bounded and sanitized', async () => {
+  await assert.rejects(make(((_u: unknown, init: RequestInit) => new Promise((_r, reject) => init.signal!.addEventListener('abort', () => reject(new Error('aborted')))) ) as unknown as typeof fetch, { maxRetries: 0, timeoutMs: 50 }).embed(['a']), /timed out/);
+  const ac = new AbortController(); ac.abort(); await assert.rejects(make(async () => json(vectorsFor(['a']))).embed(['a'], { signal: ac.signal }), CancelledError);
+  await assert.rejects(make((async () => { throw new TypeError('fetch failed: ECONNREFUSED 10.0.0.5 secret-host') }) as typeof fetch, { maxRetries: 0 }).embed(['a']), (err: Error) => /unreachable/.test(err.message) && !err.message.includes('secret-host'));
+  const big = new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(40_000_000)); c.enqueue(new Uint8Array(40_000_000)); c.close(); } }), { status: 200 }); await assert.rejects(make(async () => big, { maxRetries: 0 }).embed(['a']), /size limit/);
+  let redirectOption: string | undefined; await make(async (_u, init) => { redirectOption = init!.redirect; return json(vectorsFor(['a'])); }).embed(['a']); assert.equal(redirectOption, 'error', 'redirects are refused (a redirect could carry the API key elsewhere)');
+  assert.throws(() => make(fetch, { baseUrl: 'http://example.com/v1' }), /https/); assert.throws(() => make(fetch, { baseUrl: 'https://user:pw@example.com/v1' }), /credentials/); assert.throws(() => make(fetch, { baseUrl: 'ftp://x/v1' }), /http/);
+  rec('http-embedder-bounds');
+});
+test('createEmbedder / describeEmbedding: validation, defaults and key handling; nothing is built unless configured', () => {
+  assert.throws(() => createEmbedder(undefined), /No embedding provider/); assert.throws(() => createEmbedder({ provider: null }), /No embedding provider/);
+  assert.equal(describeEmbedding(undefined).configured, false);
+  assert.throws(() => createEmbedder({ provider: 'ollama' }), /embedding.model/); assert.equal(createEmbedder({ provider: 'ollama', model: 'nomic-embed-text' }).locality, 'local');
+  assert.throws(() => createEmbedder({ provider: 'openai', model: 'text-embedding-3-small', allowNetwork: true }, {}), /OPENAI_API_KEY/); const remote = createEmbedder({ provider: 'openai', model: 'text-embedding-3-small', allowNetwork: true }, { OPENAI_API_KEY: 'k' }); assert.equal(remote.locality, 'remote');
+  assert.throws(() => createEmbedder({ provider: 'openai', model: 'm' }, { OPENAI_API_KEY: 'k' }), /allowNetwork/); assert.throws(() => createEmbedder({ provider: 'openai-compatible', model: 'm' }), /baseUrl/);
+  assert.throws(() => createEmbedder({ provider: 'ollama', model: 'm', timeoutMs: 5 }), /timeoutMs/); assert.throws(() => createEmbedder({ provider: 'ollama', model: 'm', batchSize: 0 }), /batchSize/);
+  const d = describeEmbedding({ provider: 'openai', model: 'm', allowNetwork: true }, {}); assert.equal(d.available, false); assert.ok(!JSON.stringify(d).includes('sk-'));
+  rec('embedder-config');
+});
+
+test('end to end over real HTTP and the CLI: embed sync, semantic search, auto becomes hybrid, status and capabilities, keyword unaffected', async t => {
+  let requests = 0; const server = http.createServer((req, res) => { let body = ''; req.on('data', d => { body += d; }); req.on('end', () => { requests++; const input = (JSON.parse(body) as { input: string[] }).input; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(vectorsFor(input))); }); });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); t.after(() => { server.close(); }); const port = (server.address() as { port: number }).port;
+  const { root, vault } = await disposableVault(t, { sqlite: true }); await vault.createWorkspace('w', '', {}); const ws: Scope = { type: 'workspace', workspaceId: 'w' };
+  await vault.put({ scope: ws, kind: 'note', title: 'Garage', body: 'The car needs new tires.' }); await vault.put({ scope: ws, kind: 'note', title: 'Release', body: 'Ship the release on Friday.' });
+  const search = (...a: string[]) => run(['search', ...a, '--root', root, '--json']);
+  const before = await run(['search', 'automobile', '--mode', 'semantic', '--root', root, '--json']); assert.equal(before.code, 1); assert.equal(JSON.parse(before.stderr).error.code, 'CAPABILITY_UNAVAILABLE');
+  const cfg = await vault.config() as unknown as Record<string, unknown>; cfg.embedding = { provider: 'ollama', baseUrl: `http://127.0.0.1:${port}/v1`, model: 'concepts' }; await fs.writeFile(path.join(root, 'mdb.yaml'), YAML.stringify(cfg));
+  assert.equal((await run(['index', 'rebuild', '--root', root, '--json'])).code, 0);
+  const notReady = JSON.parse((await run(['embed', 'status', '--root', root, '--json'])).stdout); assert.equal(notReady.ready, false); assert.match(notReady.reason, /embed sync/);
+  assert.equal((await search('car', '--mode', 'keyword')).code, 0, 'keyword works while the vector backend is not ready');
+  const sync = JSON.parse((await run(['embed', 'sync', '--root', root, '--json'])).stdout); assert.equal(sync.embeddedObjects, 2); assert.ok(requests >= 1);
+  const status = JSON.parse((await run(['embed', 'status', '--root', root, '--json'])).stdout); assert.equal(status.ready, true); assert.equal(status.model, 'ollama:concepts');
+  const sem = JSON.parse((await search('automobile', '--mode', 'semantic')).stdout); assert.equal(sem.mode, 'semantic'); assert.equal(sem.hits[0].title, 'Garage');
+  const auto = JSON.parse((await search('automobile ship')).stdout); assert.equal(auto.mode, 'hybrid'); assert.equal(auto.requestedMode, 'auto'); assert.equal(auto.ranking, 'rrf');
+  const kw = JSON.parse((await search('tires', '--mode', 'keyword')).stdout); assert.equal(kw.mode, 'keyword'); const grep = JSON.parse((await search('new tires', '--mode', 'grep')).stdout); assert.equal(grep.mode, 'grep');
+  const caps = JSON.parse((await run(['capabilities', '--root', root, '--json'])).stdout); assert.equal(caps.search.vector.available, true);
+  const health = JSON.parse((await run(['index', 'status', '--root', root, '--json'])).stdout); assert.equal(health.vector.ready, true);
+  await server.close(); const down = await search('automobile', '--mode', 'semantic'); assert.equal(down.code, 1); assert.match(down.stderr, /Embedding provider unavailable/);
+  const keywordStill = JSON.parse((await search('tires', '--mode', 'keyword')).stdout); assert.equal(keywordStill.hits.length, 1, 'keyword search does not need the embedding service');
+  assert.equal((await run(['embed', 'clear', '--root', root, '--json'])).code, 0); assert.equal(JSON.parse((await run(['embed', 'status', '--root', root, '--json'])).stdout).ready, false);
+  rec('end-to-end-http');
+});

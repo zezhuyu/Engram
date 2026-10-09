@@ -1,0 +1,36 @@
+{
+  "status": "PASS_WITH_LIMITATION",
+  "runAt": "2026-10-09T02:46:48Z",
+  "command": "MDB_REAL_REMOTE_HOST_TEST=1 MDB_TEST_PROVIDER=claude-cli node --test dist/tests/memory/remote-real-host.test.js",
+  "test": "real Claude Code and Codex remote capture recover after HTTP outage and server restart",
+  "testResult": {
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "durationMs": 372963
+  },
+  "observedAssertions": {
+    "hosts": ["Claude Code CLI", "Codex CLI"],
+    "independentCredentials": true,
+    "sharedTransport": "HTTP MCP /capture",
+    "actualServerOutageAndRestart": true,
+    "offlineLifecycleEventsBufferedWithinBound": true,
+    "nativeAgentTasksSucceededDuringOutage": true,
+    "duplicateAndOutOfOrderPayloadReplay": true,
+    "eventualQueueDrain": true,
+    "serverActorAttributionAndWorkspaceIsolation": true,
+    "duplicatePromptCommittedOncePerActor": true,
+    "sessionEndDeliveredAndSessionsClosed": true,
+    "realModelGeneratedStagedEvidenceLinkedHandoff": true,
+    "requiresCodexStopEvent": false
+  },
+  "environment": {
+    "os": "Darwin 25.0.0 arm64",
+    "node": "v25.8.2",
+    "serverBind": "127.0.0.1"
+  },
+  "limitations": [
+    "Both authenticated clients and the server ran on one physical machine; cross-machine network transit and TLS were NOT_RUN.",
+    "The Claude CLI invocation took 373 seconds. A globally installed claude-mem SessionEnd hook was observed in the process tree; this is external host-hook latency, not an Engram timeout."
+  ]
+}

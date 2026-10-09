@@ -1,0 +1,40 @@
+# dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# local agent / tool state
+.omx/
+.claude/
+.codex/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# secrets
+.env
+.env.*
+
+# derived indexes and databases (rebuildable from the Markdown vault)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# local vaults and data directories (never commit user data)
+.Engram/
+.mdb/
+/vault/
+/qbench-*/
+
+# generated verification artifacts: reports (report.json/md) are kept, raw logs and benchmark corpora are not
+verification/**/cases.jsonl
+verification/benchmarks/corpora/
+verification/benchmarks/runs/
+verification/benchmarks/profiles/
+
+# logs and scratch
+*.log
+tmp/

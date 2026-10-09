@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ingest Source"
+  short_description: "Run end-to-end source ingest into .content and raw"
+  default_prompt: "Use $ingest-source to download a source and produce markdown for the wiki."

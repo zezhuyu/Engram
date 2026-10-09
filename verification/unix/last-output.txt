@@ -1,0 +1,114 @@
+TAP version 13
+# Subtest: formats: NDJSON rows keep their metadata through filters; auto-detection uses the first record only; JSON arrays work; bad input is an error
+ok 1 - formats: NDJSON rows keep their metadata through filters; auto-detection uses the first record only; JSON arrays work; bad input is an error
+  ---
+  duration_ms: 1171.078875
+  type: 'test'
+  ...
+# Subtest: null-delimited records: -z on every record tool, and find -print0
+ok 2 - null-delimited records: -z on every record tool, and find -print0
+  ---
+  duration_ms: 803.745917
+  type: 'test'
+  ...
+# Subtest: streaming and bounds: head stops reading (SIGPIPE-like), tail is a ring, sort/line/deadline limits are errors not hangs
+ok 3 - streaming and bounds: head stops reading (SIGPIPE-like), tail is a ring, sort/line/deadline limits are errors not hangs
+  ---
+  duration_ms: 1402.953583
+  type: 'test'
+  ...
+# Subtest: exit codes follow the tools: grep 0/1/2, diff 0/1/2, comm and sort -c report disorder with 1, usage errors never look like success
+ok 4 - exit codes follow the tools: grep 0/1/2, diff 0/1/2, comm and sort -c report disorder with 1, usage errors never look like success
+  ---
+  duration_ms: 1741.196417
+  type: 'test'
+  ...
+# Subtest: vault operands: access control, pinned revisions, and local files inside a vault are refused
+ok 5 - vault operands: access control, pinned revisions, and local files inside a vault are refused
+  ---
+  duration_ms: 548.52425
+  type: 'test'
+  ...
+# Subtest: find and tree: deterministic, ACL-bound virtual tree; -print0; predicates; ndjson
+ok 6 - find and tree: deterministic, ACL-bound virtual tree; -print0; predicates; ndjson
+  ---
+  duration_ms: 440.44025
+  type: 'test'
+  ...
+# Subtest: grep --vault uses the text index and respects ACLs; cat/find ids chain into each other
+ok 7 - grep --vault uses the text index and respects ACLs; cat/find ids chain into each other
+  ---
+  duration_ms: 300.8885
+  type: 'test'
+  ...
+# Subtest: tee: copies stdin to stdout and files; never writes inside a vault, never follows symlinks, not available through MCP
+ok 8 - tee: copies stdin to stdout and files; never writes inside a vault, never follows symlinks, not available through MCP
+  ---
+  duration_ms: 762.492625
+  type: 'test'
+  ...
+# Subtest: interoperability: installed jq / awk / sed consume our output; the bridge runs only sandboxable tools with an argument vector
+ok 9 - interoperability: installed jq / awk / sed consume our output; the bridge runs only sandboxable tools with an argument vector
+  ---
+  duration_ms: 1892.383333
+  type: 'test'
+  ...
+# Subtest: MCP mdb_unix: same results as the CLI, bound to the host identity, no local files, bounded output
+ok 10 - MCP mdb_unix: same results as the CLI, bound to the host identity, no local files, bounded output
+  ---
+  duration_ms: 1690.029708
+  type: 'test'
+  ...
+# Subtest: legacy meanings keep working: grep TEXT is still the index search, diff ID FROM TO is still the revision diff
+ok 11 - legacy meanings keep working: grep TEXT is still the index search, diff ID FROM TO is still the revision diff
+  ---
+  duration_ms: 719.153875
+  type: 'test'
+  ...
+# Subtest: GNU tools are present where the CI requires them
+ok 12 - GNU tools are present where the CI requires them
+  ---
+  duration_ms: 0.908667
+  type: 'test'
+  ...
+# Subtest: Unix command parity with the installed system tools
+ok 13 - Unix command parity with the installed system tools
+  ---
+  duration_ms: 13721.50475
+  type: 'test'
+  ...
+# Subtest: required tools are present on the Linux lane
+ok 14 - required tools are present on the Linux lane
+  ---
+  duration_ms: 2.9175
+  type: 'test'
+  ...
+# Subtest: awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files
+ok 15 - awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files # SKIP gawk not installed (NOT_RUN)
+  ---
+  duration_ms: 0.111959
+  type: 'test'
+  ...
+# Subtest: sed: GNU sed --sandbox runs scripts but cannot execute, read or write files
+ok 16 - sed: GNU sed --sandbox runs scripts but cannot execute, read or write files # SKIP GNU sed not installed (NOT_RUN)
+  ---
+  duration_ms: 0.057833
+  type: 'test'
+  ...
+# Subtest: the bridge never uses a shell: metacharacters in arguments are data
+ok 17 - the bridge never uses a shell: metacharacters in arguments are data
+  ---
+  duration_ms: 427.427667
+  type: 'test'
+  ...
+1..17
+# tests 17
+# suites 0
+# pass 15
+# fail 0
+# cancelled 0
+# skipped 2
+# todo 0
+# duration_ms 13822.678917
+
+--- stderr ---

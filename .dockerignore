@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+.omx
+verification/benchmarks/corpora
+**/.mdb
+.DS_Store

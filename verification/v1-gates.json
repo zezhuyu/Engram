@@ -1,0 +1,28 @@
+{
+  "gates": [
+    {
+      "id": "PREFERENCES",
+      "status": "FAIL",
+      "evidence": ["verification/profile/report.json", "verification/profile/real-model-evaluation.json", "verification/profile/labeled-corpus.json", "tests/profile/insights.test.ts"],
+      "detail": "Deterministic correction precedence, explicit-over-inferred notes, project scope, provenance, and sensitive-review tests pass. Labeled Claude CLI run: precision 1.00, recall 1.00, false-positive rate 0.00, scope accuracy 1.00, evidence grounding 1.00; model job completion 0.6875 misses the predeclared 0.90 threshold due malformed abstentions. External factual calibration is NOT_RUN."
+    },
+    {
+      "id": "REMOTE_CAPTURE",
+      "status": "INCOMPLETE",
+      "evidence": ["verification/memory/report.json", "verification/memory/remote-real-host-evaluation.json", "tests/memory/remote-real-host.test.ts"],
+      "detail": "PASS on the opt-in live localhost integration: two authenticated Claude Code/Codex clients, server outage/restart, bounded buffering, duplicate/out-of-order replay, eventual drain, actor attribution, session closure, native task success, and staged real-model handoff. Cross-machine transit/TLS is NOT_RUN because both clients and server ran on one physical machine. Codex exec did not dispatch Stop; capture uses supported lifecycle events."
+    },
+    {
+      "id": "AGENT_IDENTITY",
+      "status": "PASS",
+      "evidence": ["verification/security/report.json", "verification/identity/report.json", "docs/security.md", "deploy/Caddyfile"],
+      "detail": "Security and identity tests pass for server-bound actors, spoof rejection, two independently scoped HTTP clients, cross-workspace denial, concurrent provisioning, creation/revocation/rotation/authorization-failure audit, atomic rotate-and-reissue with immediate old-token invalidation and scope narrowing, and the supported loopback-upstream Caddy HTTPS configuration."
+    },
+    {
+      "id": "DREAM_ENGINE",
+      "status": "FAIL",
+      "evidence": ["verification/dream/report.json", "verification/dream/labeled-scenarios.json", "verification/dream/real-model-evaluation.json", "tests/dream/retrieval.test.ts", "tests/dream/dream.test.ts"],
+      "detail": "Real Claude evaluation: micro quality 0.833, deep 0.667, strategic 1.000; threshold >=0.75 per mode fails on deep. Evidence grounding 1.00; real Knowledge Critic rejected 3/3 adversarial cases and accepted 1/1 supported case. Deterministic accepted/rejected feedback ranking and optional semantic retrieval mechanics pass. No production embedding backend was configured for real semantic comparison."
+    }
+  ]
+}

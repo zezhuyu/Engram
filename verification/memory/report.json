@@ -1,0 +1,240 @@
+{
+  "suite": "memory",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T03:15:46.077Z",
+  "command": "node --test --test-reporter=tap dist/tests/memory/capture.test.js dist/tests/memory/recall.test.js dist/tests/memory/real-host.test.js dist/tests/memory/remote-real-host.test.js",
+  "durationMs": 64111,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)"
+  },
+  "counts": {
+    "pass": 19,
+    "fail": 0,
+    "skipped": 3,
+    "total": 22
+  },
+  "tests": [
+    {
+      "name": "adapter install is consented, idempotent, merge-only and fully reversible; foreign hooks and backups are preserved",
+      "status": "PASS"
+    },
+    {
+      "name": "adapter refuses unparseable host settings, creates and removes its own file, and reports honest coverage for Codex",
+      "status": "PASS"
+    },
+    {
+      "name": "recorded Claude Code payloads flow hook -> spool -> drain -> Markdown evidence, idempotently, with a closed session and a queued retrospective",
+      "status": "PASS"
+    },
+    {
+      "name": "secrets are redacted before anything is queued or stored; hidden reasoning is never persisted; excluded content is never recorded",
+      "status": "PASS"
+    },
+    {
+      "name": "forged or unauthorized events are rejected and persist nothing: wrong principal, workspace, collection, registration, type, timestamp, ACL",
+      "status": "PASS"
+    },
+    {
+      "name": "overflow policy: a full queue evicts or drops low-value events first, counts what it dropped, and never blocks",
+      "status": "PASS"
+    },
+    {
+      "name": "fail-open: a missing, read-only, locked or corrupt vault never makes the hook fail or print; recording resumes when the vault is healthy",
+      "status": "PASS"
+    },
+    {
+      "name": "capture, drain and recall make no model call and need no provider",
+      "status": "PASS"
+    },
+    {
+      "name": "abandoned sessions are closed as INCOMPLETE with a clearly labeled partial retrospective; active ones are left alone",
+      "status": "PASS"
+    },
+    {
+      "name": "a later session of another authorized principal retrieves the record on demand; unauthorized principals get nothing",
+      "status": "PASS"
+    },
+    {
+      "name": "shutdown coordination: a detached drain started by session.end is observable, and a vault is only removed after it finishes",
+      "status": "PASS"
+    },
+    {
+      "name": "a drain also picks up events that were enqueued while it was working (their own drain found the lock held)",
+      "status": "PASS"
+    },
+    {
+      "name": "real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
+      "status": "SKIPPED"
+    },
+    {
+      "name": "real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
+      "status": "SKIPPED"
+    },
+    {
+      "name": "recent: newest first by event time with id tie-break, exact cursor paging, scope isolation and an upper time bound",
+      "status": "PASS"
+    },
+    {
+      "name": "time_range and timeline: timezone semantics, ascending order, evidence references preserved",
+      "status": "PASS"
+    },
+    {
+      "name": "progressive disclosure: index -> snippet -> timeline -> full fetch keep one identity, and token budgets are enforced with continuation",
+      "status": "PASS"
+    },
+    {
+      "name": "modes: grep, regex, keyword, links and auto work without a model; semantic and hybrid are explicitly unavailable; identity cannot be asserted",
+      "status": "PASS"
+    },
+    {
+      "name": "authorization: readers see only granted scopes, grants and revocations apply immediately, MCP rejects asserted identities",
+      "status": "PASS"
+    },
+    {
+      "name": "SQLite and filesystem recall agree, new commits are visible before any reindex, and a damaged index only degrades",
+      "status": "PASS"
+    },
+    {
+      "name": "CLI: mdb memory recent/search/timeline/get and capabilities work end to end as JSON",
+      "status": "PASS"
+    },
+    {
+      "name": "real Claude Code and Codex remote capture recover after HTTP outage and server restart",
+      "status": "SKIPPED"
+    }
+  ],
+  "cases": 19,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Independent authenticated agents cross-deliver passively across machines, including disconnect, retry, restart recovery and end-of-session retrospective/handoff",
+      "status": "NOT_RUN",
+      "reason": "Cross-machine transport: NOT_RUN.  Recent opt-in live run: PASS_WITH_LIMITATION, 1 passed/0 failed in 372963 ms. It used two actual CLIs and credentials through a stopped/restarted HTTP MCP server, including buffered replay, idempotency, SessionEnd and model handoff; limitation: clients/server were on one physical machine, so cross-machine transport remains NOT_RUN. Run MDB_REAL_REMOTE_HOST_TEST=1 with clients on separate machines for that evidence."
+    },
+    {
+      "item": "Codex Stop assistant-message lifecycle event",
+      "status": "NOT_RUN",
+      "reason": "The live Codex 0.161.0 non-interactive `codex exec` dispatched SessionStart, UserPromptSubmit, PostToolUse and SessionEnd, but did not dispatch Stop; assistant-message payload capture is therefore not evidenced for this invocation."
+    },
+    {
+      "item": "Other harnesses (OpenCode, Cursor, ...)",
+      "status": "UNSUPPORTED",
+      "reason": "No adapter. MCP, CLI and SDK remain available."
+    },
+    {
+      "item": "Semantic / hybrid recall",
+      "status": "UNSUPPORTED",
+      "reason": "No embedding provider or vector index; modes return CAPABILITY_UNAVAILABLE."
+    },
+    {
+      "item": "Recall benchmarks at 1k/10k/100k",
+      "status": "NOT_RUN",
+      "reason": "recent/timeline are manifest scans (O(authorized entries) in memory, no document reads); measured with the general benchmark in M5, not here."
+    },
+    {
+      "item": "Hook latency under a loaded host",
+      "status": "NOT_RUN",
+      "reason": "Fail-open and non-blocking behavior is tested (held writer lock, destroyed vault); per-hook wall time is dominated by Node start-up and was not benchmarked."
+    }
+  ],
+  "limitations": [
+    "Events can be lost if the spool overflows, the host is killed before a hook runs, or SessionEnd is not delivered; each case is counted or swept, never blocking the host.",
+    "Assistant replies and read-only tool output are not captured by default.",
+    "Secret redaction is pattern based; unknown secret formats need an --exclude pattern."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/memory/capture.test.js dist/tests/memory/recall.test.js dist/tests/memory/real-host.test.js dist/tests/memory/remote-real-host.test.js",
+  "caseDetails": [
+    {
+      "name": "memory/adapter-install-uninstall",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/adapter-safety-and-codex-coverage",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/recent-ordering-and-paging",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/time-range-and-timeline",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/progressive-disclosure-and-budgets",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/recall-modes",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/claude-payload-pipeline",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/redaction-reasoning-exclusion",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/recall-authorization",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/forged-events-rejected",
+      "status": "PASS",
+      "detail": {
+        "forgeries": 9
+      }
+    },
+    {
+      "name": "memory/recall-sqlite-parity",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/spool-overflow",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/cli-recall",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/fail-open-hook",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/no-model-calls",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/abandoned-session-sweep",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/cross-session-recall",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/shutdown-coordination",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/overlapping-drains",
+      "status": "PASS"
+    }
+  ]
+}

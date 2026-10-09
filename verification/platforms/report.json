@@ -1,0 +1,117 @@
+{
+  "suite": "platforms",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T03:17:23.953Z",
+  "command": "node --test --test-reporter=tap dist/tests/platform/environment.test.js",
+  "durationMs": 1038,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)"
+  },
+  "counts": {
+    "pass": 6,
+    "fail": 0,
+    "skipped": 0,
+    "total": 6
+  },
+  "tests": [
+    {
+      "name": "vault under a path with spaces, Unicode, emoji and punctuation works end to end (write, search, backup, restore)",
+      "status": "PASS"
+    },
+    {
+      "name": "maximum-length identifiers produce valid long paths",
+      "status": "PASS"
+    },
+    {
+      "name": "mixed-case identifiers that would collide on case-insensitive filesystems are rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "invalid UTF-8, NUL and control bytes: originals keep exact bytes; text paths never crash the parser",
+      "status": "PASS"
+    },
+    {
+      "name": "read-only vault: writes fail cleanly with no committed state, reads keep working",
+      "status": "PASS"
+    },
+    {
+      "name": "permission denied on the current-view directory after the commit point: commit stays durable and recover() repairs the view",
+      "status": "PASS"
+    }
+  ],
+  "cases": 6,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Linux (ext4) run of any suite",
+      "status": "NOT_RUN",
+      "reason": "Only macOS/APFS hardware was available. Linux is not a supported release platform until the reliability lane passes there."
+    },
+    {
+      "item": "Windows",
+      "status": "UNSUPPORTED",
+      "reason": "POSIX link/rename/fsync semantics and mkdir locking are assumed; never run."
+    },
+    {
+      "item": "Real disk-full (ENOSPC) on a full volume",
+      "status": "NOT_RUN",
+      "reason": "ENOSPC is injected at stages; no small tmpfs/ramdisk was filled."
+    },
+    {
+      "item": "Network filesystems (NFS, SMB), multi-host shared volumes",
+      "status": "UNSUPPORTED",
+      "reason": "Not designed for or tested on shared volumes."
+    },
+    {
+      "item": "Node versions other than the one run",
+      "status": "NOT_RUN",
+      "reason": "Engines field requires >=22.13; only the version in the environment block was run."
+    }
+  ],
+  "limitations": [
+    "Case-insensitive filesystem behaviour is verified by rejecting identifiers that differ only by case, on a case-insensitive APFS volume; a case-sensitive volume was not run."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/platform/environment.test.js",
+  "caseDetails": [
+    {
+      "name": "platform/unicode-and-space-paths",
+      "status": "PASS"
+    },
+    {
+      "name": "platform/long-identifiers",
+      "status": "PASS",
+      "detail": {
+        "pathLength": 335
+      }
+    },
+    {
+      "name": "platform/case-collisions",
+      "status": "PASS"
+    },
+    {
+      "name": "platform/invalid-bytes",
+      "status": "PASS"
+    },
+    {
+      "name": "platform/read-only-locks-dir",
+      "status": "PASS"
+    },
+    {
+      "name": "platform/permission-denied-view-dir",
+      "status": "PASS"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Creator Batch Wiki"
+  short_description: "Batch ingest creator homepage content into raw/wiki"
+  default_prompt: "Use $creator-batch-wiki to ingest a YouTube/Rednote creator homepage into wiki source pages."

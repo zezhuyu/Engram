@@ -1,0 +1,4 @@
+interface:
+  display_name: "Convert to Markdown"
+  short_description: "Convert PDFs and HTML pages into clean markdown"
+  default_prompt: "Use $convert-to-markdown to turn a PDF or HTML file into markdown."

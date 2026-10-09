@@ -1,0 +1,44 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  linux-gnu:
+    name: Linux (GNU coreutils, gawk, GNU sed)
+    runs-on: ubuntu-24.04
+    env: { MDB_REQUIRE_GNU: '1', CI: '1' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: sudo apt-get update && sudo apt-get install -y gawk jq ripgrep
+      - run: sed --version | head -1 && gawk --version | head -1 && sort --version | head -1
+      - run: npm ci
+      - run: npm run verify            # lint, typecheck, fast tests
+      - run: npm run verify:unix       # includes GNU-only parity cases and sandboxed awk/sed execution (MDB_REQUIRE_GNU=1 fails if the tools are missing)
+      - run: npm run verify:query
+      - run: npm run verify:search
+      - run: npm run verify:memory
+      - run: npm run verify:security
+      - run: npm run verify:recovery
+      - run: npm run verify:platform
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux-verification, path: 'verification/*/report.*' }
+  linux-reliability:
+    name: Linux ACID and isolation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run verify:acid
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux-acid, path: 'verification/acid/report.*' }
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run verify && npm run verify:unix && npm run verify:query

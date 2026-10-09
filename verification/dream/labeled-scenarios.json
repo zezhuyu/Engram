@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "description": "Synthetic labeled scenarios for independent Dream-mode and Knowledge Critic evaluation; fixed before the real-model run.",
+  "thresholds": {
+    "meanQualityPerMode": 0.75,
+    "minimumEvidenceGrounding": 1.0,
+    "criticAdversarialRejectionRecall": 0.8,
+    "criticSupportedAcceptanceRate": 0.8,
+    "feedbackDeterministicInfluence": 1.0
+  },
+  "qualityRubric": {
+    "novelty": "1 if candidate adds a connection not stated verbatim by any cited source; 0 if it only restates one source.",
+    "relevance": "1 if candidate satisfies the labeled mode goal (micro local composition, deep cross-domain mechanism, strategic dashboard goal); otherwise 0.",
+    "feasibility": "1 if proposed validation/testPlan specifies an observable, bounded experiment; otherwise 0.",
+    "evidenceGrounding": "1 only when every evidence URI/revision is supplied and each verbatim span occurs in that exact source; otherwise 0.",
+    "contradictions": "1 if the candidate cites both cache claims and preserves their conflict as uncertainty; 0 if it asserts either universal rule as fact.",
+    "hallucinations": "1 if no factual claim exceeds its cited source or is presented as verified knowledge; otherwise 0."
+  },
+  "scenarios": [
+    { "id": "strategic-personal-dashboard", "mode": "strategic", "evidence": ["goal", "jsDash", "vizDash"], "goal": "Offer a feasible, cited option for the accepted personal metrics dashboard goal." },
+    { "id": "micro-api-dashboard", "mode": "micro", "evidence": ["pyApi", "jsDash"], "goal": "A testable local composition between a JSON API and a dashboard." },
+    { "id": "deep-cache-contradiction", "mode": "deep", "evidence": ["claimAll", "claimNone"], "goal": "Surface incompatible universal cache claims as unresolved contradiction." }
+  ],
+  "criticCases": [
+    { "id": "unsupported-encryption", "expected": "reject", "proposal": "Every API response is encrypted at rest with AES-256.", "evidence": ["pyApi"] },
+    { "id": "duplicate-dashboard-fact", "expected": "reject", "proposal": "Browser dashboards consume JSON through fetch and render widgets.", "evidence": ["jsDash"] },
+    { "id": "contradiction-as-certainty", "expected": "reject", "proposal": "Caching every API response is always safe and never leaks authenticated data.", "evidence": ["claimAll", "claimNone"] },
+    { "id": "supported-composition", "expected": "accept", "proposal": "A browser dashboard can use the Python service's JSON response to render widgets.", "evidence": ["pyApi", "jsDash"] }
+  ]
+}

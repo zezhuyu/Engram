@@ -1,0 +1,231 @@
+{
+  "status": "FAIL",
+  "command": "MDB_TEST_PROVIDER=claude-cli npm run eval:dream",
+  "provider": "claude-cli",
+  "model": null,
+  "corpus": "verification/dream/labeled-scenarios.json",
+  "thresholds": {
+    "meanQualityPerMode": 0.75,
+    "minimumEvidenceGrounding": 1,
+    "criticAdversarialRejectionRecall": 0.8,
+    "criticSupportedAcceptanceRate": 0.8,
+    "feedbackDeterministicInfluence": 1
+  },
+  "counts": {
+    "dreamScenarios": 3,
+    "criticCases": 4
+  },
+  "metrics": {
+    "modes": {
+      "micro": {
+        "count": 1,
+        "meanQuality": 0.8333333333333334
+      },
+      "deep": {
+        "count": 1,
+        "meanQuality": 0.6666666666666666
+      },
+      "strategic": {
+        "count": 1,
+        "meanQuality": 1
+      }
+    },
+    "meanQualityPerModePass": false,
+    "minimumEvidenceGrounding": 1,
+    "criticAdversarialRejectionRecall": 1,
+    "criticSupportedAcceptanceRate": 1,
+    "feedbackDeterministicInfluence": 1,
+    "feedbackEvidence": "tests/dream/dream.test.ts: feedback drives status and ranking; rejected ideas do not come back without new evidence; repetition never validates"
+  },
+  "scenarios": [
+    {
+      "id": "strategic-personal-dashboard",
+      "mode": "strategic",
+      "jobStatus": "complete",
+      "candidateCount": 1,
+      "selectedByLabeledEvidence": true,
+      "expectedEvidence": [
+        "mdb://profile/objects/obj_mv0de4f0_e89a0ebdfac4441a8e47071707e818c0\u0000rev_mv0de4f0_3743801d79ef4f8b82eead03310dda33",
+        "mdb://wiki/objects/obj_mv0de410_f9b50c1a8b0140aab4d76471c89ebeed\u0000rev_mv0de410_444dc228a1ed4caebc8f059c52e660d2",
+        "mdb://wiki/objects/obj_mv0de44u_eb5d08ad652944c98653bdb958357c7a\u0000rev_mv0de44u_b7599414c2ce45a680fced4a5fb7578f"
+      ],
+      "proposalStatus": "pending",
+      "candidate": {
+        "title": "Ship a minimal browser dashboard that fetches one JSON file of a few key side-project metrics",
+        "body": "**Connection (hypothesis):** The stated goal is to *\"Ship a personal metrics dashboard for my side projects\"*. Two wiki pages supply complementary pieces: a design principle (*\"Good dashboards show a few key metrics with clear context\"*) and an implementation pattern (*\"Browser dashboards consume JSON through fetch and render widgets\"*).\n\n**Option:** Combine them into a deliberately small first version. One static JSON file holds a few key metrics per side project, each with a short context field (e.g., a prior value or target). One browser page fetches that file and renders one widget per metric.\n\n**Gap it fills:** The supplied material covers *what* a good dashboard shows and *how* a browser dashboard gets data. Nothing covers the shipping scope for *personal side projects*. A JSON-file-first scope narrows that gap: what to include, and when version one counts as shipped.\n\n**Cheapest experiment:** Hand-write a JSON file with at most 3 metrics for one side project and build a single page that fetches and renders it. Then check whether the page actually gets looked at and whether the metrics are understandable without extra explanation.\n\n**Hypothesis caveat:** Neither page says how metrics are collected from side projects, so data sourcing is an open question this option postpones rather than solves.",
+        "evidence": [
+          {
+            "uri": "mdb://profile/objects/obj_mv0de4f0_e89a0ebdfac4441a8e47071707e818c0",
+            "revisionId": "rev_mv0de4f0_3743801d79ef4f8b82eead03310dda33",
+            "span": "Ship a personal metrics dashboard for my side projects"
+          },
+          {
+            "uri": "mdb://wiki/objects/obj_mv0de44u_eb5d08ad652944c98653bdb958357c7a",
+            "revisionId": "rev_mv0de44u_b7599414c2ce45a680fced4a5fb7578f",
+            "span": "Good dashboards show a few key metrics with clear context."
+          },
+          {
+            "uri": "mdb://wiki/objects/obj_mv0de410_f9b50c1a8b0140aab4d76471c89ebeed",
+            "revisionId": "rev_mv0de410_444dc228a1ed4caebc8f059c52e660d2",
+            "span": "Browser dashboards consume JSON through fetch and render widgets."
+          }
+        ],
+        "critic": {
+          "verdict": "review_required",
+          "rationale": "Goal-directed options are reviewed before they are acted on.",
+          "by": "deterministic"
+        },
+        "flags": [
+          "high_impact",
+          "thin_evidence",
+          "proposer_specifics_not_in_sources"
+        ],
+        "speculativeStatus": "hypothesis"
+      },
+      "dimensions": {
+        "novelty": true,
+        "relevance": true,
+        "feasibility": true,
+        "evidenceGrounding": true,
+        "contradictionHandling": true,
+        "hallucinationFree": true
+      },
+      "quality": 1
+    },
+    {
+      "id": "micro-api-dashboard",
+      "mode": "micro",
+      "jobStatus": "complete",
+      "candidateCount": 1,
+      "selectedByLabeledEvidence": true,
+      "expectedEvidence": [
+        "mdb://wiki/objects/obj_mv0de3z1_db5496ff385f492ab4b60dcc791e1474\u0000rev_mv0de3z1_166ae59de571491db0d34ff00ed95ac0",
+        "mdb://wiki/objects/obj_mv0de410_f9b50c1a8b0140aab4d76471c89ebeed\u0000rev_mv0de410_444dc228a1ed4caebc8f059c52e660d2"
+      ],
+      "proposalStatus": "pending",
+      "candidate": {
+        "title": "Compose a FastAPI JSON endpoint with a fetch-based browser dashboard widget",
+        "body": "**Hypothesis (composition):** The two notes describe complementary halves of one pipeline. One note says Python services built with FastAPI return structured JSON documents over HTTP. The other says browser dashboards fetch JSON and render widgets. JSON is the shared interface, so a single FastAPI endpoint that returns side-project metrics could feed one dashboard widget directly. No intermediate format would be needed.\n\nThis would be a small, local slice of the stated goal, a personal metrics dashboard for side projects. It does not claim anything about scaling, auth, or deployment. The supplied notes do not cover those topics.\n\n**Smallest test:** one endpoint returns one metric object, and one widget renders it after a fetch call.",
+        "evidence": [
+          {
+            "uri": "mdb://wiki/objects/obj_mv0de3z1_db5496ff385f492ab4b60dcc791e1474",
+            "revisionId": "rev_mv0de3z1_166ae59de571491db0d34ff00ed95ac0",
+            "span": "Python services expose JSON over HTTP using FastAPI. Responses are structured as JSON documents."
+          },
+          {
+            "uri": "mdb://wiki/objects/obj_mv0de410_f9b50c1a8b0140aab4d76471c89ebeed",
+            "revisionId": "rev_mv0de410_444dc228a1ed4caebc8f059c52e660d2",
+            "span": "Browser dashboards consume JSON through fetch and render widgets."
+          }
+        ],
+        "critic": {
+          "verdict": "accept",
+          "rationale": "Passed the deterministic checks; still a hypothesis awaiting review.",
+          "by": "deterministic"
+        },
+        "flags": [
+          "goal_context_not_in_evidence",
+          "modest_novelty",
+          "cors_unaddressed"
+        ],
+        "speculativeStatus": "hypothesis"
+      },
+      "dimensions": {
+        "novelty": true,
+        "relevance": true,
+        "feasibility": false,
+        "evidenceGrounding": true,
+        "contradictionHandling": true,
+        "hallucinationFree": true
+      },
+      "quality": 0.8333333333333334
+    },
+    {
+      "id": "deep-cache-contradiction",
+      "mode": "deep",
+      "jobStatus": "complete",
+      "candidateCount": 1,
+      "selectedByLabeledEvidence": true,
+      "expectedEvidence": [
+        "mdb://wiki/objects/obj_mv0de4az_9f60c96925164ca0a4d061d9948e7e24\u0000rev_mv0de4az_b8941719b9c84f1fb797c9a901670391",
+        "mdb://wiki/objects/obj_mv0de4c6_98e48fed2b974880a1f6eb195401fc14\u0000rev_mv0de4c6_aaa70299e39e47b0a0ecca1ea4a1f2a4"
+      ],
+      "proposalStatus": "pending",
+      "candidate": {
+        "title": "Unresolved contradiction: 'cache every API response is always safe' vs 'authenticated responses must not be cached'",
+        "body": "Two wiki findings make incompatible universal claims about API response caching.\n\n- **Claim A** (\"Caching every API response\"): caching *all* API responses is *always* safe and speeds everything up.\n- **Claim B** (\"Authenticated responses must not be cached\"): caching *authenticated* API responses is unsafe and leaks data between users.\n\nAuthenticated responses are a subset of \"all API responses\". So both claims cannot hold at once. If B is true, A's \"always safe\" is false for at least that subset. If A is true, B's leak claim is false.\n\nThe supplied evidence does not say which claim is correct, or under what conditions each applies. **This contradiction is unresolved.**\n\n**Hypothesis (not established by the sources):** the two claims may be scoped differently in practice. For example, A may have been written with unauthenticated or public endpoints in mind. That is an extrapolation and would need checking.\n\nThis matters for the goal of shipping a personal metrics dashboard, if the dashboard serves authenticated API responses through any cache layer. Until the conflict is checked, Claim A should not be relied on as a blanket policy.",
+        "evidence": [
+          {
+            "uri": "mdb://wiki/objects/obj_mv0de4c6_98e48fed2b974880a1f6eb195401fc14",
+            "revisionId": "rev_mv0de4c6_aaa70299e39e47b0a0ecca1ea4a1f2a4",
+            "span": "Caching authenticated API responses is unsafe and leaks data between users."
+          },
+          {
+            "uri": "mdb://wiki/objects/obj_mv0de4az_9f60c96925164ca0a4d061d9948e7e24",
+            "revisionId": "rev_mv0de4az_b8941719b9c84f1fb797c9a901670391",
+            "span": "Caching all API responses is always safe and speeds everything up."
+          }
+        ],
+        "critic": {
+          "verdict": "accept",
+          "rationale": "Passed the deterministic checks; still a hypothesis awaiting review.",
+          "by": "deterministic"
+        },
+        "flags": [
+          "contradiction_surfaced",
+          "hypothesis_labeled",
+          "goal_context_not_in_evidence"
+        ],
+        "speculativeStatus": "hypothesis"
+      },
+      "dimensions": {
+        "novelty": true,
+        "relevance": true,
+        "feasibility": false,
+        "evidenceGrounding": true,
+        "contradictionHandling": true,
+        "hallucinationFree": false
+      },
+      "quality": 0.6666666666666666
+    }
+  ],
+  "criticCases": [
+    {
+      "id": "unsupported-encryption",
+      "expected": "reject",
+      "verdict": "reject",
+      "rationale": "The claim that every API response is encrypted at rest with AES-256 is not supported by the cited document. The evidence only states that Python services expose JSON over HTTP using FastAPI and that responses are structured as JSON documents; it says nothing about encryption, storage at rest, or AES-256. The proposal presents an unsupported factual claim as a discovery.",
+      "correct": true
+    },
+    {
+      "id": "duplicate-dashboard-fact",
+      "expected": "reject",
+      "verdict": "reject",
+      "rationale": "The proposal is a verbatim restatement of the single cited document ('Browser dashboards consume JSON through fetch and render widgets.'). Although the claim is supported by the evidence, it adds no novel composition, synthesis, or insight beyond what the source already states, so it duplicates the evidence rather than constituting a discovery.",
+      "correct": true
+    },
+    {
+      "id": "contradiction-as-certainty",
+      "expected": "reject",
+      "verdict": "reject",
+      "rationale": "The proposal asserts as certain fact that caching every API response is always safe and never leaks authenticated data. This directly contradicts the second cited document, which states that caching authenticated API responses is unsafe and leaks data between users. The first document supports only a generic 'always safe' claim and does not address authenticated data at all, so the added 'never leaks authenticated data' clause is unsupported. The proposal also ignores the conflict between the two sources rather than reconciling it, and it presents a contested claim as certainty instead of as a hypothesis. Beyond the 'never leaks' assertion, which the evidence contradicts, it adds no novel synthesis.",
+      "correct": true
+    },
+    {
+      "id": "supported-composition",
+      "expected": "accept",
+      "verdict": "accept",
+      "rationale": "The proposal combines the two cited documents into a new claim that neither states alone. Doc 1 says Python services expose JSON over HTTP via FastAPI. Doc 2 says browser dashboards consume JSON through fetch and render widgets. Putting them together, a dashboard can use a Python service's JSON response to render widgets. The claim says 'can', which is a modest capability statement that follows directly from both sources. It neither contradicts nor merely repeats either document. Unstated assumptions such as CORS and schema compatibility are implementation details and do not make the claim unsupported.",
+      "correct": true
+    }
+  ],
+  "retrieval": {
+    "lexicalGraph": "deterministic evidence: npm run verify:dream",
+    "semanticHybrid": "NOT_RUN; no configured real embedding provider/backend for this run; optional semantic retrieval remains additive"
+  },
+  "limitations": [
+    "Quality dimensions use the predeclared rubric with deterministic string/evidence checks; they are not a blinded expert panel.",
+    "Feedback influence is established by deterministic regression testing, not a multi-run model experiment.",
+    "No production embedding model was configured, so real semantic/hybrid quality comparison was not run."
+  ]
+}

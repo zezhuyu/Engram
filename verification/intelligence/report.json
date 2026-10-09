@@ -1,0 +1,240 @@
+{
+  "suite": "intelligence",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T03:14:27.050Z",
+  "command": "node --test --test-reporter=tap dist/tests/intelligence.test.js dist/tests/pipelines.test.js dist/tests/models.test.js dist/tests/agents.test.js dist/tests/skills.test.js dist/tests/real-model.test.js",
+  "durationMs": 8562,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)"
+  },
+  "counts": {
+    "pass": 39,
+    "fail": 0,
+    "skipped": 2,
+    "total": 41
+  },
+  "tests": [
+    {
+      "name": "claude CLI adapter: tool-free non-interactive flags, prompt on stdin only, isolated cwd, vault env scrubbed",
+      "status": "PASS"
+    },
+    {
+      "name": "codex CLI adapter: read-only sandbox, ephemeral, last-message file, prompt on stdin",
+      "status": "PASS"
+    },
+    {
+      "name": "agent CLI failures are sanitized, bounded and cancellable",
+      "status": "PASS"
+    },
+    {
+      "name": "backend selection: auto prefers claude then codex; env and config swap it; missing CLIs are reported, never executed by doctor",
+      "status": "PASS"
+    },
+    {
+      "name": "jobs run through the agent CLI; private workspace content is blocked unless the owner opts in",
+      "status": "PASS"
+    },
+    {
+      "name": "swapping the backend in mdb.yaml or by environment changes which agent serves `mdb intelligence run`, including an OpenAI-compatible API",
+      "status": "PASS"
+    },
+    {
+      "name": "default configuration uses a local agent CLI when one exists, and is deterministic-only when none does",
+      "status": "PASS"
+    },
+    {
+      "name": "OpenAI-compatible API: path, headers, body, content-part arrays and response_format fallback all behave",
+      "status": "PASS"
+    },
+    {
+      "name": "manual session capture redacts secrets, revisions close once, automatic capture is opt-in",
+      "status": "PASS"
+    },
+    {
+      "name": "source synthesis is review-gated, evidence checked, durable and deduplicated",
+      "status": "PASS"
+    },
+    {
+      "name": "malformed provider output enters dead letter without canonical writes",
+      "status": "PASS"
+    },
+    {
+      "name": "dream fixture composes multiple domains as hypothesis, private scope never reaches global context",
+      "status": "PASS"
+    },
+    {
+      "name": "actor isolation, unauthorized evidence and cross-scope sharing are rejected before proposal persistence",
+      "status": "PASS"
+    },
+    {
+      "name": "revoking an actor grant withdraws queued proposal metadata and blocks review",
+      "status": "PASS"
+    },
+    {
+      "name": "explicit compiler inputs reach model exclusively and inaccessible object IDs fail before execution",
+      "status": "PASS"
+    },
+    {
+      "name": "adapter sends bounded chat request with auth, delimits untrusted documents, and strictly parses the proposal",
+      "status": "PASS"
+    },
+    {
+      "name": "transient 5xx and 429 are retried with bounded attempts; success is returned",
+      "status": "PASS"
+    },
+    {
+      "name": "authentication failures are not retried and errors never disclose bodies, prompts or keys",
+      "status": "PASS"
+    },
+    {
+      "name": "timeouts and caller cancellation abort the request without hanging or retrying cancellation",
+      "status": "PASS"
+    },
+    {
+      "name": "malformed, over-wide, truncated and non-JSON model output is rejected with INVALID_MODEL_OUTPUT",
+      "status": "PASS"
+    },
+    {
+      "name": "input over the token budget fails before any network request",
+      "status": "PASS"
+    },
+    {
+      "name": "critic verdicts are parsed strictly and can only accept or reject",
+      "status": "PASS"
+    },
+    {
+      "name": "configuration: ollama is local and keyless, remote needs network consent and a key from the environment",
+      "status": "PASS"
+    },
+    {
+      "name": "profile: explicit preference outranks conflicting inference, newer explicit statement supersedes older inference, history is preserved",
+      "status": "PASS"
+    },
+    {
+      "name": "profile: sensitive inferred items need explicit confirmation, rejection stores nothing, model-declared sensitivity is honored",
+      "status": "PASS"
+    },
+    {
+      "name": "session end queues a retrospective over exactly that session; approval links evidence and originals stay untouched",
+      "status": "PASS"
+    },
+    {
+      "name": "session end without a provider queues work that is blocked, never a fabricated summary",
+      "status": "PASS"
+    },
+    {
+      "name": "critic: duplicate and over-certain dreams are rejected with preserved rationale; no second discovery is stored",
+      "status": "PASS"
+    },
+    {
+      "name": "critic: a model critic can reject or flag but never approve; critic outages do not block deterministic review",
+      "status": "PASS"
+    },
+    {
+      "name": "privacy: remote providers never receive private workspace content unless the vault explicitly allows it",
+      "status": "PASS"
+    },
+    {
+      "name": "budgets, strict schema, sanitized errors, retries and cancellation at the job level",
+      "status": "PASS"
+    },
+    {
+      "name": "configured Ollama-style endpoint drives a wiki job end to end; output is staged, validated and never written directly",
+      "status": "PASS"
+    },
+    {
+      "name": "real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
+      "status": "SKIPPED"
+    },
+    {
+      "name": "real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
+      "status": "SKIPPED"
+    },
+    {
+      "name": "registry exposes all 22 KB adapters and 12 MDB skills without legacy dispatch",
+      "status": "PASS"
+    },
+    {
+      "name": "upstream assets retain exact imported bytes",
+      "status": "PASS"
+    },
+    {
+      "name": "skills pass explicit scope to versioned APIs and refuse self-assigned identity",
+      "status": "PASS"
+    },
+    {
+      "name": "history imports need consent and configured capture source, never scan directories",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic skills queue proposals and promotion requires explicit sanitized review",
+      "status": "PASS"
+    },
+    {
+      "name": "export and critique expose authorized documents only and source instructions have no authority",
+      "status": "PASS"
+    },
+    {
+      "name": "real actor-bound adapters preserve source bytes, revision history and workspace isolation",
+      "status": "PASS"
+    }
+  ],
+  "cases": 0,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Real-model evaluation pack (20+ documents, 4+ domains, scored)",
+      "status": "NOT_RUN",
+      "reason": "Only a structural opt-in integration test exists (run once against local gpt-oss, see verification/phase-8.md). No evaluation pack, precision or groundedness metrics."
+    },
+    {
+      "item": "Wiki ingest→classify→extract→link→lint pipeline and incremental affected-page detection",
+      "status": "NOT_RUN",
+      "reason": "Only source→proposal→review→page is implemented."
+    },
+    {
+      "item": "Task-complete trigger and context handoff",
+      "status": "NOT_RUN",
+      "reason": "Session-end retrospective is implemented; no task-complete trigger or handoff document."
+    },
+    {
+      "item": "Distinct dream modes (micro/deep/strategic) with different candidate retrieval",
+      "status": "NOT_RUN",
+      "reason": "The mode is accepted as a flag but candidate selection and ranking are identical."
+    },
+    {
+      "item": "Dream validation loop and recursion budget tests",
+      "status": "NOT_RUN",
+      "reason": "No validation-outcome feedback and no test that dreams cannot breed on unvalidated dreams."
+    },
+    {
+      "item": "Worker: lease expiry with concurrent workers, index-job priority, replay of dead letters",
+      "status": "NOT_RUN",
+      "reason": "Jobs, retries, dead letters and idempotency are tested sequentially; concurrent-worker and priority behaviour are not."
+    },
+    {
+      "item": "Job idempotency key bound to source revision + pipeline version",
+      "status": "NOT_RUN",
+      "reason": "Jobs deduplicate by input digest, proposals by content fingerprint; pipeline version is not part of the key."
+    }
+  ],
+  "limitations": [
+    "The critic is deterministic (lexical duplicate, certainty, preference conflict, sensitivity keywords) plus an optional model critic that can only reject or flag.",
+    "Sensitive-content detection is a keyword heuristic."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/intelligence.test.js dist/tests/pipelines.test.js dist/tests/models.test.js dist/tests/agents.test.js dist/tests/skills.test.js dist/tests/real-model.test.js",
+  "caseDetails": []
+}

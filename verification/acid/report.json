@@ -1,0 +1,1619 @@
+{
+  "suite": "acid",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T03:13:09.097Z",
+  "command": "node --test --test-reporter=tap --test-concurrency=1 dist/tests/acid/fault-matrix.test.js dist/tests/isolation/multiprocess.test.js dist/tests/isolation/lock-fairness.test.js dist/tests/fuzz/state-machine.test.js dist/tests/storage.test.js dist/tests/durability.test.js",
+  "durationMs": 124020,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)"
+  },
+  "counts": {
+    "pass": 57,
+    "fail": 0,
+    "skipped": 0,
+    "total": 57
+  },
+  "tests": [
+    {
+      "name": "fault matrix: put and patch × every fault point × kill / EIO / ENOSPC recover atomically in a fresh process",
+      "status": "PASS"
+    },
+    {
+      "name": "fault matrix: delete (tombstone) and ingest (original + manifest) × every fault point × kill",
+      "status": "PASS"
+    },
+    {
+      "name": "torn journal tail (simulated partial write) is discarded, committed records survive, and writing continues",
+      "status": "PASS"
+    },
+    {
+      "name": "repeated kills during recovery itself still converge",
+      "status": "PASS"
+    },
+    {
+      "name": "view replacement denied (EACCES) after the commit point: the commit stays durable and the view is rebuilt",
+      "status": "PASS"
+    },
+    {
+      "name": "pre-authorization failure and rejected input leave no state behind",
+      "status": "PASS"
+    },
+    {
+      "name": "actual process death recovers committed journal and removes dead writer lock",
+      "status": "PASS"
+    },
+    {
+      "name": "independent processes serialize writes and optimistic conflict does not erase inputs",
+      "status": "PASS"
+    },
+    {
+      "name": "filesystem retrieval survives index removal and does not require rg or sqlite",
+      "status": "PASS"
+    },
+    {
+      "name": "future object-store contract supports immutable writes and CAS without rename",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 1000: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 8919: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 16838: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 24757: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 32676: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 40595: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 48514: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 56433: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 64352: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 72271: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 80190: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 88109: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 96028: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 103947: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 111866: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 119785: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 127704: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 135623: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 143542: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 151461: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 159380: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 167299: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 175218: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "state machine seed 183137: invariants hold after every step and restart",
+      "status": "PASS"
+    },
+    {
+      "name": "60 contenders: every one acquires, in FIFO order of arrival, with bounded waiting",
+      "status": "PASS"
+    },
+    {
+      "name": "CPU oversubscription (2x cores of busy processes plus 40 contenders): zero lock timeouts",
+      "status": "PASS"
+    },
+    {
+      "name": "a waiter killed with SIGKILL, and a frozen (SIGSTOP) waiter, do not block the queue",
+      "status": "PASS"
+    },
+    {
+      "name": "a lock holder killed mid-critical-section is reclaimed and the queue continues",
+      "status": "PASS"
+    },
+    {
+      "name": "10 independent processes: no lost acknowledged write, unique IDs, ordered revisions, zero lock timeouts",
+      "status": "PASS"
+    },
+    {
+      "name": "50 independent processes: no lost acknowledged write, unique IDs, ordered revisions, zero lock timeouts",
+      "status": "PASS"
+    },
+    {
+      "name": "read-modify-write on one shared object with retry: every acknowledged update survives (no silent lost update)",
+      "status": "PASS"
+    },
+    {
+      "name": "same expected revision from 8 processes: exactly one winner, the rest CONFLICT, and no input is lost from history",
+      "status": "PASS"
+    },
+    {
+      "name": "concurrent readers never observe a torn document or half-written frontmatter",
+      "status": "PASS"
+    },
+    {
+      "name": "stale lock recovery: killed holder, lock without owner file, torn owner file; live holder still excludes",
+      "status": "PASS"
+    },
+    {
+      "name": "symlink swap race: concurrent directory↔symlink flipping never makes a write land outside the vault",
+      "status": "PASS"
+    },
+    {
+      "name": "cross-scope operations: unauthorized access fails without mutation, promotion is one atomic commit that never touches the source",
+      "status": "PASS"
+    },
+    {
+      "name": "accepted revisions survive updates, restore, tombstone and rebuild",
+      "status": "PASS"
+    },
+    {
+      "name": "two writers with same expected revision produce one conflict",
+      "status": "PASS"
+    },
+    {
+      "name": "crashes before journal create orphans, crashes after journal recover committed view",
+      "status": "PASS"
+    },
+    {
+      "name": "torn last journal record is ignored and removed before next commit",
+      "status": "PASS"
+    },
+    {
+      "name": "import preserves binary and text bytes, source manifest rejects mutation",
+      "status": "PASS"
+    },
+    {
+      "name": "external edits are versioned and stale editors preserved in quarantine",
+      "status": "PASS"
+    },
+    {
+      "name": "backup restores revisions and purge erases originals, history and caches",
+      "status": "PASS"
+    },
+    {
+      "name": "local object store immutable put and pointers reject traversal and symlinks",
+      "status": "PASS"
+    },
+    {
+      "name": "named root profiles are versioned and cannot be replaced by a second object",
+      "status": "PASS"
+    },
+    {
+      "name": "watcher and periodic reconciliation import external current-view edits",
+      "status": "PASS"
+    },
+    {
+      "name": "doctor reports runtime SQLite and unavailable model dependent capabilities honestly",
+      "status": "PASS"
+    }
+  ],
+  "cases": 160,
+  "caseFailures": [],
+  "seeds": [
+    1000,
+    8919,
+    16838,
+    24757,
+    32676,
+    40595,
+    48514,
+    56433,
+    64352,
+    72271,
+    80190,
+    88109,
+    96028,
+    103947,
+    111866,
+    119785,
+    127704,
+    135623,
+    143542,
+    151461,
+    159380,
+    167299,
+    175218,
+    183137,
+    4010,
+    4050
+  ],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Power-cut durability (hardware/VM)",
+      "status": "NOT_RUN",
+      "reason": "SIGKILL keeps the OS page cache, so it cannot prove fsync ordering. The protocol (file fsync, link, directory fsync incl. newly created parents, journal fsync) is implemented and inspected, but no power cut was performed."
+    },
+    {
+      "item": "fsync failure semantics (EIO from fsync itself)",
+      "status": "NOT_RUN",
+      "reason": "EIO/ENOSPC are injected at named stages around the fsync points, not returned by a failing fsync syscall (needs an injectable filesystem adapter or dm-error/FUSE)."
+    },
+    {
+      "item": "Real short writes and disk-full ENOSPC",
+      "status": "UNSUPPORTED",
+      "reason": "Simulated by stage faults and by appending partial journal records; no fault-injecting filesystem was used."
+    },
+    {
+      "item": "Per-workspace write parallelism",
+      "status": "UNSUPPORTED",
+      "reason": "A single vault-wide writer lock serializes all writes. Independent workspaces do not run in parallel (documented design limit)."
+    },
+    {
+      "item": "100-process mixed workload",
+      "status": "NOT_RUN",
+      "reason": "10 and 50 process runs executed; 100 not run."
+    },
+    {
+      "item": "Linearizability history checker",
+      "status": "NOT_RUN",
+      "reason": "Histories are recorded and checked for lost updates, conflicts and revision order; no real-time-order checker is claimed. Isolation claim: serialized writes per vault (single lock) with optimistic expected-revision conflict detection; reads are lock-free and see whole committed revisions."
+    },
+    {
+      "item": "Linux ext4 run",
+      "status": "NOT_RUN",
+      "reason": "Only macOS/APFS was available."
+    },
+    {
+      "item": "Network/shared filesystems, multi-host",
+      "status": "UNSUPPORTED",
+      "reason": "mkdir-based lock and link/rename semantics are only assumed on local filesystems."
+    }
+  ],
+  "limitations": [
+    "Commit point: the journal record is appended and fsynced. Unacknowledged transactions that passed the commit point may appear after recovery (tested and documented); transactions before it never do.",
+    "Orphan revisions from pre-commit crashes are reported by recover() and retained, never presented as commits.",
+    "Fuzz uses an in-repo seeded PRNG rather than fast-check to avoid a new dependency; failures print a replayable seed.",
+    "The symlink-swap race is narrowed (verified-open of temp files) but not eliminated: Node has no openat()."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap --test-concurrency=1 dist/tests/acid/fault-matrix.test.js dist/tests/isolation/multiprocess.test.js dist/tests/isolation/lock-fairness.test.js dist/tests/fuzz/state-machine.test.js dist/tests/storage.test.js dist/tests/durability.test.js",
+  "caseDetails": [
+    {
+      "name": "acid-fault-matrix/put/commit.before_revision/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/commit.before_revision/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/commit.before_revision/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.temp_written/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.temp_synced/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.temp_written/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.temp_synced/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.temp_synced/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.after_link/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.after_link/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.after_link/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.after_dirsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.after_dirsync/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/revision.after_dirsync/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.before_append/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.before_append/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.before_append/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.after_append_before_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.after_append_before_fsync/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.after_append_before_fsync/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.after_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.after_fsync/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/journal.after_fsync/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/head.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/head.before_replace/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/head.before_replace/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.temp_written/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.temp_written/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.before_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.before_rename/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.before_rename/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.after_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.after_rename/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/atomic.after_rename/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/view.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/view.before_replace/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/view.before_replace/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/view.after_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/view.after_replace/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/view.after_replace/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/commit.before_ack/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/commit.before_ack/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/put/commit.before_ack/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/commit.before_revision/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/commit.before_revision/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/commit.before_revision/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.temp_written/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.temp_written/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.temp_synced/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.temp_synced/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.temp_synced/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.after_link/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.after_link/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.after_link/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.after_dirsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.after_dirsync/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/revision.after_dirsync/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.before_append/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.before_append/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.before_append/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.after_append_before_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.after_append_before_fsync/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.after_append_before_fsync/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.after_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.after_fsync/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/journal.after_fsync/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/head.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/head.before_replace/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/head.before_replace/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.temp_written/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.temp_written/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.before_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.before_rename/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.before_rename/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.after_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.after_rename/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/atomic.after_rename/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/view.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/view.before_replace/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/view.before_replace/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/view.after_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/view.after_replace/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/view.after_replace/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/commit.before_ack/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/commit.before_ack/throw-eio",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/patch/commit.before_ack/throw-enospc",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/revision.after_link/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/commit.before_revision/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/revision.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/revision.temp_synced/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/journal.before_append/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/revision.after_dirsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/journal.after_append_before_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/journal.after_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/head.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/atomic.before_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/atomic.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/atomic.after_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/view.after_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/view.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/delete/commit.before_ack/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/commit.before_revision/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/revision.temp_synced/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/revision.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/revision.after_dirsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/revision.after_link/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/journal.before_append/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "PRE",
+        "visible": 0
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/journal.after_append_before_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "AMBIG",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/head.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/journal.after_fsync/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/atomic.temp_written/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/atomic.before_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/atomic.after_rename/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/view.before_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/view.after_replace/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/ingest/commit.before_ack/kill",
+      "status": "PASS",
+      "detail": {
+        "class": "POST",
+        "visible": 1
+      }
+    },
+    {
+      "name": "acid-fault-matrix/torn-journal-tail",
+      "status": "PASS"
+    },
+    {
+      "name": "acid-fault-matrix/kill-during-recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "acid-fault-matrix/view-eacces",
+      "status": "PASS"
+    },
+    {
+      "name": "acid-fault-matrix/rejected-before-mutation",
+      "status": "PASS"
+    },
+    {
+      "name": "fuzz-state-machine/seed-1000",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 11,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-8919",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 13,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-16838",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 14,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-24757",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 12,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-32676",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 7,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-40595",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 11,
+        "purged": 3
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-48514",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 11,
+        "purged": 3
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-56433",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 10,
+        "purged": 3
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-64352",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 11,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-72271",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 13,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-80190",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 15,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-88109",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 12,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-96028",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 16,
+        "purged": 2
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-103947",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 13,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-111866",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 8,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-119785",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 13,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-127704",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 10,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-135623",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 8,
+        "purged": 2
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-143542",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 13,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-151461",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 13,
+        "purged": 2
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-159380",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 10,
+        "purged": 3
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-167299",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 11,
+        "purged": 1
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-175218",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 12,
+        "purged": 0
+      }
+    },
+    {
+      "name": "fuzz-state-machine/seed-183137",
+      "status": "PASS",
+      "detail": {
+        "steps": 45,
+        "objects": 10,
+        "purged": 2
+      }
+    },
+    {
+      "name": "isolation/lock-fifo-60",
+      "status": "PASS",
+      "detail": {
+        "maxWaitMs": 1061,
+        "p50WaitMs": 284
+      }
+    },
+    {
+      "name": "isolation/lock-oversubscribed",
+      "status": "PASS",
+      "detail": {
+        "contenders": 40,
+        "burners": 24
+      }
+    },
+    {
+      "name": "isolation/lock-dead-and-frozen-waiters",
+      "status": "PASS",
+      "detail": {
+        "waitedMs": 1814
+      }
+    },
+    {
+      "name": "isolation/lock-killed-holder-with-queue",
+      "status": "PASS"
+    },
+    {
+      "name": "isolation/10-process-mixed",
+      "status": "PASS",
+      "detail": {
+        "operations": 60,
+        "writes": 49,
+        "p50Ms": 426,
+        "p95Ms": 623,
+        "maxMs": 658
+      }
+    },
+    {
+      "name": "isolation/50-process-mixed",
+      "status": "PASS",
+      "detail": {
+        "operations": 300,
+        "writes": 259,
+        "p50Ms": 2377,
+        "p95Ms": 2713,
+        "maxMs": 2781
+      }
+    },
+    {
+      "name": "isolation/shared-object-rmw",
+      "status": "PASS",
+      "detail": {
+        "writers": 12,
+        "conflictsRetried": 63
+      }
+    },
+    {
+      "name": "isolation/same-revision-race",
+      "status": "PASS"
+    },
+    {
+      "name": "isolation/no-torn-reads",
+      "status": "PASS",
+      "detail": {
+        "reader": "READS 11498 VIEWS 11498 BAD 0"
+      }
+    },
+    {
+      "name": "isolation/stale-lock-recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "isolation/symlink-swap-race",
+      "status": "PASS",
+      "detail": {
+        "writer": "OK 1 REJECTED 2471",
+        "strayEmptyFilesOutside": 0,
+        "note": "Node has no openat(); the TOCTOU window is narrowed, not closed. Residual: empty stray temp files."
+      }
+    },
+    {
+      "name": "isolation/cross-scope-atomicity",
+      "status": "PASS",
+      "detail": {
+        "note": "A single logical operation only ever commits to one scope; multi-workspace transactions are not offered (API takes one scope)."
+      }
+    }
+  ]
+}
