@@ -1,29 +1,78 @@
 {
   "workstream": "Power-Loss Durability",
   "branch": "durability/power-loss",
+  "acceptedImplementationCommit": "f36d14d",
   "status": "INCOMPLETE",
   "results": {
     "deterministic_fault_and_process_crash_recovery": { "status": "PASS", "tests": 55, "passed": 55, "failed": 0, "skipped": 0 },
     "storage_index_source_and_sqlite_regressions": { "status": "PASS", "tests": 22, "passed": 22, "failed": 0, "skipped": 0 },
-    "independent_ack_ledger_process_crash_check": { "status": "PASS", "acknowledged_records": 1, "recovered_records_verified": 1, "ledger_location": "outside vault, same host filesystem" },
-    "isolated_vm_or_physical_power_loss": { "status": "NOT_RUN", "reason": "Docker Desktop's Linux VM is shared with the parallel workstream; no independent disposable VM or power-cut rig was available." },
-    "actual_kernel_fsync_eio": { "status": "NOT_RUN", "reason": "Tests inject EIO at deterministic pre-syscall boundaries; no FUSE, dm-error, or faulting filesystem was available." }
+    "isolated_linux_vm_power_cut": {
+      "status": "PASS",
+      "platform": "Alpine Linux 3.24.2 aarch64, Linux 6.18.55-0-virt, ext4 data disk on QEMU virtio-blk",
+      "qemu": "QEMU 11.1.2 on macOS arm64 with HVF",
+      "points": [
+        { "point": "revision.temp_written", "acknowledgedSurvived": true, "unacknowledgedVisible": false, "verify": true, "repeatedRecoveryStable": true },
+        { "point": "journal.after_fsync", "acknowledgedSurvived": true, "unacknowledgedVisible": true, "verify": true, "repeatedRecoveryStable": true },
+        { "point": "commit.before_ack", "acknowledgedSurvived": true, "unacknowledgedVisible": true, "verify": true, "repeatedRecoveryStable": true }
+      ],
+      "evidence": "vm-results.jsonl",
+      "acknowledgmentLedger": "ack-ledger.jsonl"
+    },
+    "actual_kernel_fsync_eio": {
+      "status": "PASS",
+      "method": "Linux guest FUSE filesystem fsync callback returned -EIO to Node FileHandle.sync(); this exercised the guest kernel fsync syscall and error mapping, not a pre-syscall application hook.",
+      "nodeReceived": "EIO",
+      "postErrorRecoveryVerify": true,
+      "candidateVisibleAfterRecovery": true,
+      "evidence": "vm/kernel-fsync-eio-result.json"
+    },
+    "shared_baseline_integration": {
+      "status": "INCOMPLETE",
+      "reason": "Read-only merge preview found a packages/core/vault.ts conflict between f36d14d and feature branch 546bf3e; owner resolution is pending."
+    },
+    "post_integration_storage_reliability_search_acid_release_suites": {
+      "status": "NOT_RUN",
+      "reason": "A common baseline (755252c) now exists on the clean S3 feature branch, but read-only merge-tree preview found a content conflict in packages/core/vault.ts. No integration owner was available to reconcile it; no files were integrated or overwritten."
+    },
+    "physical_power_loss_or_volatile_device_cache_loss": {
+      "status": "NOT_RUN",
+      "reason": "No physical power-cut rig or independently controlled hardware cache was available."
+    },
+    "unmeasured_filesystem_and_hardware_combinations": {
+      "status": "UNSUPPORTED",
+      "reason": "No evidence for filesystems other than this Alpine/ext4/QEMU virtio configuration, network filesystems, storage controllers, or volatile device-cache behavior."
+    }
   },
   "commands": [
-    "npm run lint && npm run typecheck && npm run test:reliability",
-    "node --test --test-reporter=tap --test-concurrency=1 dist/tests/storage.test.js dist/tests/durability.test.js dist/tests/search/golden.test.js"
+    "npm ci",
+    "npm run lint && npm run typecheck",
+    "npm run test:reliability",
+    "node --test --test-reporter=tap --test-concurrency=1 dist/tests/storage.test.js dist/tests/durability.test.js dist/tests/search/golden.test.js",
+    "VM_SSH_PORT=2222 verification/durability/vm/run-powercuts.sh",
+    "VM_SSH_PORT=2222 verification/durability/vm/run-kernel-fsync-eio.sh",
+    "git diff --name-status 755252c f36d14d",
+    "git merge-tree 546bf3e f36d14d"
   ],
   "environment": {
-    "host": "Darwin 25.0.0 arm64, APFS, Apple M2 Max",
-    "node": "v25.8.2",
-    "sqlite": "3.53.4",
-    "container_runtime": "Docker Desktop Linux VM, overlayfs (shared; not terminated)"
+    "host": "macOS 15 / Darwin 25 arm64, APFS, Apple Silicon",
+    "hostNode": "v25.8.2",
+    "guest": "Alpine Linux 3.24.2 aarch64, Linux 6.18.55-0-virt, Node v24.18.1",
+    "guestDataFilesystem": "ext4 on a separate 2 GiB qcow2 virtio disk",
+    "vmScratch": "Disposable files under /Volumes/sambigdisk1/.tmp-engram-durability-vm; not committed",
+    "containerRuntime": "Docker Desktop VM was not stopped or accessed for crash testing"
   },
-  "durable_commit_point": "Complete newline-terminated journal record append followed by successful journal FileHandle.sync().",
+  "durableCommitPoint": "A complete newline-terminated journal record append followed by successful journal FileHandle.sync().",
+  "interpretation": {
+    "acknowledgedCommit": "All baseline transactions acknowledged by the guest survived each QEMU process SIGKILL and guest reboot, with journal hash verification, immutable revision/view equality, verify() success, and stable repeated recovery.",
+    "unacknowledgedCommit": "A write cut before journal publication stayed invisible. A full journal record whose sync had returned before the cut, or whose projection completed before acknowledgment, was visible after recovery. Such outcomes are ambiguous to a caller that did not receive success and are preserved as committed journal transactions.",
+    "kernelEio": "The FUSE callback deliberately returned EIO for the journal fsync. The real guest Node syscall surfaced EIO. The complete journal record remained readable and recovery exposed the candidate; an fsync error therefore cannot be treated as proof that no commit occurred."
+  },
   "limitations": [
-    "Process SIGKILL preserves the host page cache and cannot prove power-loss ordering.",
-    "Durability remains conditional on honest file and directory fsync behavior, atomic local hard-link/rename semantics, and storage hardware/controller cache guarantees.",
-    "Directory fsync errors EINVAL, ENOTSUP, and EBADF are tolerated for platform compatibility; those paths do not establish durable directory entries.",
-    "The repository had an unborn main branch with no existing commits. This branch uses an isolated orphan root snapshot; integration is via patch/cherry-pick after the shared baseline is established, not a normal merge-base merge."
+    "QEMU SIGKILL is an abrupt guest-process/VM stop, not physical power removal. The qcow2 virtual disks are hosted on macOS APFS and host caches remained powered.",
+    "The acknowledgment ledger is separately fsynced on the host and outside the guest vault, but shares the same host APFS device; it is not an independent physical witness.",
+    "The ext4 and virtio path was measured only in this Alpine/QEMU configuration. No guarantee is claimed for other filesystems, network filesystems, storage controllers, or volatile device caches.",
+    "Directory fsync errors EINVAL, ENOTSUP, and EBADF remain tolerated for platform compatibility and do not prove directory-entry durability on those paths.",
+    "The VM EIO was returned by a controlled FUSE fsync callback; it validates syscall error propagation and recovery behavior, not spontaneous hardware/controller EIO frequency or every kernel/filesystem failure mode.",
+    "The shared main worktree remains unborn; the clean S3 feature branch now shares baseline 755252c with this branch. The durability and S3 changes conflict in packages/core/vault.ts and require owner-led integration. Full power-loss durability is not established."
   ]
 }
