@@ -24,8 +24,9 @@ export class PostgresSearch {
   private async connection(): Promise<Pool> {
     if (this.pool) return this.pool;
     const config = await this.config(); const envKey = config.postgres?.connectionStringEnv ?? 'MDB_POSTGRES_URL';
-    if (!envName(envKey) || !(this.options.connectionString ?? process.env[envKey])) throw new MDBError('CAPABILITY_UNAVAILABLE', `PostgreSQL is enabled but ${envKey} is not configured`);
-    this.pool = new Pool({ connectionString: this.options.connectionString ?? process.env[envKey], max: 8, application_name: 'engram-mdb' });
+    const connectionString=this.options.connectionString??this.options.env?.[envKey]??process.env[envKey];
+    if (!envName(envKey) || !connectionString) throw new MDBError('CAPABILITY_UNAVAILABLE', `PostgreSQL is enabled but ${envKey} is not configured`);
+    this.pool = new Pool({ connectionString, max: 8, application_name: 'engram-mdb' });
     return this.pool;
   }
   private async ready(): Promise<Pool> {

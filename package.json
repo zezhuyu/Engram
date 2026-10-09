@@ -23,6 +23,7 @@
     "profile:retrieval": "npm run build && node dist/scripts/profile-retrieval.js",
     "sample": "npm run build && node dist/scripts/sample.js",
     "test:reliability": "npm run build && node --test dist/tests/acid/*.test.js dist/tests/isolation/*.test.js dist/tests/fuzz/*.test.js dist/tests/backups/*.test.js",
+    "test:backends:live": "npm run build && node --test dist/tests/s3.test.js dist/tests/postgres-search.test.js",
     "verify:acid": "npm run build && node dist/scripts/verify-acid.js",
     "verify:security": "npm run build && node dist/scripts/verify-security.js",
     "verify:search": "npm run build && node dist/scripts/verify-search.js",

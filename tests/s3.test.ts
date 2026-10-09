@@ -1,9 +1,13 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { CreateBucketCommand, DeleteBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { S3ObjectStore } from '../packages/storage-s3/index.js';
-import type { CommitEvent } from '../packages/core/types.js';
+import { OWNER, type CommitEvent } from '../packages/core/types.js';
+import { Vault } from '../packages/core/vault.js';
 
 class MemoryS3 {
   objects = new Map<string, Uint8Array>();
@@ -41,4 +45,76 @@ test('S3 readMany preserves key order and rejects unbounded concurrency settings
   await store.putImmutable('batch/a.md',Buffer.from('a'));await store.putImmutable('batch/b.md',Buffer.from('b'));
   assert.deepEqual((await store.readMany(['batch/b.md','batch/a.md'],2)).map(bytes=>Buffer.from(bytes).toString()),['b','a']);
   await assert.rejects(()=>store.readMany([],33),{code:'INVALID_INPUT'});
+});
+
+const liveEndpoint=process.env.MDB_TEST_S3_ENDPOINT;
+const liveEnabled=!!liveEndpoint&&process.env.MDB_TEST_S3_CONFIRM==='disposable';
+function liveClient():S3Client {
+  return new S3Client({region:process.env.MDB_TEST_S3_REGION??'us-east-1',endpoint:liveEndpoint,forcePathStyle:true,
+    credentials:{accessKeyId:process.env.MDB_TEST_S3_ACCESS_KEY??'minioadmin',secretAccessKey:process.env.MDB_TEST_S3_SECRET_KEY??'minioadmin'}});
+}
+function liveStore(bucket:string,prefix:string):S3ObjectStore {
+  return new S3ObjectStore(bucket,{region:process.env.MDB_TEST_S3_REGION??'us-east-1',endpoint:liveEndpoint,forcePathStyle:true,
+    credentials:{accessKeyId:process.env.MDB_TEST_S3_ACCESS_KEY??'minioadmin',secretAccessKey:process.env.MDB_TEST_S3_SECRET_KEY??'minioadmin'},prefix});
+}
+async function disposableBucket(t:TestContext,client:S3Client):Promise<string>{
+  const bucket=`engram-live-${randomUUID().slice(0,12)}`;
+  await client.send(new CreateBucketCommand({Bucket:bucket}));
+  t.after(async()=>{try{let token:string|undefined;do{const page=await client.send(new ListObjectsV2Command({Bucket:bucket,ContinuationToken:token}));for(const object of page.Contents??[])if(object.Key)await client.send(new DeleteObjectCommand({Bucket:bucket,Key:object.Key}));token=page.IsTruncated?page.NextContinuationToken:undefined;}while(token);await client.send(new DeleteBucketCommand({Bucket:bucket}));}finally{client.destroy();}});
+  return bucket;
+}
+test('live S3: independent writers serialize journal commits and one stale revision update conflicts',{skip:!liveEnabled},async t=>{
+  const client=liveClient(),bucket=await disposableBucket(t,client),prefix=`engram/${randomUUID()}`;
+  const oneRoot=await mkdtemp(path.join(tmpdir(),'engram-s3-writer-one-')),twoRoot=await mkdtemp(path.join(tmpdir(),'engram-s3-writer-two-'));
+  const one=liveStore(bucket,prefix),two=liveStore(bucket,prefix),a=new Vault(oneRoot,OWNER,{store:one}),b=new Vault(twoRoot,OWNER,{store:two});
+  t.after(async()=>{await Promise.all([a.close(),b.close()]);await Promise.all([rm(oneRoot,{recursive:true,force:true}),rm(twoRoot,{recursive:true,force:true})]);});
+  await a.init();await b.init();
+  const created=await a.put({scope:{type:'global',area:'shared'},kind:'note',title:'Concurrent S3',body:'initial'});
+  const [left,right]=await Promise.all([a.get(created.id),b.get(created.id)]);
+  const updates=await Promise.allSettled([
+    a.patch({objectId:created.id,expectedRevisionId:left.revisionId,body:'writer one'}),
+    b.patch({objectId:created.id,expectedRevisionId:right.revisionId,body:'writer two'}),
+  ]);
+  assert.equal(updates.filter(result=>result.status==='fulfilled').length,1);
+  assert.equal(updates.filter(result=>result.status==='rejected'&&(result.reason as {code?:string}).code==='CONFLICT').length,1);
+  assert.deepEqual((await a.events()).map(item=>item.sequence),[1,2]);
+});
+
+test('live S3: lost immutable-upload response leaves an orphan; lost head response is idempotently recovered',{skip:!liveEnabled},async t=>{
+  const client=liveClient(),bucket=await disposableBucket(t,client),prefix=`engram/${randomUUID()}`;
+  const root=await mkdtemp(path.join(tmpdir(),'engram-s3-ambiguous-')),store=liveStore(bucket,prefix),vault=new Vault(root,OWNER,{store});
+  t.after(async()=>{await vault.close();await rm(root,{recursive:true,force:true});});await vault.init();
+  let loseRevision=true;const raw=store.client.send.bind(store.client),typed=store.client as unknown as {send:(command:unknown)=>Promise<unknown>};
+  typed.send=async command=>{const response=await raw(command as never);if(loseRevision&&command instanceof PutObjectCommand&&String((command as {input:{Key?:string}}).input.Key).includes('/.mdb/objects/')){loseRevision=false;throw new Error('Injected lost revision response');}return response;};
+  await assert.rejects(()=>vault.put({scope:{type:'global',area:'shared'},kind:'note',title:'Orphan upload',body:'retry'}),/lost revision response/);
+  assert.equal((await vault.events()).length,0);assert.equal((await vault.recover()).orphans,1);
+  let loseHead=true;typed.send=async command=>{const response=await raw(command as never);const key=command instanceof PutObjectCommand?String((command as {input:{Key?:string}}).input.Key):'';if(loseHead&&key.endsWith('/.mdb/events/_commit-head.json')){loseHead=false;throw new Error('Injected lost head response');}return response;};
+  const input={scope:{type:'global',area:'shared'} as const,kind:'note',title:'Ambiguous commit',body:'committed once',idempotencyKey:'live-lost-head-response'};
+  await assert.rejects(()=>vault.put(input),/lost head response/);
+  const recovered=await vault.recover();assert.equal(recovered.committed,1);assert.equal(recovered.repaired,1);
+  const retried=await vault.put(input);assert.equal(retried.title,input.title);
+  assert.equal((await vault.events()).filter(item=>item.idempotencyKey===input.idempotencyKey).length,1);
+});
+
+test('live S3: an uploaded journal record stays invisible until head publication and retry commits once',{skip:!liveEnabled},async t=>{
+  const client=liveClient(),bucket=await disposableBucket(t,client),prefix=`engram/${randomUUID()}`;
+  const root=await mkdtemp(path.join(tmpdir(),'engram-s3-partial-journal-')),store=liveStore(bucket,prefix),vault=new Vault(root,OWNER,{store});
+  t.after(async()=>{await vault.close();await rm(root,{recursive:true,force:true});});await vault.init();
+  const sender=store.client.send.bind(store.client),typed=store.client as unknown as {send:(command:unknown)=>Promise<unknown>};let loseRecord=true;
+  typed.send=async command=>{const response=await sender(command as never),key=command instanceof PutObjectCommand?String((command as {input:{Key?:string}}).input.Key):'';if(loseRecord&&key.includes('/.mdb/events/records/')){loseRecord=false;throw new Error('Injected lost journal-record response');}return response;};
+  const input={scope:{type:'global',area:'shared'} as const,kind:'note',title:'Partial journal',body:'head is commit point',idempotencyKey:'live-partial-journal-record'};
+  await assert.rejects(()=>vault.put(input),/lost journal-record response/);assert.equal((await vault.events()).length,0);
+  const committed=await vault.put(input);assert.equal(committed.title,input.title);
+  assert.equal((await vault.events()).filter(item=>item.idempotencyKey===input.idempotencyKey).length,1);
+});
+
+test('live S3: interrupted revision request before PutObject creates no visible partial object',{skip:!liveEnabled},async t=>{
+  const client=liveClient(),bucket=await disposableBucket(t,client),prefix=`engram/${randomUUID()}`;
+  const root=await mkdtemp(path.join(tmpdir(),'engram-s3-interrupted-')),store=liveStore(bucket,prefix),vault=new Vault(root,OWNER,{store});
+  t.after(async()=>{await vault.close();await rm(root,{recursive:true,force:true});});await vault.init();
+  const sender=store.client.send.bind(store.client),typed=store.client as unknown as {send:(command:unknown)=>Promise<unknown>};let interrupted=false;
+  typed.send=async command=>{if(!interrupted&&command instanceof PutObjectCommand&&String((command as {input:{Key?:string}}).input.Key).includes('/.mdb/objects/')){interrupted=true;throw new Error('Injected connection loss before revision request');}return sender(command as never);};
+  await assert.rejects(()=>vault.put({scope:{type:'global',area:'shared'},kind:'note',title:'Interrupted upload',body:'not committed'}),/before revision request/);
+  assert.equal((await vault.events()).length,0);
+  const remaining=[];for await(const item of store.list('.mdb/objects'))remaining.push(item);assert.deepEqual(remaining,[]);
 });
