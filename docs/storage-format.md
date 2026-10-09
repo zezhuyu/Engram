@@ -10,6 +10,8 @@ Markdown revisions and imported originals are immutable keys. The adapter record
 
 S3 has no rename or fsync step in this protocol. The acknowledged commit is the successful conditional head update. Local current-view files, navigation, SQLite, and PostgreSQL remain materialized derivatives. Canonical reads fail visibly when S3 is unavailable; search may use the existing fallback only when the selected disposable index is unavailable. An authorized purge publishes a rewritten reachable journal chain before deleting superseded event records and object data; incomplete cleanup can be retried.
 
+Vault document listing reads revisions in batches of at most 48, and the S3 adapter caps concurrent object reads at 8 by default (configurable per `readMany` call up to 32). Journal traversal remains sequential because each hash-linked record names the preceding head.
+
 The principal internal stores are:
 
 ```text

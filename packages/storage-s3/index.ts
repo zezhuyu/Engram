@@ -42,6 +42,15 @@ export class S3ObjectStore implements ObjectStore, CommitJournalStore {
     } catch (error) { if (missing(error)) throw Object.assign(new Error('Object not found'), { code: 'ENOENT' }); throw error; }
   }
   async read(key: string): Promise<Uint8Array> { return this.bytes(key); }
+  /** Read a set of keys in stable input order with a hard concurrency cap. */
+  async readMany(keys: string[], concurrency = 8): Promise<Uint8Array[]> {
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new MDBError('INVALID_INPUT', 'S3 read concurrency must be between 1 and 32');
+    const results = new Array<Uint8Array>(keys.length); let next = 0;
+    await Promise.all(Array.from({ length: Math.min(keys.length, concurrency) }, async () => {
+      while (true) { const index = next++; if (index >= keys.length) return; results[index] = await this.read(keys[index]!); }
+    }));
+    return results;
+  }
   async stat(key: string): Promise<{ etag?: string; size: number } | null> {
     try { const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.key(key) })); return { ...(r.ETag ? { etag: r.ETag } : {}), size: r.ContentLength ?? 0 }; }
     catch (error) { if (missing(error)) return null; throw error; }

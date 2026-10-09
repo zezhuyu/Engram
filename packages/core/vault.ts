@@ -181,6 +181,19 @@ export class Vault {
     if(doc.id!==event.objectId||doc.revisionId!==event.revisionId||doc.path!==event.path||scopeKey(doc.scope)!==scopeKey(event.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
     return doc;
   }
+  private async documentsForEvents(events:CommitEvent[]):Promise<Document[]> {
+    const missing=events.filter(event=>!this.revisionCache.has(`${event.objectId}/${event.revisionId}`));
+    if(missing.length){
+      const keys=missing.map(event=>`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`);
+      const bytes=this.store.readMany?await this.store.readMany(keys,8):await Promise.all(keys.map(key=>this.store.read(key)));
+      for(let i=0;i<missing.length;i++){
+        const event=missing[i]!,key=`${event.objectId}/${event.revisionId}`,doc=parseDocument(Buffer.from(bytes[i]!).toString('utf8'));
+        if(doc.id!==event.objectId||doc.revisionId!==event.revisionId||doc.path!==event.path||scopeKey(doc.scope)!==scopeKey(event.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
+        this.cacheRevision(key,doc);
+      }
+    }
+    return events.map(event=>{const key=`${event.objectId}/${event.revisionId}`,doc=this.revisionCache.get(key);if(!doc)throw new MDBError('INTERNAL','Revision batch read did not return an object');this.revisionCache.delete(key);this.revisionCache.set(key,doc);return doc;});
+  }
   private async rawDocument(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.raw_document', () => this.rawDocumentUnprofiled(objectId, revisionId)); }
   private async rawDocumentUnprofiled(objectId:string,revisionId?:string):Promise<Document> {
     validId(objectId);if(revisionId)validId(revisionId);await this.rawEvents();const index=this.journalCache!;const found=revisionId?index.byRevision.get(revisionId):index.latest.get(objectId);const event=found&&found.objectId===objectId?found:undefined;
@@ -190,7 +203,7 @@ export class Vault {
   private async resolveReference(uri:string,revisionId?:string):Promise<Document> {const doc=await this.rawDocument(objectIdFromUri(uri),revisionId);if(uri!==doc.uri&&uri!==doc.id)throw inaccessible();return doc;}
   private async visible(doc:Document):Promise<Document> { const result=structuredClone(doc);const offset=documentBodyLineOffset(doc);if(offset!==undefined)documentBodyLineOffsets.set(result,offset);const links:Document['links']=[],evidence:Document['evidence']=[];for(const l of doc.links){try{await this.resolveReference(l.target,l.revisionId);links.push(l);}catch{/* inaccessible references disclose nothing */}}for(const e of doc.evidence){try{await this.resolveReference(e.uri,e.revisionId);evidence.push(e);}catch{/* inaccessible references disclose nothing */}}result.links=links;result.evidence=evidence;if(!this.owner())for(const key of Object.keys(result.metadata))if(key.startsWith('_'))delete result.metadata[key];return result; }
   async get(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.get', async () => this.visible(await this.rawDocument(objectId,revisionId))); }
-  async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[]}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()];const result:Document[]=[];const canRead=this.readMemo();for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||s.collectionId===e.scope.collectionId))))continue;const d=await this.documentForEvent(e);if(d.status!=='deleted'||options.includeHistory)result.push(await this.visible(d));}return result;}
+  async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[]}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||s.collectionId===e.scope.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)result.push(await this.visible(d));}}return result;}
   private async commit(input:PutInput,previous?:Document,operation='put'):Promise<Document> {
     validateInput(input);if(input.metadata?.profileRole)this.requireOwner();await this.requireAccess(input.scope,'write');const events=await this.repairJournal();this.options.fault?.('commit.before_revision');
     if(input.idempotencyKey){const prior=events.find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(input.scope));if(prior)return this.rawDocument(prior.objectId,prior.revisionId);}

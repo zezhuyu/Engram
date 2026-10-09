@@ -35,3 +35,10 @@ test('S3 journal rewrite atomically removes superseded history records for purge
   assert.deepEqual((await store.readCommittedJournal()).map(x=>x.path),['purged',b.path]);
   const keys=[...mock.objects.keys()].filter(k=>k.includes('/records/'));assert.equal(keys.length,2);assert(keys.some(k=>k.includes('/rewritten/')));
 });
+
+test('S3 readMany preserves key order and rejects unbounded concurrency settings',async()=>{
+  const store=new S3ObjectStore('bucket',{client:new MemoryS3() as unknown as S3Client});
+  await store.putImmutable('batch/a.md',Buffer.from('a'));await store.putImmutable('batch/b.md',Buffer.from('b'));
+  assert.deepEqual((await store.readMany(['batch/b.md','batch/a.md'],2)).map(bytes=>Buffer.from(bytes).toString()),['b','a']);
+  await assert.rejects(()=>store.readMany([],33),{code:'INVALID_INPUT'});
+});
