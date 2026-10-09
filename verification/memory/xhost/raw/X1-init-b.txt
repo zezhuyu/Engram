@@ -1,0 +1,14 @@
+{
+  "initialized": {
+    "mode": "remote-mcp"
+  },
+  "project": {
+    "workspaceId": "proj-b",
+    "instructionsFile": "/work/proj-b/CLAUDE.md",
+    "adapter": {
+      "changed": true,
+      "registrationId": "reg_6b90ff10f7d60526"
+    },
+    "mcpConfigFile": "/work/proj-b/.mcp.json"
+  }
+}

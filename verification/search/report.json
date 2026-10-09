@@ -1,0 +1,440 @@
+{
+  "suite": "search",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T15:04:44.383Z",
+  "command": "node --test --test-reporter=tap dist/tests/search.test.js dist/tests/search/golden.test.js dist/tests/search/optimized.test.js dist/tests/search/bounded.test.js dist/tests/search/semantic.test.js dist/tests/search/embedder.test.js",
+  "durationMs": 62055,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "not installed"
+  },
+  "counts": {
+    "pass": 43,
+    "fail": 0,
+    "skipped": 0,
+    "total": 43
+  },
+  "tests": [
+    {
+      "name": "native lexical query preserves phrases, boolean operators, regex and filters",
+      "status": "PASS"
+    },
+    {
+      "name": "ACL applies before matches, graph references, context and pagination",
+      "status": "PASS"
+    },
+    {
+      "name": "SQLite parity and stale update/delete fallback preserve canonical results",
+      "status": "PASS"
+    },
+    {
+      "name": "generated navigation preserves authored content and canonical snippet lines",
+      "status": "PASS"
+    },
+    {
+      "name": "FTS trigram path preserves substring, short term and quoted punctuation parity",
+      "status": "PASS"
+    },
+    {
+      "name": "bounded retrieval equals scoring everything (hits, order, snippets, cursor) for common terms, phrases, regex, offsets and tiny/large limits",
+      "status": "PASS"
+    },
+    {
+      "name": "a frequent term with a small limit reads a small fraction of the matching documents; rare terms and large limits still read what they must",
+      "status": "PASS"
+    },
+    {
+      "name": "exact page boundary: with exactly `limit` matches there is no cursor, with one more there is",
+      "status": "PASS"
+    },
+    {
+      "name": "query engine pushes the page bound down to retrieval and returns the same rows",
+      "status": "PASS"
+    },
+    {
+      "name": "HTTP embedder: request shape, batching, ordering, retries with backoff, and strict response validation",
+      "status": "PASS"
+    },
+    {
+      "name": "HTTP embedder: timeouts, cancellation, redirects, oversize responses and transport errors are bounded and sanitized",
+      "status": "PASS"
+    },
+    {
+      "name": "createEmbedder / describeEmbedding: validation, defaults and key handling; nothing is built unless configured",
+      "status": "PASS"
+    },
+    {
+      "name": "end to end over real HTTP and the CLI: embed sync, semantic search, auto becomes hybrid, status and capabilities, keyword unaffected",
+      "status": "PASS"
+    },
+    {
+      "name": "golden corpus, SQLite OFF: every query returns exactly the authorized golden set and never private/tombstoned data",
+      "status": "PASS"
+    },
+    {
+      "name": "golden corpus, SQLite ON: every query returns exactly the authorized golden set and never private/tombstoned data",
+      "status": "PASS"
+    },
+    {
+      "name": "SQLite and filesystem return identical sets (and snippets) for every golden query",
+      "status": "PASS"
+    },
+    {
+      "name": "stale index: commits, edits and deletes after the last rebuild are never silently missing; health reports staleness",
+      "status": "PASS"
+    },
+    {
+      "name": "corrupt, truncated or deleted SQLite files: queries stay correct via fallback, rebuild restores the index, integrity checks pass",
+      "status": "PASS"
+    },
+    {
+      "name": "killing the process during an index rebuild leaves canonical data intact and the next rebuild succeeds",
+      "status": "PASS"
+    },
+    {
+      "name": "ACL is applied before counts, cursors and snippets on both backends",
+      "status": "PASS"
+    },
+    {
+      "name": "seed 11: ripgrep, raw-file scan and SQLite equal the full-corpus oracle (ids, revisions, lines, scores, snippets)",
+      "status": "PASS"
+    },
+    {
+      "name": "seed 4242: ripgrep, raw-file scan and SQLite equal the full-corpus oracle (ids, revisions, lines, scores, snippets)",
+      "status": "PASS"
+    },
+    {
+      "name": "seed 90210: ripgrep, raw-file scan and SQLite equal the full-corpus oracle (ids, revisions, lines, scores, snippets)",
+      "status": "PASS"
+    },
+    {
+      "name": "parsed immutable revisions carry exact LF/CRLF body offsets through Vault visibility",
+      "status": "PASS"
+    },
+    {
+      "name": "journal overlay: create, update, tombstone, purge and restore after the checkpoint are served correctly, lag is reported, sync converges to rebuild",
+      "status": "PASS"
+    },
+    {
+      "name": "damaged, foreign-format or inconsistent index databases degrade only their own scope, never correctness",
+      "status": "PASS"
+    },
+    {
+      "name": "authorization is evaluated per query: grants and revocations apply immediately, objects skipped earlier appear after a grant, outsiders see nothing",
+      "status": "PASS"
+    },
+    {
+      "name": "persisted manifest is only trusted when it provably belongs to this journal; damaged or foreign files are rebuilt, not believed",
+      "status": "PASS"
+    },
+    {
+      "name": "concurrent writers and readers: every committed document becomes findable, no reader errors, no unauthorized hit",
+      "status": "PASS"
+    },
+    {
+      "name": "killing the process during sync, rebuild or manifest save leaves canonical data intact and the next query correct",
+      "status": "PASS"
+    },
+    {
+      "name": "disabled by default: semantic and hybrid are unavailable, keyword/grep/regex/auto work, and the mode that ran is reported",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic and hybrid REQUIRE the SQLite index: without it they are disabled even with an embedding provider, while keyword and grep stay fully functional",
+      "status": "PASS"
+    },
+    {
+      "name": "SQLite on but no vectors yet: not ready until \"embed sync\"; then semantic finds what no keyword shares; keyword matches are unaffected",
+      "status": "PASS"
+    },
+    {
+      "name": "hybrid fuses keyword and semantic rankings by reciprocal rank fusion; an exact keyword match is never suppressed; auto becomes hybrid when ready",
+      "status": "PASS"
+    },
+    {
+      "name": "regex and exact grep never touch the vector backend; keyword is lexical when SQLite is off, BM25 when on",
+      "status": "PASS"
+    },
+    {
+      "name": "ACL: semantic and hybrid never return unreadable objects, never let them influence ranking, and report lag only for readable objects",
+      "status": "PASS"
+    },
+    {
+      "name": "revision consistency: stale vectors are ignored and reported as lag, new text is found by keyword at once and by meaning after sync, deletes vanish",
+      "status": "PASS"
+    },
+    {
+      "name": "privacy: a remote embedding service never receives workspace text unless allowed; the skipped objects are counted, global knowledge is embedded",
+      "status": "PASS"
+    },
+    {
+      "name": "failure handling: embedding outage makes semantic/hybrid fail with a sanitized error, auto degrades to a labelled keyword result, partial sync leaves a consistent index, a model change never mixes vectors",
+      "status": "PASS"
+    },
+    {
+      "name": "immutability and cleanup: embedding and searching never change the journal or revisions; purge removes vectors",
+      "status": "PASS"
+    },
+    {
+      "name": "corrupt or foreign vector data is ignored, never trusted: garbage rows, wrong dimensions and a damaged database fall back to keyword with an honest status",
+      "status": "PASS"
+    },
+    {
+      "name": "query engine: semantic/hybrid/auto through the typed AST report the mode that ran; unavailable without the backend unless a labelled downgrade is requested",
+      "status": "PASS"
+    },
+    {
+      "name": "optional sqlite-vec acceleration returns the same ranking as the portable scan; when the extension is absent the portable scan is used and reported",
+      "status": "PASS"
+    }
+  ],
+  "cases": 36,
+  "caseFailures": [],
+  "seeds": [
+    11,
+    4242,
+    90210
+  ],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Index-backed retrieval at 100k documents",
+      "status": "NOT_RUN",
+      "reason": "Building 100k documents through the fsynced commit protocol takes hours; 1k and 10k are measured. Bounded evaluation (tests/search/bounded.test.ts) reads a small fraction of matches for small pages; its effect at 10k/100k has NOT been re-measured since the change."
+    },
+    {
+      "item": "Semantic and hybrid retrieval quality with a real embedding model",
+      "status": "NOT_RUN",
+      "reason": "Mechanics, ACLs, revision consistency, privacy and failure handling are tested with a deterministic concept embedder and a real local HTTP server speaking the OpenAI embeddings protocol. No real model was evaluated, so retrieval quality is not claimed. Semantic/hybrid exist only with SQLite enabled and a configured provider."
+    },
+    {
+      "item": "sqlite-vec acceleration",
+      "status": "NOT_RUN",
+      "reason": "Run with ENGRAM_SQLITE_VEC pointing at the extension (passed once on macOS arm64 during development); otherwise the portable scan is used and tested. Neither path is an approximate index: both scan all accepted vectors."
+    },
+    {
+      "item": "Vector search at 100k documents",
+      "status": "NOT_RUN",
+      "reason": "Brute-force scan cost grows linearly; no benchmark has been run (deferred by request)."
+    },
+    {
+      "item": "WAL concurrent reader/writer/checkpoint stress",
+      "status": "NOT_RUN",
+      "reason": "Databases use WAL; rebuild-kill and corruption cases ran, a dedicated concurrent checkpoint stress did not."
+    },
+    {
+      "item": "Ranking quality",
+      "status": "UNSUPPORTED",
+      "reason": "Filesystem parity is exact. With SQLite, keyword results are ordered by FTS5 BM25 (reported as ranking: bm25): result sets, revisions, lines and snippets are compared with the oracle, the order is checked to follow the reported score, and no relevance-quality evaluation was done."
+    },
+    {
+      "item": "Files edited outside the API during search",
+      "status": "NOT_RUN",
+      "reason": "Covered for reconciliation (storage tests); not combined with search in this suite."
+    }
+  ],
+  "limitations": [
+    "Filesystem and SQLite engines were compared on 19 golden queries over ASCII, CJK, accents, emoji, punctuation, code fences, frontmatter lookalikes, duplicate titles, tombstones and permission boundaries.",
+    "Both modes run the full golden corpus; the --no-sqlite functional suite is the default configuration of every other suite."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/search.test.js dist/tests/search/golden.test.js dist/tests/search/optimized.test.js dist/tests/search/bounded.test.js dist/tests/search/semantic.test.js dist/tests/search/embedder.test.js",
+  "caseDetails": [
+    {
+      "name": "embedder/http-embedder",
+      "status": "PASS"
+    },
+    {
+      "name": "embedder/http-embedder-bounds",
+      "status": "PASS"
+    },
+    {
+      "name": "embedder/embedder-config",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/disabled-by-default",
+      "status": "PASS"
+    },
+    {
+      "name": "search/golden-files",
+      "status": "PASS",
+      "detail": {
+        "queries": 19
+      }
+    },
+    {
+      "name": "semantic/requires-sqlite",
+      "status": "PASS"
+    },
+    {
+      "name": "search/golden-sqlite",
+      "status": "PASS",
+      "detail": {
+        "queries": 19
+      }
+    },
+    {
+      "name": "semantic/semantic-basic",
+      "status": "PASS"
+    },
+    {
+      "name": "embedder/end-to-end-http",
+      "status": "PASS"
+    },
+    {
+      "name": "search/parity-files-vs-sqlite",
+      "status": "PASS",
+      "detail": {
+        "queries": 19
+      }
+    },
+    {
+      "name": "search/stale-index",
+      "status": "PASS",
+      "detail": {
+        "backend": "sqlite",
+        "fallback": null
+      }
+    },
+    {
+      "name": "semantic/hybrid-rrf",
+      "status": "PASS"
+    },
+    {
+      "name": "search-optimized/oracle-parity-seed-11",
+      "status": "PASS",
+      "detail": {
+        "queries": 44,
+        "ripgrep": false
+      }
+    },
+    {
+      "name": "semantic/lexical-paths",
+      "status": "PASS"
+    },
+    {
+      "name": "search/corrupt-sqlite-fallback-and-integrity",
+      "status": "PASS",
+      "detail": {
+        "ftsIntegrityChecks": 6
+      }
+    },
+    {
+      "name": "semantic/acl",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/revisions",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/privacy",
+      "status": "PASS"
+    },
+    {
+      "name": "search/bounded-equals-full-scoring",
+      "status": "PASS",
+      "detail": {
+        "compared": 88,
+        "early": 30
+      }
+    },
+    {
+      "name": "search-optimized/oracle-parity-seed-4242",
+      "status": "PASS",
+      "detail": {
+        "queries": 44,
+        "ripgrep": false
+      }
+    },
+    {
+      "name": "search/kill-during-rebuild",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/failure-handling",
+      "status": "PASS"
+    },
+    {
+      "name": "search/acl-before-counts-and-cursors",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/immutability",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/corruption",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/query-engine",
+      "status": "PASS"
+    },
+    {
+      "name": "semantic/sqlite-vec",
+      "status": "PASS",
+      "detail": {
+        "notRun": "set ENGRAM_SQLITE_VEC to the sqlite-vec loadable library to run the accelerated path"
+      }
+    },
+    {
+      "name": "search-optimized/oracle-parity-seed-90210",
+      "status": "PASS",
+      "detail": {
+        "queries": 44,
+        "ripgrep": false
+      }
+    },
+    {
+      "name": "search-optimized/journal-overlay",
+      "status": "PASS"
+    },
+    {
+      "name": "search/bounded-reads",
+      "status": "PASS",
+      "detail": {
+        "keyword": 32,
+        "grep": 16,
+        "regex": 16
+      }
+    },
+    {
+      "name": "search-optimized/per-scope-degradation",
+      "status": "PASS"
+    },
+    {
+      "name": "search-optimized/acl-live-grants",
+      "status": "PASS"
+    },
+    {
+      "name": "search-optimized/manifest-trust",
+      "status": "PASS"
+    },
+    {
+      "name": "search-optimized/concurrent-readers-writers",
+      "status": "PASS",
+      "detail": {
+        "readerQueries": 303
+      }
+    },
+    {
+      "name": "search/query-limit-pushdown",
+      "status": "PASS"
+    },
+    {
+      "name": "search-optimized/kill-during-index-maintenance",
+      "status": "PASS"
+    }
+  ]
+}

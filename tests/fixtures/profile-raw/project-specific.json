@@ -1,0 +1,27 @@
+{
+  "case": "project-specific",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Keep Orion public API backward compatible\", \"body\": \"For the Orion project only, the user wants the public API kept backward compatible, even when a breaking redesign would be cleaner.\", \"evidence\": [{\"uri\": \"mdb://workspaces/orion/objects/obj_mv13tk9k_82df7b5661dc4517b217efef812d6189\", \"revisionId\": \"rev_mv13tk9k_3c9d54cdb6304a6abdd1a5e932e5ec47\", \"span\": \"For the Orion project only, keep the public API backward compatible\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"orion-api-backward-compatibility\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Keep Orion's public API backward compatible\", \"body\": \"For the Orion project only, the user wants the public API kept backward compatible even when a breaking redesign would be cleaner.\", \"evidence\": [{\"uri\": \"mdb://workspaces/orion/objects/obj_mv13w8xh_f32cae653e384103ab2fdda9be515d17\", \"revisionId\": \"rev_mv13w8xh_0ecfb96412d340a0aab9a85c129c8818\", \"span\": \"For the Orion project only, keep the public API backward compatible\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"orion-api-backward-compatibility\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Keep Orion public API backward compatible\", \"body\": \"For the Orion project only, the user wants the public API kept backward compatible even when a breaking redesign would be cleaner.\", \"evidence\": [{\"uri\": \"mdb://workspaces/orion/objects/obj_mv13yscn_13c0fbd99008491d88c464491502e647\", \"revisionId\": \"rev_mv13yscn_2f3ed693d7c140498c5df755c6f9f2ff\", \"span\": \"For the Orion project only, keep the public API backward compatible\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"orion-api-backward-compatibility\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

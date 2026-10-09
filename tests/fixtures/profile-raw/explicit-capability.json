@@ -1,0 +1,27 @@
+{
+  "case": "explicit-capability",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Can review Rust lifetime and ownership changes\", \"body\": \"The user maintains the Rust client and can review Rust lifetime and ownership changes themself.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13tu5s_9fa455d29ac646d38fdd02be8046a7cc\", \"revisionId\": \"rev_mv13tu5s_59b9c855e88b4d84baf73d2bab1fa458\", \"span\": \"I maintain the Rust client and can review Rust lifetime and ownership changes myself.\"}], \"metadata\": {\"category\": \"capability\", \"preferenceKey\": \"rust-lifetime-ownership-review\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Can review Rust lifetime and ownership changes\", \"body\": \"The user maintains the Rust client and is capable of reviewing Rust lifetime and ownership changes themself.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13wihl_84571d83e00d41f98c39cb0e06d2e4c9\", \"revisionId\": \"rev_mv13wihl_b16357b587e046e181b56e320a3110f9\", \"span\": \"I maintain the Rust client and can review Rust lifetime and ownership changes myself.\"}], \"metadata\": {\"category\": \"capability\", \"preferenceKey\": \"rust-ownership-review\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Capable of reviewing Rust lifetime and ownership changes\", \"body\": \"The user maintains the Rust client and can review Rust lifetime and ownership changes themself.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13z33c_6d05788afa38436a949d5b8541191e68\", \"revisionId\": \"rev_mv13z33c_ca22a9268d684aee9481d510421fca9d\", \"span\": \"I maintain the Rust client and can review Rust lifetime and ownership changes myself.\"}], \"metadata\": {\"category\": \"capability\", \"preferenceKey\": \"rust-ownership-review\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

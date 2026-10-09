@@ -1,0 +1,12 @@
+schemaVersion: 1
+sqlite:
+  enabled: false
+capture:
+  enabled: false
+  allowedSources: []
+model:
+  provider: synthetic-fixture-not-an-llm
+  allowNetwork: false
+dream:
+  enabled: true
+  maxCandidates: 20

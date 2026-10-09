@@ -1,0 +1,711 @@
+{
+  "suite": "unix",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T02:37:13.284Z",
+  "command": "node --test --test-reporter=tap dist/tests/unix/parity.test.js dist/tests/unix/features.test.js dist/tests/unix/sandbox.test.js",
+  "durationMs": 23567,
+  "environment": {
+    "os": "Linux 7.0.12-linuxkit",
+    "platform": "linux",
+    "arch": "arm64",
+    "kernel": "#1 SMP PREEMPT Wed Aug 12 20:18:49 UTC 2026",
+    "tmpFilesystem": "overlayfs",
+    "cpu": "unknown",
+    "logicalCpus": 12,
+    "memoryBytes": 8319238144,
+    "node": "v22.23.3",
+    "sqlite": "3.51.3",
+    "ripgrep": "ripgrep 13.0.0"
+  },
+  "counts": {
+    "pass": 17,
+    "fail": 0,
+    "skipped": 0,
+    "total": 17
+  },
+  "tests": [
+    {
+      "name": "formats: NDJSON rows keep their metadata through filters; auto-detection uses the first record only; JSON arrays work; bad input is an error",
+      "status": "PASS"
+    },
+    {
+      "name": "null-delimited records: -z on every record tool, and find -print0",
+      "status": "PASS"
+    },
+    {
+      "name": "streaming and bounds: head stops reading (SIGPIPE-like), tail is a ring, sort/line/deadline limits are errors not hangs",
+      "status": "PASS"
+    },
+    {
+      "name": "exit codes follow the tools: grep 0/1/2, diff 0/1/2, comm and sort -c report disorder with 1, usage errors never look like success",
+      "status": "PASS"
+    },
+    {
+      "name": "vault operands: access control, pinned revisions, and local files inside a vault are refused",
+      "status": "PASS"
+    },
+    {
+      "name": "find and tree: deterministic, ACL-bound virtual tree; -print0; predicates; ndjson",
+      "status": "PASS"
+    },
+    {
+      "name": "grep --vault uses the text index and respects ACLs; cat/find ids chain into each other",
+      "status": "PASS"
+    },
+    {
+      "name": "tee: copies stdin to stdout and files; never writes inside a vault, never follows symlinks, not available through MCP",
+      "status": "PASS"
+    },
+    {
+      "name": "interoperability: installed jq / awk / sed consume our output; the bridge runs only sandboxable tools with an argument vector",
+      "status": "PASS"
+    },
+    {
+      "name": "MCP mdb_unix: same results as the CLI, bound to the host identity, no local files, bounded output",
+      "status": "PASS"
+    },
+    {
+      "name": "legacy meanings keep working: grep TEXT is still the index search, diff ID FROM TO is still the revision diff",
+      "status": "PASS"
+    },
+    {
+      "name": "GNU tools are present where the CI requires them",
+      "status": "PASS"
+    },
+    {
+      "name": "Unix command parity with the installed system tools",
+      "status": "PASS"
+    },
+    {
+      "name": "required tools are present on the Linux lane",
+      "status": "PASS"
+    },
+    {
+      "name": "awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files",
+      "status": "PASS"
+    },
+    {
+      "name": "sed: GNU sed --sandbox runs scripts but cannot execute, read or write files",
+      "status": "PASS"
+    },
+    {
+      "name": "the bridge never uses a shell: metacharacters in arguments are data",
+      "status": "PASS"
+    }
+  ],
+  "cases": 139,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Parity against GNU coreutils/grep/diffutils",
+      "status": "NOT_RUN",
+      "reason": "Only the BSD tools shipped with macOS are installed here; GNU-only cases (head -n -N, head -c -N, cat -E) are recorded as NOT_RUN in the case log and must be run on Linux or with GNU tools on the PATH."
+    },
+    {
+      "item": "Linux execution",
+      "status": "NOT_RUN",
+      "reason": "All runs were on macOS/APFS. The code uses no platform-specific calls; the parity suite is the check to run on Linux."
+    },
+    {
+      "item": "awk and sed bridge execution",
+      "status": "NOT_RUN",
+      "reason": "Neither gawk nor GNU sed is installed, so `mdb filter awk|sed` refusal is verified but sandboxed execution is not. jq execution is verified."
+    },
+    {
+      "item": "External-merge sort / spill",
+      "status": "UNSUPPORTED",
+      "reason": "sort, diff and comm checks hold at most MDB_UNIX_MAX_BUFFER_LINES lines and fail with an error instead of spilling."
+    },
+    {
+      "item": "Locales and byte-exact non-UTF-8 data",
+      "status": "UNSUPPORTED",
+      "reason": "Text tools assume UTF-8 and C-locale (byte/code point) ordering; invalid UTF-8 is replaced when a tool decodes lines (cat and tee copy bytes unchanged)."
+    },
+    {
+      "item": "tail -f, grep -r, sort -o, diff -c, find -exec",
+      "status": "UNSUPPORTED",
+      "reason": "Refused on purpose: no following, no recursion on the local file system, no output files other than tee, no command execution."
+    }
+  ],
+  "limitations": [
+    "Where BSD and GNU differ the documented subset follows GNU semantics and the test normalizes or excludes the BSD quirk (see tests/unix/parity.test.ts).",
+    "find/tree operate on a virtual tree built from the vault metadata, not on files on disk."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/unix/parity.test.js dist/tests/unix/features.test.js dist/tests/unix/sandbox.test.js",
+  "caseDetails": [
+    {
+      "name": "unix-parity/head -n 3",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -n 1",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -3",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -c 7",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -n 100",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -n 0 (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -n -2 (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/head -c -5 (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/formats",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -n 3",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -n 0",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -n +8",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -2",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -c 9",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-sandbox/gawk",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -n 100",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/null-delimited",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cat (plain)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cat -n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cat -b",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cat -s",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cat -E",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cat -ns",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep apple",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -i banana",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -v a",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -c a",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/streaming-and-bounds",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -n an",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -w apple",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -x zebra\tTAB",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -F a.p",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -E ap+le|che",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-sandbox/gnu-sed",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -o an",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -m 1 a",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-sandbox/no-shell",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -A 1 cherry",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -B 1 cherry",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -C 1 cherry",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -e apple -e zebra",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -q apple",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/exit-codes",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -q nomatch",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -l apple",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -L apple",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -ic APPLE",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/vault-operands",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep ^a",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep e$",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep a\\(p\\)\\1",
+      "status": "PASS",
+      "detail": {
+        "skipped": "backreferences are rejected by design"
+      }
+    },
+    {
+      "name": "unix-features/find-tree",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -c 1-3",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -c 2-",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/grep-vault",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -c -3",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -c 1,3,5",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -b 1-4",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -f 2 -d  ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -f 1,3 -d  ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/tee-guards",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -f 2 -d   -s",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -f 2- -d  ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut -f 1 -d   --complement",
+      "status": "PASS",
+      "detail": {
+        "skipped": "BSD cut has no --complement"
+      }
+    },
+    {
+      "name": "unix-parity/sort ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -r",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -u",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -f",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -b",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -s -k 2",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -k 2",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/jq-bridge",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -k 2n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -k 2,2nr",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -k 1,1 -k 2,2n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/interop",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -t   -k 2n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -c",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -n -u",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort numbers -n",
+      "status": "PASS",
+      "detail": {
+        "skipped": "decimal and negative numbers sort differently between GNU and BSD; compared on integer-only input below"
+      }
+    },
+    {
+      "name": "unix-parity/sort numbers -nr",
+      "status": "PASS",
+      "detail": {
+        "skipped": "decimal and negative numbers sort differently between GNU and BSD; compared on integer-only input below"
+      }
+    },
+    {
+      "name": "unix-parity/sort numbers -n -u",
+      "status": "PASS",
+      "detail": {
+        "skipped": "decimal and negative numbers sort differently between GNU and BSD; compared on integer-only input below"
+      }
+    },
+    {
+      "name": "unix-parity/sort integers -n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort integers -nr",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort integers -n -u",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -c",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -d",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -u",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -i",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-features/mcp",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -f 1",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -s 1",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc -l",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc -w",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc -c",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc -lw",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc -m",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr a-z A-Z",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr -d aeiou",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr -s  ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr -d \\n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr [:lower:] [:upper:]",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr -cd a-z\\n",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr -s a-z",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr \\t  ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tr abc x",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/paste (stdin) -s",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/paste (stdin) -d ,",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/comm -12",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/comm -3",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/comm -23",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/comm -1",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff ",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -u",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -U 1",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -q",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -i",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -w",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -b",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/comm --output-delimiter (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/comm --total (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut --complement (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/cut --output-delimiter (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/wc -L (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/uniq -w (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -n decimals and negatives (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -nr decimals (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -n -u ties (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/sort -k with start char (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/tail -c +N (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/paste -s -d,: (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -m1 -A1 (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -c -v (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/grep -o -i (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -u -U1 (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff --normal (GNU)",
+      "status": "PASS"
+    },
+    {
+      "name": "unix-parity/diff -B (GNU)",
+      "status": "PASS"
+    }
+  ]
+}

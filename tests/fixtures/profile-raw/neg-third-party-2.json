@@ -1,0 +1,27 @@
+{
+  "case": "neg-third-party-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement describes a third party's (the vendor's) requirement and the user explicitly disclaims it as their own habit.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement describes a third party's (the vendor's) requirement and the user explicitly says it is unrelated to their own habits.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement describes a third party's (the vendor's) requirement and the user explicitly disclaims it as their own habit, so it states no enduring fact about the user.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

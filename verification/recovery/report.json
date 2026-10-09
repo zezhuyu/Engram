@@ -1,0 +1,114 @@
+{
+  "suite": "recovery",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T15:05:12.203Z",
+  "command": "node --test --test-reporter=tap dist/tests/backups/backup-restore.test.js",
+  "durationMs": 10387,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "not installed"
+  },
+  "counts": {
+    "pass": 4,
+    "fail": 0,
+    "skipped": 0,
+    "total": 4
+  },
+  "tests": [
+    {
+      "name": "backup taken while a writer is running restores to a consistent committed prefix with sources, ACLs, tombstones and profiles intact",
+      "status": "PASS"
+    },
+    {
+      "name": "torn or corrupted backups are refused, never restored as if healthy",
+      "status": "PASS"
+    },
+    {
+      "name": "purge: removes content from the live vault; a pre-purge backup still holds it (documented retention limit)",
+      "status": "PASS"
+    },
+    {
+      "name": "manifest-checked backups: complete ones restore; missing manifest, extra files, edits and a backup killed mid-copy are all refused",
+      "status": "PASS"
+    }
+  ],
+  "cases": 4,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Restore on a different machine",
+      "status": "NOT_RUN",
+      "reason": "Restores go to a fresh directory on the same host."
+    },
+    {
+      "item": "Hard-purge propagation into existing backups",
+      "status": "UNSUPPORTED",
+      "reason": "A backup taken before a purge keeps the plaintext. This is tested and documented, not solved."
+    },
+    {
+      "item": "Backup cadence RPO/RTO policy",
+      "status": "NOT_RUN",
+      "reason": "Restore wall time is measured on a small vault; no cadence is defined or scheduled."
+    },
+    {
+      "item": "Incremental backup",
+      "status": "UNSUPPORTED",
+      "reason": "Backups are full copies under the writer lock."
+    }
+  ],
+  "limitations": [
+    "Backups hold the writer lock, so a backup during writes is a consistent point but delays writers.",
+    "A same-disk revision history is not a backup."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/backups/backup-restore.test.js",
+  "caseDetails": [
+    {
+      "name": "recovery/backup-under-write-restore",
+      "status": "PASS",
+      "detail": {
+        "files": 35,
+        "backupBytes": 24097,
+        "backupMs": 83,
+        "restoreMs": 132,
+        "restoredCommits": 11,
+        "sourceCommitsAtEnd": 205,
+        "rpoNote": "RPO = time since last backup; RTO = restore wall time above (small vault)."
+      }
+    },
+    {
+      "name": "recovery/corrupt-backup-refused",
+      "status": "PASS",
+      "detail": {
+        "refusedCases": 4,
+        "silentContentTamperDetected": true
+      }
+    },
+    {
+      "name": "recovery/purge-and-backup-retention",
+      "status": "PASS",
+      "detail": {
+        "backupStillContainsPlaintext": true
+      }
+    },
+    {
+      "name": "recovery/manifest-checked-backup",
+      "status": "PASS",
+      "detail": {
+        "files": 130,
+        "bytes": 78337
+      }
+    }
+  ]
+}

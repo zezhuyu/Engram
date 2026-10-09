@@ -1,0 +1,27 @@
+{
+  "case": "neg-question-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The document is a question asking for a recommendation and states no enduring preference, goal, or fact about the user.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The document is a question asking for a recommendation and states no enduring preference, goal, or fact about the user.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The document is only a question asking for a recommendation and states no enduring preference, goal, or fact about the user.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "case": "explicit-goal",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Goal: get build pipeline time under five minutes this quarter\", \"body\": \"The user's goal this quarter is to reduce the build pipeline time to below five minutes.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13tr5n_b2fbdfd5b2064a19aacaf85e479c0304\", \"revisionId\": \"rev_mv13tr5n_ee3a780641d444ab841df28fdbd4a50c\", \"span\": \"My goal this quarter is to reduce the build pipeline time below five minutes.\"}], \"metadata\": {\"category\": \"goal\", \"preferenceKey\": \"build-pipeline-time\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Goal: cut build pipeline time below five minutes this quarter\", \"body\": \"The user's stated goal for this quarter is to reduce the build pipeline time to under five minutes.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13wf2a_7656838b8f2a42c1bf70a090dbb07d95\", \"revisionId\": \"rev_mv13wf2a_69a3aab32f4640969ca4da64ecac9b37\", \"span\": \"My goal this quarter is to reduce the build pipeline time below five minutes.\"}], \"metadata\": {\"category\": \"goal\", \"preferenceKey\": \"build-pipeline-time\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Goal: reduce build pipeline time below five minutes this quarter\", \"body\": \"The user's goal this quarter is to reduce the build pipeline time to below five minutes.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13yyip_8f638426aaa04d86b078f7376c62e67a\", \"revisionId\": \"rev_mv13yyip_c6110a484cb6499c9487f346a094593e\", \"span\": \"My goal this quarter is to reduce the build pipeline time below five minutes.\"}], \"metadata\": {\"category\": \"goal\", \"preferenceKey\": \"build-pipeline-time\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

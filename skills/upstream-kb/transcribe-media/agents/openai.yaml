@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transcribe Media"
+  short_description: "Transcribe audio and video into timestamped markdown"
+  default_prompt: "Use $transcribe-media to turn an audio or video file into markdown notes."

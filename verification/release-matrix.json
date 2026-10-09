@@ -1,0 +1,8 @@
+{
+  "supportedPlatforms": ["darwin"],
+  "decisionNotes": [
+    "Release is explicitly restricted to macOS (APFS, tested). Linux/ext4 was NOT_RUN and is not a supported release platform until the reliability lane passes there.",
+    "Process-crash atomicity and recovery are verified; power-loss durability is not.",
+    "Writes are serialized by one vault-wide lock; per-workspace write parallelism is not offered."
+  ]
+}

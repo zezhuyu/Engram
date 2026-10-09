@@ -1,0 +1,350 @@
+{
+  "tier": "ISOLATED_CONTAINERS",
+  "physicalHosts": false,
+  "runAt": "2026-10-09T17:04:48.314Z",
+  "docker": "29.7.2",
+  "topology": {
+    "network": "xhost-net",
+    "subnet": "172.31.77.0/24",
+    "hosts": {
+      "xhost-a": "172.31.77.10",
+      "xhost-b": "172.31.77.11",
+      "xhost-c": "172.31.77.12"
+    },
+    "tls": "test CA (ECDSA P-256), node TLS terminator -> loopback HTTP upstream",
+    "ports": {
+      "valid": 8443,
+      "rogueCa": 8444,
+      "wrongHost": 8445
+    }
+  },
+  "scenarios": [
+    {
+      "id": "X1",
+      "title": "Each client initializes remote capture with the supported lifecycle hooks",
+      "checks": [
+        {
+          "ok": true,
+          "what": "client b init exited 0",
+          "detail": "\"\""
+        },
+        {
+          "ok": true,
+          "what": "client b registered SessionStart/UserPromptSubmit/PostToolUse/SessionEnd hooks",
+          "detail": "[\"SessionStart\",\"UserPromptSubmit\",\"PostToolUse\",\"SessionEnd\"]"
+        },
+        {
+          "ok": true,
+          "what": "client b hook commands use https remote URL and carry no token"
+        },
+        {
+          "ok": true,
+          "what": "client c init exited 0",
+          "detail": "\"\""
+        },
+        {
+          "ok": true,
+          "what": "client c registered SessionStart/UserPromptSubmit/PostToolUse/SessionEnd hooks",
+          "detail": "[\"SessionStart\",\"UserPromptSubmit\",\"PostToolUse\",\"SessionEnd\"]"
+        },
+        {
+          "ok": true,
+          "what": "client c hook commands use https remote URL and carry no token"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X2",
+      "title": "Both clients generate meaningful memory events without any memory-writing instruction",
+      "checks": [
+        {
+          "ok": true,
+          "what": "Claude-role prompt and tool result arrived with original content",
+          "detail": "2"
+        },
+        {
+          "ok": true,
+          "what": "Codex-role prompt and tool result arrived with original content"
+        },
+        {
+          "ok": true,
+          "what": "client spools drained to zero after online delivery"
+        },
+        {
+          "ok": true,
+          "what": "every committed event has host, eventId and server-assigned actor (provenance)"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X3",
+      "title": "Authenticated TLS transport: certificate verification and refusal of untrusted paths",
+      "checks": [
+        {
+          "ok": true,
+          "what": "client b verifies the server chain and host name over TLS 1.2+",
+          "detail": "[\"subject=CN = xhost-a\",\"issuer=CN = xhost test CA\",\"Verification: OK\",\"New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384\"]"
+        },
+        {
+          "ok": true,
+          "what": "client c verifies the server chain and host name over TLS 1.2+",
+          "detail": "[\"subject=CN = xhost-a\",\"issuer=CN = xhost test CA\",\"Verification: OK\",\"New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384\"]"
+        },
+        {
+          "ok": true,
+          "what": "certificate from an untrusted (rogue) CA is refused",
+          "detail": "{\"error\":\"UNABLE_TO_VERIFY_LEAF_SIGNATURE\"}"
+        },
+        {
+          "ok": true,
+          "what": "certificate for the wrong host name is refused",
+          "detail": "{\"error\":\"ERR_TLS_CERT_ALTNAME_INVALID\"}"
+        },
+        {
+          "ok": true,
+          "what": "a client without the CA does not trust the server (no verification bypass)",
+          "detail": "{\"error\":\"UNABLE_TO_VERIFY_LEAF_SIGNATURE\"}"
+        },
+        {
+          "ok": true,
+          "what": "the plain-HTTP upstream (loopback only) is not reachable from another host",
+          "detail": "{\"error\":\"ECONNREFUSED\"}"
+        },
+        {
+          "ok": true,
+          "what": "client refuses a non-HTTPS remote URL and still fails open (exit 0, nothing queued, nothing sent in clear)"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X3b",
+      "title": "Unauthorized connections are rejected",
+      "checks": [
+        {
+          "ok": true,
+          "what": "missing and unknown bearer tokens get 401",
+          "detail": "{\"noTok\":{\"status\":401},\"badTok\":{\"status\":401}}"
+        },
+        {
+          "ok": true,
+          "what": "a credential cannot use another actor's capture registration (404)"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X4-X8",
+      "title": "Network interruption, offline operation, bounded buffering, server restart, restoration",
+      "checks": [
+        {
+          "ok": true,
+          "what": "X4: clients are disconnected from the server network",
+          "detail": "{\"error\":\"EAI_AGAIN\"}"
+        },
+        {
+          "ok": true,
+          "what": "X5/X6: hooks stay silent, exit 0 and finish inside the 5 s hook timeout while disconnected (fail-open)",
+          "detail": "[197,196,198,207,200,204,198,198]"
+        },
+        {
+          "ok": true,
+          "what": "X6: events were durably buffered on each client",
+          "detail": "{\"b\":4,\"c\":4}"
+        },
+        {
+          "ok": true,
+          "what": "X6: 1100 concurrent hook invocations all exited 0 while the spool was full (fail-open)"
+        },
+        {
+          "ok": true,
+          "what": "X6: local buffer is bounded at the 1000-entry cap under concurrent writers",
+          "detail": "{\"spoolEntries\":1000}"
+        },
+        {
+          "ok": true,
+          "what": "X12: client C spool reversed and three envelopes duplicated",
+          "detail": "\"7 written, 4 originals\""
+        },
+        {
+          "ok": true,
+          "what": "X7: server process is really down (loopback upstream refuses)"
+        },
+        {
+          "ok": true,
+          "what": "X7: server process restarted and answers (401 without token)"
+        },
+        {
+          "ok": true,
+          "what": "X7/X8: server restarted while clients were offline; connectivity restored and TLS endpoint answers"
+        },
+        {
+          "ok": true,
+          "what": "X8: both client buffers drain to zero after restoration",
+          "detail": "{\"dB\":{\"delivered\":100,\"queued\":0},\"dC\":{\"delivered\":7,\"queued\":0}}"
+        },
+        {
+          "ok": true,
+          "what": "X9: every committed event id is unique (no double commits)",
+          "detail": "{\"events\":1006}"
+        },
+        {
+          "ok": true,
+          "what": "X9: each buffered fill event is committed exactly once",
+          "detail": "{\"committed\":996,\"bufferedFillEnvelopes\":996}"
+        },
+        {
+          "ok": true,
+          "what": "X9/X12: duplicated and reordered offline events each appear exactly once",
+          "detail": "{\"c2\":1,\"c3\":1}"
+        },
+        {
+          "ok": true,
+          "what": "X10: SessionEnd events generated while disconnected were delivered and closed both remote sessions",
+          "detail": "[{\"id\":\"obj_mv17rhnt_361ca981929d48edbec4b028e3900bf5\",\"createdBy\":\"claude-b\",\"scope\":{\"type\":\"workspace\",\"workspaceId\":\"ws-b\"}},{\"id\":\"obj_mv17ri4r_db0104e9b2254729b9ea695fbb67ed10\",\"createdBy\":\"codex-c\",\"scope\":{\"type\":\"workspace\",\"workspaceId\":\"ws-c\"}}]"
+        },
+        {
+          "ok": true,
+          "what": "X10: delivery of those SessionEnd events queued handoff generation on the server (no model was run in this harness)",
+          "detail": "{\"handoffJobs\":2}"
+        },
+        {
+          "ok": true,
+          "what": "X12: committed journal verifies after duplicate/reordered/outage delivery",
+          "detail": "{\"ok\":true,\"issues\":[],\"objects\":1012}"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X11",
+      "title": "Actor attribution and workspace permissions",
+      "checks": [
+        {
+          "ok": true,
+          "what": "events land only in the credential owner’s workspace"
+        },
+        {
+          "ok": true,
+          "what": "no cross-workspace writes by either actor"
+        },
+        {
+          "ok": true,
+          "what": "no event is attributed to anything but the two credentialed actors"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X12b",
+      "title": "Replay of already delivered envelopes cannot corrupt committed memory",
+      "checks": [
+        {
+          "ok": true,
+          "what": "server spool fully committed before replay",
+          "detail": "{\"queued\":0,\"dropped\":0,\"rejected\":0}"
+        },
+        {
+          "ok": true,
+          "what": "replaying three delivered envelopes is accepted by the server but commits nothing new",
+          "detail": "{\"delivered\":3,\"before\":1006,\"after\":1006}"
+        },
+        {
+          "ok": true,
+          "what": "journal still verifies after replay"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X13",
+      "title": "Revoked credentials cannot resume delivery until reauthenticated",
+      "checks": [
+        {
+          "ok": true,
+          "what": "credential revoked on the server",
+          "detail": "\"\""
+        },
+        {
+          "ok": true,
+          "what": "the revoked token is refused immediately (401)",
+          "detail": "{\"status\":401}"
+        },
+        {
+          "ok": true,
+          "what": "client keeps working (fail-open) and retains the 3 undeliverable events",
+          "detail": "{\"spool\":3}"
+        },
+        {
+          "ok": true,
+          "what": "draining with the revoked token delivers nothing",
+          "detail": "{\"delivered\":0,\"queued\":3}"
+        },
+        {
+          "ok": true,
+          "what": "the old token still delivers nothing after a new credential exists"
+        },
+        {
+          "ok": true,
+          "what": "with the newly issued credential the retained events are delivered exactly once",
+          "detail": "{\"delivered\":3}"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X14",
+      "title": "Client process/container crash and restart with events still queued",
+      "checks": [
+        {
+          "ok": true,
+          "what": "X14: receiver is down while the client keeps queueing"
+        },
+        {
+          "ok": true,
+          "what": "after SIGKILL of the whole client container mid-write, buffered envelopes survive and none is corrupt (stray .tmp files are ignored)",
+          "detail": "{\"good\":27,\"bad\":0,\"tmp\":\"0\"}"
+        },
+        {
+          "ok": true,
+          "what": "after restart the survivors drain and each is committed exactly once",
+          "detail": "{\"buffered\":27,\"committed\":27}"
+        },
+        {
+          "ok": true,
+          "what": "final committed state is consistent: journal verifies"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "X-final",
+      "title": "Final state consistency after all recoveries",
+      "checks": [
+        {
+          "ok": true,
+          "what": "unique event ids, verified journal, empty server-side spool",
+          "detail": "{\"events\":1036,\"serverSpool\":{\"queued\":0,\"dropped\":0,\"rejected\":0}}"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "OBS",
+      "title": "Failure reporting and observability",
+      "checks": [
+        {
+          "ok": true,
+          "what": "observed: hooks are silent by design (stdout empty, exit 0); the client-visible signal is spool depth; the server exposes committed events, journal verification and its spool stats; the client has no retry timer or backoff — delivery is attempted on each hook and on explicit drain-remote (each attempt bounded to 2 s and 100 files)"
+        },
+        {
+          "ok": null,
+          "what": "NOT_RUN: physical separate hosts, real network paths, iptables DROP (hanging connections), clock skew, packet loss: not reproducible with containers on one machine"
+        }
+      ],
+      "status": "PARTIAL"
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+ "documents": 6,
+ "events": [
+  {
+   "id": "obj_mv17rhte_6941d39351494279870222712a091d69",
+   "eventId": "c9d74d05e4531cf390b937cfc5fc919b",
+   "eventType": "user.message",
+   "host": "claude-code",
+   "createdBy": "claude-b",
+   "scope": {
+    "type": "workspace",
+    "workspaceId": "ws-b"
+   },
+   "hostSession": "sess-b-1",
+   "body": "Please make the billing retry logic use exponential backoff and note the decision. MARKB #1"
+  },
+  {
+   "id": "obj_mv17rhz5_11a662b393434e3aa2d70b0b97bb36bb",
+   "eventId": "0a6168688f19c82d25e86b682ba105c6",
+   "eventType": "tool.result",
+   "host": "claude-code",
+   "createdBy": "claude-b",
+   "scope": {
+    "type": "workspace",
+    "workspaceId": "ws-b"
+   },
+   "hostSession": "sess-b-1",
+   "body": "[tool Bash] npm test -- billing MARKB 1\nbilling tests passed MARKB 1"
+  },
+  {
+   "id": "obj_mv17riaq_318277584a4b458e860f10bcf7da1303",
+   "eventId": "3da395c2f3f17f11db6f4785030348d3",
+   "eventType": "user.message",
+   "host": "codex",
+   "createdBy": "codex-c",
+   "scope": {
+    "type": "workspace",
+    "workspaceId": "ws-c"
+   },
+   "hostSession": "sess-c-1",
+   "body": "Add rate limiting to the ingestion endpoint and record why. MARKC #1"
+  },
+  {
+   "id": "obj_mv17rigf_5785dafe26bd45adbfc89c0a037b83f6",
+   "eventId": "ebb9f7aba1273152d161224748013c0d",
+   "eventType": "tool.result",
+   "host": "codex",
+   "createdBy": "codex-c",
+   "scope": {
+    "type": "workspace",
+    "workspaceId": "ws-c"
+   },
+   "hostSession": "sess-c-1",
+   "body": "[tool Bash] pytest ingestion MARKC 1\ningestion tests passed MARKC 1"
+  }
+ ],
+ "closedSessions": [],
+ "handoffJobs": 0,
+ "serverSpool": {
+  "queued": 0,
+  "dropped": 0,
+  "rejected": 0
+ },
+ "journal": {
+  "ok": true,
+  "issues": [],
+  "objects": 6
+ }
+}

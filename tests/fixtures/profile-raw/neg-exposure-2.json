@@ -1,0 +1,27 @@
+{
+  "case": "neg-exposure-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user only reports passing exposure to a WebAssembly talk title without reading it or forming an opinion, so no enduring fact about them is stated.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user only reports passing exposure to a WebAssembly talk title without reading it or forming any opinion, so no enduring fact about them is stated.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"Passing exposure only: the user saw a WebAssembly talk title but explicitly has not read it or formed an opinion.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

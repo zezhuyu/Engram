@@ -1,0 +1,27 @@
+{
+  "case": "explicit-commit-style",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers commit messages that explain why\", \"body\": \"The user wants commit messages to explain why a change was made, not just what changed.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13uk9h_7a4a374a0893457fa55ae469a2955806\", \"revisionId\": \"rev_mv13uk9h_a3a0e0b437a84bf8ad310a54af0ed515\", \"span\": \"I always want commit messages that explain why the change was made, not just what changed.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"commit-message-style\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers commit messages that explain why\", \"body\": \"The user wants commit messages to explain why a change was made, not just what changed.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13x8z3_b1bc364ecd644b519ce707e93a86902f\", \"revisionId\": \"rev_mv13x8z3_e80c9dd0a5fa4e47a26a9fe5f77c5caf\", \"span\": \"I always want commit messages that explain why the change was made, not just what changed.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"commit-message-style\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers commit messages that explain why\", \"body\": \"The user wants commit messages that explain why a change was made, not just what changed.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13zrdw_722deeadca2149259fa5c37414b94873\", \"revisionId\": \"rev_mv13zrdw_9874e2936b04494abca59377baa4cd6e\", \"span\": \"I always want commit messages that explain why the change was made, not just what changed.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"commit-message-style\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

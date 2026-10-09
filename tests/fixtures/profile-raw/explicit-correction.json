@@ -1,0 +1,27 @@
+{
+  "case": "explicit-correction",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers detailed review feedback over concise summaries\", \"body\": \"The user prefers detailed review feedback rather than concise summaries.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13thj0_d15f5b1561604167b61b648735ea6318\", \"revisionId\": \"rev_mv13thj0_c821087a49184b73a326fbcbc6e6c895\", \"span\": \"I now prefer detailed review feedback rather than concise summaries.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"review-feedback-detail\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers detailed review feedback\", \"body\": \"The user prefers detailed review feedback rather than concise summaries.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13w603_289da45a417e44f38cd32e589971215d\", \"revisionId\": \"rev_mv13w603_ba79e0079b4f4b9c8037777c56e2ab46\", \"span\": \"I now prefer detailed review feedback rather than concise summaries.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"review-feedback-detail\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers detailed review feedback\", \"body\": \"The user prefers detailed review feedback rather than concise summaries.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13ypoo_f6f011ec4daa409897a0630f90c1d610\", \"revisionId\": \"rev_mv13ypoo_b7af47635f3544c3ae44aed0b55d78fa\", \"span\": \"I now prefer detailed review feedback rather than concise summaries.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"review-feedback-detail\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

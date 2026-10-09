@@ -1,0 +1,27 @@
+{
+  "case": "explicit-concise",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers concise code review feedback with one concrete test result\", \"body\": \"For code reviews, the user prefers concise feedback that includes one concrete test result.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13t8h0_bac62b5036f54f4098fc4b451e356adc\", \"revisionId\": \"rev_mv13t8h0_a54a37a555ec4903b1dbb621f5dda9f1\", \"span\": \"For future code reviews, I prefer concise feedback with one concrete test result.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"code-review-feedback-style\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers concise code review feedback with one concrete test result\", \"body\": \"For code reviews, the user prefers concise feedback that includes one concrete test result.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13vv2v_68b3c91ed5744897b0cf5414e8b47453\", \"revisionId\": \"rev_mv13vv2v_8cde20a5a69e49478c8bb4dca97a6f30\", \"span\": \"For future code reviews, I prefer concise feedback with one concrete test result.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"code-review-feedback-style\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers concise code review feedback with one concrete test result\", \"body\": \"For code reviews, the user prefers concise feedback that includes one concrete test result.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13ygq3_6243e27d61d84adb853077ff261300cf\", \"revisionId\": \"rev_mv13ygq3_7ff158280d004e2482b64fb25ae5bab7\", \"span\": \"For future code reviews, I prefer concise feedback with one concrete test result.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"code-review-feedback-style\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "case": "neg-hypothetical-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement is an explicitly hypothetical daydream about a bigger budget, not an enduring fact about the user.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement is a hypothetical the user explicitly framed as daydreaming, not an enduring fact about themself.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement is a hypothetical daydream about a larger budget, not an enduring fact about the user.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

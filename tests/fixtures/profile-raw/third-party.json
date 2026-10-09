@@ -1,0 +1,27 @@
+{
+  "case": "third-party",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement describes a third party's (a teammate's) preference, and the user explicitly says they have not stated their own preference.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement describes a third party's preference and the user explicitly says they have not stated their own preference.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement describes a teammate's preference (third party), and the user explicitly says they have not stated their own preference.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

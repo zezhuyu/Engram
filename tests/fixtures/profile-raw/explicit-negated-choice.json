@@ -1,0 +1,27 @@
+{
+  "case": "explicit-negated-choice",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers configurable environment values over hard-coded ones\", \"body\": \"The user dislikes hard-coded environment values and prefers that they be made configurable.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13tent_295f104bd8de4f4b827d61f5e8b7f1a0\", \"revisionId\": \"rev_mv13tenu_cb9f9940196f4924a0c08a2530da416d\", \"span\": \"I don't like hard-coded environment values; please make them configurable.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"configurable-environment-values\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers configurable environment values over hard-coded ones\", \"body\": \"The user dislikes hard-coded environment values and prefers them to be made configurable.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13w2ml_3096f756630b41d480912cb1c17340b3\", \"revisionId\": \"rev_mv13w2ml_84f47a874009471a99e3738365efe06c\", \"span\": \"I don't like hard-coded environment values; please make them configurable.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"configurable-environment-values\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers configurable environment values over hard-coded ones\", \"body\": \"The user dislikes hard-coded environment values and prefers that they be made configurable.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13ymwv_bdcb6ff1966346b8893bfe567c26a5f4\", \"revisionId\": \"rev_mv13ymwv_9b2ad4fbed434ce492033a076ada6bfd\", \"span\": \"I don't like hard-coded environment values; please make them configurable.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"configurable-environment-values\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

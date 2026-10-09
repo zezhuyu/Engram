@@ -1,0 +1,154 @@
+{
+  "suite": "wiki",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T15:07:32.353Z",
+  "command": "node --test --test-reporter=tap dist/tests/wiki/compile.test.js dist/tests/memory/handoff.test.js dist/tests/wiki/real-model.test.js",
+  "durationMs": 6831,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "not installed"
+  },
+  "counts": {
+    "pass": 10,
+    "fail": 0,
+    "skipped": 1,
+    "total": 11
+  },
+  "tests": [
+    {
+      "name": "session end yields a cited retrospective AND a handoff, each keeping user, assistant and tool statements distinct, with no forced context",
+      "status": "PASS"
+    },
+    {
+      "name": "an abandoned session produces a partial handoff that says it is incomplete and invents no outcome",
+      "status": "PASS"
+    },
+    {
+      "name": "explicit decisions, findings, notes and task completion go through the same registration, redaction and queue, with correct speaker evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "uncited or mis-sourced retrospectives are rejected and nothing is promoted to shared knowledge",
+      "status": "PASS"
+    },
+    {
+      "name": "a new source becomes a cited, reviewable page with dependency edges; the original bytes never change",
+      "status": "PASS"
+    },
+    {
+      "name": "incremental compile: a related source updates only the affected page as a new revision; unrelated pages and the rest of the wiki are untouched",
+      "status": "PASS"
+    },
+    {
+      "name": "dependency edges find affected pages without keyword overlap, and a source on a new topic creates a new page",
+      "status": "PASS"
+    },
+    {
+      "name": "citation lint and target validation: uncited claims, bad citation numbers, unsupplied or source-less targets never become knowledge",
+      "status": "PASS"
+    },
+    {
+      "name": "privacy and consistency: private sources are never compiled into the global wiki, a page that changed since compilation is not overwritten, repeated events are idempotent",
+      "status": "PASS"
+    },
+    {
+      "name": "one bounded repair attempt: a model that fixes its citations is accepted, one that does not is still rejected, and there is never a loop",
+      "status": "PASS"
+    },
+    {
+      "name": "real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
+      "status": "SKIPPED"
+    }
+  ],
+  "cases": 10,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Real-model wiki compilation is opt-in",
+      "status": "NOT_RUN",
+      "reason": "Enable with MDB_REAL_MODEL_TEST=1 (default provider claude-cli). Passed once during M3 (see verification/wiki/m3.md); it spends a little model quota. Model quality (groundedness, hallucination rate) is not scored."
+    },
+    {
+      "item": "Claim extraction as a separate stage and lint of claim-to-span support",
+      "status": "UNSUPPORTED",
+      "reason": "Compilation is one model call per source (plus one repair attempt). The deterministic checks are: evidence is real and readable, target page was supplied, at least one source is cited, every statement cites [n] or says (inference), the page has not changed since compilation. Whether a cited span really supports the sentence is not machine-checked."
+    },
+    {
+      "item": "Page merge/split and topic pages beyond create/update",
+      "status": "UNSUPPORTED",
+      "reason": "A source updates at most one supplied page or creates one page."
+    },
+    {
+      "item": "Re-processing when a source is replaced by a new import of the same file",
+      "status": "UNSUPPORTED",
+      "reason": "Imported sources are immutable; a re-import is a new source object and is compiled like any new source. No explicit \"supersedes\" link between the two imports exists."
+    },
+    {
+      "item": "Task-complete signal from hosts",
+      "status": "UNSUPPORTED",
+      "reason": "No supported host emits a task-complete hook. task.completed arrives only through explicit `mdb memory record`."
+    }
+  ],
+  "limitations": [
+    "Retrospectives and handoffs are model output checked for citations, not for factual correctness.",
+    "Affected pages are chosen by dependency edges and keyword overlap, not semantic similarity."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/wiki/compile.test.js dist/tests/memory/handoff.test.js dist/tests/wiki/real-model.test.js",
+  "caseDetails": [
+    {
+      "name": "wiki/source-to-page",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/retrospective-and-handoff",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/partial-handoff",
+      "status": "PASS"
+    },
+    {
+      "name": "memory/explicit-records",
+      "status": "PASS"
+    },
+    {
+      "name": "wiki/incremental-affected-page",
+      "status": "PASS",
+      "detail": {
+        "suppliedDocuments": 2
+      }
+    },
+    {
+      "name": "memory/lint-and-no-promotion",
+      "status": "PASS"
+    },
+    {
+      "name": "wiki/dependency-edges-and-new-topic",
+      "status": "PASS"
+    },
+    {
+      "name": "wiki/citation-lint-and-targets",
+      "status": "PASS"
+    },
+    {
+      "name": "wiki/privacy-staleness-idempotency",
+      "status": "PASS"
+    },
+    {
+      "name": "wiki/bounded-repair",
+      "status": "PASS"
+    }
+  ]
+}
