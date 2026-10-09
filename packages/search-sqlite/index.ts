@@ -11,6 +11,7 @@ import { combine, distinctTerms, retrieve, ripgrepAvailable, scanFiles, textSpec
 import { profileAsync, profileSync } from '../bench/instrumentation.js';
 import { VectorBackend, type SemanticMatch } from '../search-semantic/backend.js';
 import type { EmbeddingProvider } from '../core/types.js';
+import { PostgresSearch } from '../search-postgres/index.js';
 
 /** SQLite is disposable. Every candidate is intersected with authorized current revisions. */
 export class SQLiteSearch implements SearchIndexAdapter {
@@ -197,15 +198,16 @@ export class SQLiteSearch implements SearchIndexAdapter {
 export class SearchEngine implements SearchIndexAdapter {
   private readonly files: FilesystemSearch;
   private readonly sqlite: SQLiteSearch;
+  private readonly postgres: PostgresSearch;
   /** Optional semantic backend: lives in the SQLite index, needs an embedding provider, and never affects keyword, grep or regex. */
   readonly vectors: VectorBackend;
   constructor(public readonly vault: SearchVault, options: { embedder?: EmbeddingProvider; env?: Record<string, string | undefined> } = {}) {
-    this.files = new FilesystemSearch(vault); this.sqlite = new SQLiteSearch(vault);
+    this.files = new FilesystemSearch(vault); this.sqlite = new SQLiteSearch(vault); this.postgres = new PostgresSearch(vault,{embedder:options.embedder,env:options.env});
     this.vectors = new VectorBackend(vault, { ...options, ensureFresh: () => this.sqlite.sync() });
   }
-  capabilities(): Record<string, boolean> { return this.sqlite.capabilities(); }
+  capabilities(): Record<string, boolean> { return { ...this.sqlite.capabilities(), postgres: true, postgresFts: true, pgvector: true }; }
   /** Lexical retrieval: SQLite FTS5 (BM25 ranking for keyword) when enabled and healthy, otherwise the filesystem engine. */
-  private async lexical(input: SearchInput, actor: ActorContext): Promise<SearchResult> { return (await this.vault.config()).sqlite.enabled ? this.sqlite.query(input, actor) : this.files.query(input, actor); }
+  private async lexical(input: SearchInput, actor: ActorContext): Promise<SearchResult> { const config=await this.vault.config();return config.postgres?.enabled?this.postgres.query(input,actor):config.sqlite.enabled?this.sqlite.query(input,actor):this.files.query(input,actor); }
 
   /**
    * Mode resolution (the mode that ran is always reported):
@@ -216,6 +218,7 @@ export class SearchEngine implements SearchIndexAdapter {
    */
   async query(input: SearchInput, actor: ActorContext = this.vault.actor): Promise<SearchResult> {
     const requested = input.mode ?? 'auto';
+    if ((await this.vault.config()).postgres?.enabled) return this.postgres.query(input,actor);
     if (input.includeHistory || requested === 'grep' || requested === 'keyword' || input.regex) return this.lexical(input, actor);
     const wantsVector = requested === 'semantic' || requested === 'hybrid' || requested === 'auto';
     if (!wantsVector) return this.lexical(input, actor);
@@ -282,7 +285,9 @@ export class SearchEngine implements SearchIndexAdapter {
   }
   async rebuild(scope?: Scope): Promise<void> {
     await refreshNavigation(this.vault);
-    if ((await this.vault.config()).sqlite.enabled) await this.sqlite.rebuild(scope); // also persists the manifest
+    const config=await this.vault.config();
+    if(config.postgres?.enabled)await this.postgres.rebuild(scope);
+    else if (config.sqlite.enabled) await this.sqlite.rebuild(scope); // also persists the manifest
     else { const manifest = await manifestFor(this.vault); await manifest.sync(); await manifest.save(); }
   }
   links(id: string) { return this.files.links(id); }
@@ -290,13 +295,16 @@ export class SearchEngine implements SearchIndexAdapter {
   related(id: string, depth = 1) { return this.files.related(id, depth); }
   context(input: Omit<SearchInput, 'query'> & { task?: string; query?: string; budgetTokens?: number }) { return this.files.context(input); }
   /** Incremental SQLite maintenance (owner only): re-index only objects touched after each database checkpoint. No-op when SQLite is disabled. */
-  async sync(): Promise<{ databases: number; objects: number }> { return (await this.vault.config()).sqlite.enabled ? this.sqlite.sync() : { databases: 0, objects: 0 }; }
+  async sync(): Promise<{ databases: number; objects: number }> { const config=await this.vault.config();return config.postgres?.enabled?this.postgres.sync():config.sqlite.enabled ? this.sqlite.sync() : { databases: 0, objects: 0 }; }
   /** Embeds new and changed revisions (owner only). Sends document text to the configured embedding provider, subject to its locality and privacy settings. */
-  embedClear() { return this.vectors.clear(); }
-  embedSync(options: { signal?: AbortSignal; maxObjects?: number } = {}) { return this.vectors.sync(options); }
+  async embedClear() { return (await this.vault.config()).postgres?.enabled?this.postgres.embedClear():this.vectors.clear(); }
+  async embedSync(options: { signal?: AbortSignal; maxObjects?: number } = {}) { return (await this.vault.config()).postgres?.enabled?this.postgres.embedSync(options):this.vectors.sync(options); }
   async health(): Promise<Record<string, unknown>> {
     const manifest = await manifestFor(this.vault); await manifest.sync();
-    const base = (await this.vault.config()).sqlite.enabled ? await this.sqlite.health() : await this.files.health();
-    return { ...base, vector: await this.vectors.status().catch(e => ({ ready: false, reason: (e as Error).message })), manifest: { entries: manifest.entries.size, journalSequence: manifest.sequence, persisted: manifest.persisted, loadedFromDisk: manifest.loadedFromDisk }, ripgrep: ripgrepAvailable() };
+    const config=await this.vault.config();const base = config.postgres?.enabled ? await this.postgres.health() : config.sqlite.enabled ? await this.sqlite.health() : await this.files.health();
+    const vectorPromise=config.postgres?.enabled?this.postgres.vectorStatus():this.vectors.status();
+    const vector=await vectorPromise.catch(e => ({ ready: false, reason: (e as Error).message }));
+    return { ...base, vector, manifest: { entries: manifest.entries.size, journalSequence: manifest.sequence, persisted: manifest.persisted, loadedFromDisk: manifest.loadedFromDisk }, ripgrep: ripgrepAvailable() };
   }
+  async close(): Promise<void> { await this.postgres.close(); }
 }

@@ -14,8 +14,10 @@ Scopes are either global (`wiki`, `shared`, `discoveries`, `profile`) or workspa
 |---|---|
 | `packages/core` | Documents, scope/authorization, revisions, journal, recovery and CRUD |
 | `packages/storage-local` | Safe local paths, immutable writes, atomic replacement and writer lock |
+| `packages/storage-s3` | Optional S3 canonical object store and conditional commit-head journal |
 | `packages/search-files` | Native lexical retrieval, context and graph/navigation operations |
 | `packages/search-sqlite` | Optional disposable SQLite index and lexical fallback |
+| `packages/search-postgres` | Optional PostgreSQL FTS index and pgvector semantic/hybrid retrieval |
 | `packages/intelligence` | Manual sessions, bounded durable jobs and reviewed proposals |
 | `packages/skills` | KB-adapted/native skill registry and SDK dispatch |
 | `packages/sdk` | Actor-bound `Engram` / `MDB` facade |
@@ -29,4 +31,4 @@ Media conversion, OCR, transcription, external downloads, creator crawling and a
 
 ## Boundaries
 
-LocalObjectStore and search/provider interfaces permit future adapters; no S3, PostgreSQL or distributed replication is implemented. The commit protocol is local POSIX storage, not a distributed transaction protocol. Remote MCP clients connect to one server and its canonical vault; this is shared access, not replication. Claude Code and Codex hooks send allowlisted lifecycle events to that server, while per-machine redacted spools retry delivery. ACLs protect MDB-mediated operations, not a privileged owner who can read the disk. Jobs and indexes can contain sensitive information and need the same OS protection as revisions.
+The default remains local Markdown plus filesystem retrieval and optional SQLite. S3 can hold canonical object bytes and a CAS-published journal while local paths materialize current views and disposable indexes. Its protocol requires conditional object PUT and strongly consistent reads; it does not rely on POSIX rename/fsync. PostgreSQL is an alternative disposable search index; pgvector and embeddings are optional. Both remote backends remain optional and never replace Markdown revisions and journal records as authority. ACLs protect MDB-mediated operations, not a privileged owner who can read local caches or database contents. Jobs and indexes can contain sensitive information and need the same OS protection as revisions.

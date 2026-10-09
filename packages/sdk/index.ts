@@ -2,7 +2,7 @@ import { Vault } from '../core/vault.js';
 import { resolveRoot } from '../core/root.js';
 import { MemoryRecall } from '../memory/recall.js';
 import { capabilities as discoverCapabilities } from '../memory/capabilities.js';
-import { OWNER, type EmbeddingProvider, type ActorContext, type ModelProvider, type PatchInput, type PutInput, type SearchInput } from '../core/types.js';
+import { OWNER, type EmbeddingProvider, type ActorContext, type ModelProvider, type ObjectStore, type PatchInput, type PutInput, type SearchInput } from '../core/types.js';
 import { SearchEngine } from '../search-files/index.js';
 import { QueryApi } from '../query/index.js';
 import { IntelligenceEngine } from '../intelligence/index.js';
@@ -11,6 +11,7 @@ export * from '../core/types.js';
 export { QueryApi, QueryEngine, VaultCandidateSource, runLocal, normalize as normalizeQuery, type QueryAst, type QueryContext, type QueryResult, type QueryPlanSummary, type CandidateSource, type CandidateRequest } from '../query/index.js';
 export { LifecycleAdapter, type CaptureOptions, type CaptureEvent } from '../../integrations/lifecycle.js';
 export { Vault } from '../core/vault.js';
+export { S3ObjectStore, createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 export * from '../memory/index.js';
 export { CATEGORIES as INSIGHT_CATEGORIES, evaluateInsight, correctInsight, projectProfile, commitInsight, isInsight, type InsightCategory, type InsightEval } from '../intelligence/insights.js';
 export { recordFeedback, staleDiscoveries, readStats, successRate, type DiscoveryOutcome } from '../intelligence/dream/lifecycle.js';
@@ -34,17 +35,18 @@ export class Engram {
   readonly memory: MemoryRecall;
   /** Typed query AST engine (operators, joins, graph, time, saved queries). Same engine behind `mdb query` and the MCP mdb_query tool. */
   readonly queries: QueryApi;
-  constructor(root: string = resolveRoot(), actor: ActorContext = OWNER, provider?: ModelProvider, options: { embedder?: EmbeddingProvider } = {}) {
-    this.vault = new Vault(root, actor);
-    this.search = new SearchEngine(this.vault, options.embedder ? { embedder: options.embedder } : {});
+  constructor(root: string = resolveRoot(), actor: ActorContext = OWNER, provider?: ModelProvider, options: { embedder?: EmbeddingProvider; store?: ObjectStore; env?: Record<string,string|undefined> } = {}) {
+    this.vault = new Vault(root, actor, options.store ? { store: options.store } : {});
+    this.search = new SearchEngine(this.vault, options);
     this.intelligence = new IntelligenceEngine(this.vault, provider);
     this.memory = new MemoryRecall(this.vault, this.search);
     this.queries = new QueryApi(this.vault, this.search);
   }
-  init(options?: { sqlite?: boolean }) { return this.vault.init(options); }
+  init(options?: { sqlite?: boolean; postgres?: boolean }) { return this.vault.init(options); }
   capabilities() { return discoverCapabilities(this); }
   config() { return this.vault.config(); }
   doctor() { return this.vault.doctor(); }
+  async close() { await Promise.all([this.search.close(),this.vault.close()]); }
   verify() { return this.vault.verify(); }
   recover() { return this.vault.recover(); }
   reconcile() { return this.vault.reconcile(); }

@@ -2,6 +2,14 @@
 
 The vault contains `mdb.yaml` configuration, access manifests, human-readable current document paths, original-source snapshots, and internal `.mdb` records. Objects carry a stable ID, a new revision ID for each accepted change, revision number, previous revision, scope, kind, title, timestamps, actor, tags, relations, evidence and metadata in YAML frontmatter followed by Markdown body. See `Document`, `PutInput` and `PatchInput` in `packages/core/types.ts` for the exact SDK field names. YAML parsing uses the `yaml` package; user content is data.
 
+## Optional S3 canonical store
+
+Set `MDB_STORAGE_BACKEND=s3`, `MDB_S3_BUCKET`, and optionally `MDB_S3_REGION` and `MDB_S3_PREFIX`. S3-compatible endpoints use `MDB_S3_ENDPOINT` and path-style requests. Credentials use the AWS SDK credential provider chain; secrets are not written to the vault. The endpoint must support conditional `PutObject` (`If-None-Match: *` and `If-Match`) and strongly consistent `GET`/`HEAD` after writes. Stores without those guarantees are unsupported because they cannot safely coordinate writers.
+
+Markdown revisions and imported originals are immutable keys. The adapter records SHA-256 metadata and verifies existing immutable bytes on retry; Vault verification checks revision hashes from journal events and original hashes from source manifests. Commit events are immutable, hash-linked objects. `_commit-head.json` is the publication point and advances with an ETag compare-and-swap. Readers follow only the chain reachable from that head, so a request interrupted before head publication leaves an unreachable record rather than a partial commit. A retry with the same transaction/idempotency key returns the already published event. Concurrent writers reread the head and retry conditional publication; a conflicting revision is rejected.
+
+S3 has no rename or fsync step in this protocol. The acknowledged commit is the successful conditional head update. Local current-view files, navigation, SQLite, and PostgreSQL remain materialized derivatives. Canonical reads fail visibly when S3 is unavailable; search may use the existing fallback only when the selected disposable index is unavailable. An authorized purge publishes a rewritten reachable journal chain before deleting superseded event records and object data; incomplete cleanup can be retried.
+
 The principal internal stores are:
 
 ```text

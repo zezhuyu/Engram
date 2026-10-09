@@ -20,7 +20,7 @@ async function configuredProvider(root: string): Promise<ModelProvider | undefin
 const HELP = `mdb — Markdown-native agent knowledge database
 Usage: mdb COMMAND [arguments] [--root PATH] [--json]
 
-init [--no-sqlite]             Initialize a vault (Markdown is canonical)
+init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
 init --project --host claude-code|codex [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
@@ -65,7 +65,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['json', 'help', 'no-sqlite', 'project', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['json', 'help', 'no-sqlite', 'postgres', 'project', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -151,7 +151,7 @@ export async function execute(argv: string[]): Promise<unknown> {
   switch (command) {
     case 'init': {
       const mcpUrl = text(flags, 'mcp-url');
-      const initialized = flags.project && mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'] });
+      const initialized = flags.project && mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
       if (!flags.project) return initialized;
       const host = required(text(flags, 'host'), '--host');
       if (host !== 'claude-code' && host !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host must be claude-code or codex');

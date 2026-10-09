@@ -96,11 +96,13 @@ Skipped by default. Sends only synthetic text; use `MDB_TEST_BASE_URL`, `MDB_TES
 | Storage | Markdown revisions, immutable imported bytes, journal recovery, optimistic conflicts, tombstones |
 | Retrieval | Native literal/regex/keyword search, scope/tag/kind filters, cited context and relations |
 | SQLite | Optional `node:sqlite` FTS5 MATCH/BM25 and trigram candidates; lexical parity and stale-index fallback |
+| S3 | Optional canonical immutable object storage with conditional journal-head publication; configure `MDB_STORAGE_BACKEND=s3` and `MDB_S3_BUCKET` |
+| PostgreSQL | Optional FTS index and relevance ranking; configure `postgres.enabled` and `MDB_POSTGRES_URL`; pgvector enables semantic/hybrid retrieval |
 | Isolation | Host-bound identity, workspace/collection/global checks, reviewed sanitized promotion |
 | Agent use | SDK, CLI, stdio/HTTP MCP, per-agent scoped credentials, passive Claude Code/Codex hooks, 34 internal skills |
 | Intelligence | Bounded persistent jobs, event cursor, retries, evidence validation and review queue |
 | Dream demo | Evidence-linked synthetic fixture; no claim of real model synthesis |
-| Deferred | S3, PostgreSQL, distributed replication, and unsupported media/network adapters |
+| Deferred | Distributed replication and unsupported media/network adapters |
 
 Create/recreate the synthetic sample with `npm run sample`; see `examples/sample-vault/`. Run `npm run benchmark` for measured local timing and `verification/phase-*.md` for exact verification evidence and limitations. These commands do not establish cross-platform or power-loss guarantees.
 

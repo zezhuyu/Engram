@@ -17,11 +17,13 @@ export interface EmbeddingConfig { provider: 'openai' | 'ollama' | 'openai-compa
   /** Remote embedding services may receive text of workspace (private) documents only when this is true. Global wiki/shared knowledge is not private. */ allowPrivateContentToRemote?: boolean;
   /** `auto` search runs hybrid retrieval whenever the vector backend is ready; set false to keep auto lexical. */ autoHybrid?: boolean;
   /** Optional sqlite-vec acceleration: a path to the loadable extension, or true to look for the `sqlite-vec` package. Without it vectors are scanned in JavaScript. */ sqliteVec?: string | boolean }
-export interface VaultConfig { schemaVersion: 1; sqlite: { enabled: boolean }; capture: { enabled: boolean; allowedSources: string[] }; model: ModelConfig; dream: DreamConfig; embedding?: EmbeddingConfig }
+export interface VaultConfig { schemaVersion: 1; sqlite: { enabled: boolean }; postgres?: { enabled: boolean; connectionStringEnv?: string; schema?: string }; capture: { enabled: boolean; allowedSources: string[] }; model: ModelConfig; dream: DreamConfig; embedding?: EmbeddingConfig }
 export interface Workspace { id: string; description: string; grants: Record<string, ('read' | 'write' | 'promote')[]> }
 export interface Collection { id: string; workspaceId: string; description: string; grants?: Record<string, ('read' | 'write' | 'promote')[]> }
 export interface CommitEvent { sequence: number; transactionId: string; objectId: string; revisionId: string; previousRevisionId?: string; path: string; scope: Scope; operation: string; timestamp: string; idempotencyKey?: string; revisionSha256?: string }
 export interface ObjectStore { read(key: string): Promise<Uint8Array>; stat(key: string): Promise<{ etag?: string; size: number } | null>; list(prefix: string): AsyncIterable<{ key: string; size: number }>; putImmutable(key: string, bytes: Uint8Array): Promise<void>; compareAndSwapPointer(key: string, expected: string | null, value: string): Promise<boolean>; removeForAuthorizedPurge(key: string): Promise<void> }
+/** Optional remote commit log. A successful append is the commit point; records publish atomically. */
+export interface CommitJournalStore { initializeJournal(): Promise<void>; readCommittedJournal(): Promise<CommitEvent[]>; appendCommittedEvent(event: CommitEvent): Promise<CommitEvent>; rewriteCommittedJournal?(events: CommitEvent[]): Promise<void> }
 export interface SearchIndexAdapter { capabilities(): Record<string, boolean>; query(input: SearchInput, actor: ActorContext): Promise<SearchResult>; rebuild(scope?: Scope): Promise<void>; health(): Promise<Record<string, unknown>> }
 export interface EmbeddingProvider { modelId: string; dimensions: number; locality?: 'local' | 'remote'; embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]> }
 export interface VectorIndexAdapter { query(vector: number[], actor: ActorContext, scopes: Scope[]): Promise<SearchHit[]> }

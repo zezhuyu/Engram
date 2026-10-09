@@ -26,6 +26,16 @@ node bin/mdb.js index rebuild --root ./my-vault
 node bin/mdb.js index status --root ./my-vault
 ```
 
+## Optional PostgreSQL backend
+
+Select PostgreSQL in `mdb.yaml` with `postgres: { enabled: true }` (or initialize with `mdb init --postgres`). The connection string is read from `MDB_POSTGRES_URL` by default; `postgres.connectionStringEnv` may name a different environment variable. Secrets are not stored in the vault config. `mdb index rebuild`, `mdb index sync`, and `mdb index status` use PostgreSQL when selected. The adapter creates `engram_documents` with a `simple`-dictionary `tsvector`, a GIN index, indexed scope/kind/time columns, tags and JSON metadata, and a journal sequence checkpoint. Owner searches catch the index up incrementally. A non-owner query whose index is stale, or any query during a database outage, uses canonical Markdown and reports the fallback. Search candidates are restricted to currently authorized object IDs before PostgreSQL results are materialized through `Vault.get` in batches of 48. Tombstones are removed during sync; revision mismatches are ignored.
+
+PostgreSQL `keyword` mode uses `websearch_to_tsquery('simple', ...)` and `ts_rank_cd`; this is token-based database full-text behavior, not the filesystem engine's substring/Unicode parity contract. `grep`, regex, and history continue through the canonical filesystem search path. Tags, kinds, scopes, and time ranges are applied before results are returned. The index is disposable and can be rebuilt from the journal and Markdown revisions.
+
+If the `vector` extension is available, the adapter also creates `engram_vectors`. Configure the existing `embedding.*` provider and run `mdb embed sync`; vectors are pinned to object/revision/model and stale rows are ignored or removed. Remote embedding providers do not receive private workspace content unless `embedding.allowPrivateContentToRemote` is enabled. `auto` uses hybrid retrieval when current vectors are available; explicit semantic search reports unavailable otherwise, and hybrid can use the labelled keyword fallback with `allowFallback`.
+
+The integration test runs only when `MDB_TEST_POSTGRES_URL` points to a disposable PostgreSQL database. The adapter requires permission to create its tables and indexes; pgvector semantic retrieval additionally requires permission to install/use the `vector` extension.
+
 ## References, navigation and context
 
 Links, backlinks and bounded related traversal expose authorized targets. Protected references are omitted rather than leaking their titles or snippets. Context composes retrieved evidence with revision citations and deduplication within a supplied budget. The token counter is deterministic/conservative rather than a model-specific tokenizer; it does not guarantee an identical count for every hosted model.
@@ -57,13 +67,13 @@ Parity between the filesystem engine and SQLite means identical result *sets and
 | Mode | Path | Ranking | Needs |
 |---|---|---|---|
 | `grep` (exact text), `regex` | lexical, always | none (id order) | nothing |
-| `keyword` | SQLite FTS5 candidate selection + **BM25** ranking when the index is healthy and current; otherwise the built-in lexical scorer over files | `bm25` or `lexical` | nothing (SQLite optional) |
-| `semantic` | vector similarity (cosine), best chunk per object, **no similarity threshold** | `similarity` | SQLite index + embedding provider + `mdb embed sync` |
-| `hybrid` | keyword and semantic rankings both kept in full, combined by **reciprocal rank fusion** (k=60) | `rrf` | same as semantic |
+| `keyword` | SQLite FTS5 + **BM25** when SQLite is selected; PostgreSQL `ts_rank_cd` when PostgreSQL is selected; otherwise canonical filesystem search | `bm25`, `ts-rank` or `lexical` | selected index is optional |
+| `semantic` | vector similarity (cosine), best chunk per object, **no similarity threshold** | `similarity` | SQLite vectors or PostgreSQL pgvector + embedding provider + `mdb embed sync` |
+| `hybrid` | keyword and semantic rankings combined by **reciprocal rank fusion** (k=60) | `rrf` | selected vector backend, embedding provider and `mdb embed sync` |
 | `auto` (default) | `hybrid` when the vector backend is ready, otherwise `keyword` | as above | nothing |
 
 The result always states what ran: `mode` (the mode that executed), `requestedMode` (present when it differs: auto became hybrid, or a hybrid request fell back), `ranking`, `fallback` (why a downgrade happened) and, for vector modes, `vector {backend, model, dimensions, lagObjects}`.
-- Semantic and hybrid **require the SQLite index**. Without it they are unavailable (`CAPABILITY_UNAVAILABLE` with the reason), `hybrid` with `allowFallback` returns labelled keyword results, and `auto` stays keyword. Keyword, grep and regex never depend on SQLite, sqlite-vec or an embedding provider.
+- Semantic and hybrid require an enabled vector backend and embedding provider. SQLite uses its optional index; PostgreSQL uses pgvector when the extension is available. Without vectors they are unavailable (`CAPABILITY_UNAVAILABLE` with the reason), `hybrid` with `allowFallback` returns labelled keyword results, and `auto` stays keyword. Keyword, grep and regex never require an embedding provider.
 - Vectors live in the same per-scope SQLite files as FTS5 (`vec_chunks`, `vec_state`), pinned to (object, revision). A vector of a superseded revision is ignored and counted in `lagObjects`; hybrid still finds those objects by keyword. `mdb embed sync` embeds new revisions and removes stale vectors; a different embedding model purges the old vectors instead of mixing them. Everything is derived and disposable (purge wipes it).
 - Fusion never drops an exact keyword match: both lists are kept in full (depth max(100, 5*(offset+limit)), up to 1000) and a keyword match can only be outranked. Hybrid/semantic paging is limited to the first 1000 results.
 - Access control: candidate rows are restricted to objects the actor can read, at their current revision, before anything is ranked; returned hits are re-read through the Vault. Hidden objects change neither results nor scores, and lag counts only readable objects.

@@ -9,7 +9,7 @@ import { documentBodyLineOffset } from '../core/vault.js';
 export interface SearchVault extends ManifestSource {
   root: string;
   actor: ActorContext;
-  config(): Promise<{ sqlite: { enabled: boolean }; embedding?: import('../core/types.js').EmbeddingConfig }>;
+  config(): Promise<{ sqlite: { enabled: boolean }; postgres?: { enabled: boolean; connectionStringEnv?: string; schema?: string }; embedding?: import('../core/types.js').EmbeddingConfig }>;
   listDocuments(options?: { includeHistory?: boolean; scopes?: Scope[] }): Promise<Document[]>;
   history(id: string): Promise<Document[]>;
 }
