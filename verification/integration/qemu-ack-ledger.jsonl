@@ -1,0 +1,3 @@
+{"case":"revision_temp_written","ack":{"id":"obj_mv12c8fc_8ea461babfb84ed78d99caf83560f1d8","revisionId":"rev_mv12c8fc_a8d64e2c767c46ba9688af9937730d3d","title":"acknowledged baseline"}}
+{"case":"journal_after_fsync","ack":{"id":"obj_mv12d4op_4d99b2eefe934027b277d0721df7c80f","revisionId":"rev_mv12d4op_acf0b6c7a25d4321ad73d1dc4cef9f06","title":"acknowledged baseline"}}
+{"case":"commit_before_ack","ack":{"id":"obj_mv12e1ay_fcad2ff68c364cfc8b197dde36052854","revisionId":"rev_mv12e1ay_6601b58b8cc243aabbba4585f6cfa8e1","title":"acknowledged baseline"}}
