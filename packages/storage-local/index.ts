@@ -31,9 +31,9 @@ export async function safePath(root: string, key: string): Promise<string> {
   if (target === resolvedRoot || !target.startsWith(resolvedRoot + path.sep)) throw new MDBError('INVALID_INPUT', 'Unsafe storage path');
   return target;
 }
-export async function syncDirectory(directory: string): Promise<void> {
+export async function syncDirectory(directory: string, fault?: FaultHook): Promise<void> {
   const handle = await fs.open(directory, 'r');
-  try { await profileAsync('fsync.directory', () => handle.sync()); } catch (error) { if (!['EINVAL', 'ENOTSUP', 'EBADF'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  try { fault?.('fsync.directory.before'); await profileAsync('fsync.directory', () => handle.sync()); fault?.('fsync.directory.after'); } catch (error) { if (!['EINVAL', 'ENOTSUP', 'EBADF'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
   finally { await handle.close(); }
 }
 /**
@@ -55,7 +55,7 @@ export async function openVerifiedTemp(root: string, temporary: string): Promise
 }
 export type FaultHook = (stage: string) => void;
 /** mkdir -p that also syncs the parent of every directory it created, so a committed file cannot lose its directory entry in a power cut. */
-export async function mkdirDurable(directory: string): Promise<void> {
+export async function mkdirDurable(directory: string, fault?: FaultHook): Promise<void> {
   const created: string[] = [];
   for (let current = directory; ; ) {
     try { await fs.stat(current); break; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -64,17 +64,19 @@ export async function mkdirDurable(directory: string): Promise<void> {
   }
   if (!created.length) return;
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  for (const dir of created.reverse()) await syncDirectory(path.dirname(dir));
+  for (const dir of created.reverse()) await syncDirectory(path.dirname(dir), fault);
 }
 export async function atomicWrite(root: string, key: string, data: string | Uint8Array, fault?: FaultHook): Promise<void> {
   const target = await safePath(root, key);
-  await mkdirDurable(path.dirname(target));
+  await mkdirDurable(path.dirname(target), fault);
   await safePath(root, key);
   const temporary = target + '.' + randomUUID() + '.tmp';
   const handle = await openVerifiedTemp(root, temporary);
-  try { await handle.writeFile(data); fault?.('atomic.temp_written'); await profileAsync('fsync.file', () => handle.sync()); } finally { await handle.close(); }
-  try { fault?.('atomic.before_rename'); await fs.rename(temporary, target); fault?.('atomic.after_rename'); await syncDirectory(path.dirname(target)); }
-  finally { await fs.rm(temporary, { force: true }); }
+  try {
+    try { await handle.writeFile(data); fault?.('atomic.temp_written'); fault?.('fsync.file.before'); await profileAsync('fsync.file', () => handle.sync()); fault?.('fsync.file.after'); }
+    finally { await handle.close(); }
+    fault?.('atomic.before_rename'); await fs.rename(temporary, target); fault?.('atomic.after_rename'); await syncDirectory(path.dirname(target), fault);
+  } finally { await fs.rm(temporary, { force: true }); }
 }
 const LOCK_GRACE_MS = 2000;
 /** A lock is stale when its owner process is gone, or when it never recorded (or tore) its owner file and has been idle past the grace period. */
@@ -175,13 +177,21 @@ export class LocalObjectStore implements ObjectStore {
   }
   async putImmutable(key: string, bytes: Uint8Array): Promise<void> {
     const target = await safePath(this.root, key);
-    await mkdirDurable(path.dirname(target));
+    await mkdirDurable(path.dirname(target), this.fault);
     await safePath(this.root, key);
     const temporary = target + '.' + randomUUID() + '.tmp';
     const handle = await openVerifiedTemp(this.root, temporary);
-    try { await handle.writeFile(bytes); this.fault?.('revision.temp_written'); await profileAsync('fsync.file', () => handle.sync()); this.fault?.('revision.temp_synced'); } finally { await handle.close(); }
     try {
-      try { await fs.link(temporary, target); this.fault?.('revision.after_link'); await syncDirectory(path.dirname(target)); }
+      try {
+        if (this.fault && bytes.byteLength > 1) {
+          const split = Math.floor(bytes.byteLength / 2);
+          await handle.writeFile(bytes.subarray(0, split));
+          this.fault('revision.partial_write');
+          await handle.writeFile(bytes.subarray(split));
+        } else await handle.writeFile(bytes);
+        this.fault?.('revision.temp_written'); this.fault?.('revision.fsync.before'); await profileAsync('fsync.file', () => handle.sync()); this.fault?.('revision.fsync.after'); this.fault?.('revision.temp_synced');
+      } finally { await handle.close(); }
+      try { await fs.link(temporary, target); this.fault?.('revision.after_link'); this.fault?.('revision.directory_fsync.before'); await syncDirectory(path.dirname(target), this.fault); this.fault?.('revision.directory_fsync.after'); }
       catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
         const existing = await fs.readFile(target);

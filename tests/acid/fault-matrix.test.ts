@@ -19,11 +19,13 @@ import { Vault } from '../../packages/core/vault.js';
 type Klass = 'PRE' | 'AMBIG' | 'POST';
 const stages: { stage: string; klass: Klass; after?: string }[] = [
   { stage: 'commit.before_revision', klass: 'PRE' },
+  { stage: 'revision.partial_write', klass: 'PRE' },
   { stage: 'revision.temp_written', klass: 'PRE' },
   { stage: 'revision.temp_synced', klass: 'PRE' },
   { stage: 'revision.after_link', klass: 'PRE' },
   { stage: 'revision.after_dirsync', klass: 'PRE' },
   { stage: 'journal.before_append', klass: 'PRE' },
+  { stage: 'journal.partial_append', klass: 'PRE' },
   { stage: 'journal.after_append_before_fsync', klass: 'AMBIG' },
   { stage: 'journal.after_fsync', klass: 'POST' },
   { stage: 'head.before_replace', klass: 'POST' },

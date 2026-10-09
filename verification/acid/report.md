@@ -1,8 +1,8 @@
 # ACID, isolation and invariant verification
 
-**Status: PASS** — 57/57 tests passed, 0 failed, 0 skipped; 160 recorded cases, 0 case failures.
+**Status: PASS** — 57/57 tests passed, 0 failed, 0 skipped; 176 recorded cases, 0 case failures.
 
-Run at 2026-10-09T03:13:09.097Z, 124.0 s. Commit: no-git-repository.
+Run at 2026-10-09T14:25:44.356Z, 172.0 s. Commit: b85357df1b947ff7e26765eb8fcaf9081ff8a691.
 Environment: Darwin 25.0.0 (arm64), tmp filesystem apfs, Node v25.8.2, SQLite 3.53.4, Apple M2 Max.
 Seeds: 1000, 8919, 16838, 24757, 32676, 40595, 48514, 56433, 64352, 72271, 80190, 88109, 96028, 103947, 111866, 119785, 127704, 135623, 143542, 151461, 159380, 167299, 175218, 183137, 4010, 4050
 

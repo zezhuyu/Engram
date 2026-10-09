@@ -8,6 +8,7 @@ import { CreateBucketCommand, DeleteBucketCommand, DeleteObjectCommand, GetObjec
 import { S3ObjectStore } from '../packages/storage-s3/index.js';
 import { OWNER, type CommitEvent } from '../packages/core/types.js';
 import { Vault } from '../packages/core/vault.js';
+import { SearchEngine } from '../packages/search-files/index.js';
 
 class MemoryS3 {
   objects = new Map<string, Uint8Array>();
@@ -117,4 +118,38 @@ test('live S3: interrupted revision request before PutObject creates no visible 
   await assert.rejects(()=>vault.put({scope:{type:'global',area:'shared'},kind:'note',title:'Interrupted upload',body:'not committed'}),/before revision request/);
   assert.equal((await vault.events()).length,0);
   const remaining=[];for await(const item of store.list('.mdb/objects'))remaining.push(item);assert.deepEqual(remaining,[]);
+});
+
+test('live cross backend: S3 canonical revisions index and recover through SQLite without ACL or tombstone leaks',{skip:!liveEnabled},async t=>{
+  const client=liveClient(),bucket=await disposableBucket(t,client),prefix=`engram/${randomUUID()}`;
+  const root=await mkdtemp(path.join(tmpdir(),'engram-s3-sqlite-matrix-'));
+  const owner=new Vault(root,OWNER,{store:liveStore(bucket,prefix)});await owner.init({sqlite:true});await owner.createWorkspace('private','',{});
+  const publicDoc=await owner.put({scope:{type:'global',area:'shared'},kind:'note',title:'S3 SQLite needle',body:'canonical needle revision'});
+  const removed=await owner.put({scope:{type:'global',area:'shared'},kind:'note',title:'S3 SQLite deleted',body:'needle tombstone'});await owner.delete(removed.id,removed.revisionId);
+  await owner.put({scope:{type:'workspace',workspaceId:'private'},kind:'note',title:'S3 SQLite private',body:'needle private'});
+  const ownerSearch=new SearchEngine(owner),readerVault=new Vault(root,{actorId:'reader',permissions:['global:shared:read']},{store:liveStore(bucket,prefix)}),readerSearch=new SearchEngine(readerVault);
+  t.after(async()=>{await Promise.all([ownerSearch.close(),readerSearch.close(),owner.close(),readerVault.close()]);await rm(root,{recursive:true,force:true});});
+  await ownerSearch.rebuild();const result=await readerSearch.query({query:'needle',mode:'keyword'});
+  assert.equal(result.backend,'sqlite');assert.deepEqual(result.hits.map(hit=>hit.title),['S3 SQLite needle']);assert.equal(result.hits[0]?.revisionId,publicDoc.revisionId);
+  await rm(path.join(root,publicDoc.path),{force:true});const recovered=await owner.recover();assert.equal(recovered.repaired,1);
+  await ownerSearch.rebuild();assert.deepEqual((await readerSearch.query({query:'needle',mode:'keyword'})).hits.map(hit=>hit.title),['S3 SQLite needle']);
+  assert.equal((await owner.verify()).ok,true);
+});
+
+test('live cross backend: S3 canonical recovery rebuilds PostgreSQL search with ACL and tombstone filtering',{skip:!liveEnabled||!process.env.MDB_TEST_POSTGRES_URL},async t=>{
+  const client=liveClient(),bucket=await disposableBucket(t,client),prefix=`engram/${randomUUID()}`;
+  const root=await mkdtemp(path.join(tmpdir(),'engram-s3-postgres-matrix-'));
+  const owner=new Vault(root,OWNER,{store:liveStore(bucket,prefix)});await owner.init();await owner.createWorkspace('private','',{});await owner.setConfig(config=>{config.postgres={enabled:true};});
+  const publicDoc=await owner.put({scope:{type:'global',area:'shared'},kind:'note',title:'S3 PostgreSQL needle',body:'canonical needle revision'});
+  const removed=await owner.put({scope:{type:'global',area:'shared'},kind:'note',title:'S3 PostgreSQL deleted',body:'needle tombstone'});await owner.delete(removed.id,removed.revisionId);
+  await owner.put({scope:{type:'workspace',workspaceId:'private'},kind:'note',title:'S3 PostgreSQL private',body:'needle private'});
+  const pgEnv={MDB_POSTGRES_URL:process.env.MDB_TEST_POSTGRES_URL};
+  const ownerSearch=new SearchEngine(owner,{env:pgEnv}),readerVault=new Vault(root,{actorId:'reader',permissions:['global:shared:read']},{store:liveStore(bucket,prefix)}),readerSearch=new SearchEngine(readerVault,{env:pgEnv});
+  t.after(async()=>{await Promise.all([ownerSearch.close(),readerSearch.close(),owner.close(),readerVault.close()]);await rm(root,{recursive:true,force:true});});
+  await ownerSearch.rebuild();const initial=await readerSearch.query({query:'needle',mode:'keyword'});
+  assert.equal(initial.backend,'postgres');assert.deepEqual(initial.hits.map(hit=>hit.title),['S3 PostgreSQL needle']);assert.equal(initial.hits[0]?.revisionId,publicDoc.revisionId);
+  await rm(path.join(root,publicDoc.path),{force:true});assert.equal((await owner.recover()).repaired,1);
+  await ownerSearch.rebuild();const rebuilt=await readerSearch.query({query:'needle',mode:'keyword'});
+  assert.deepEqual(rebuilt.hits.map(hit=>hit.title),['S3 PostgreSQL needle']);assert.equal(rebuilt.hits[0]?.revisionId,publicDoc.revisionId);
+  assert.equal((await owner.verify()).ok,true);
 });

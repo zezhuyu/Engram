@@ -1,4 +1,4 @@
-# Engram/MDB Release Verification — no-git-repository
+# Engram/MDB Release Verification — b85357df1b947ff7e26765eb8fcaf9081ff8a691
 
 ## Verdict
 STORAGE: PASS
@@ -21,7 +21,7 @@ PLATFORM: PASS
 | DREAM_ENGINE | FAIL | verification/dream/report.json, verification/dream/labeled-scenarios.json, verification/dream/real-model-evaluation.json, tests/dream/retrieval.test.ts, tests/dream/dream.test.ts | Real Claude evaluation: micro quality 0.833, deep 0.667, strategic 1.000; threshold >=0.75 per mode fails on deep. Evidence grounding 1.00; real Knowledge Critic rejected 3/3 adversarial cases and accepted 1/1 supported case. Deterministic accepted/rejected feedback ranking and optional semantic retrieval mechanics pass. No production embedding backend was configured for real semantic comparison. |
 
 ## Environment
-Darwin 25.0.0 / arm64 / apfs / Apple M2 Max / 32 GiB / Node v25.8.2 / SQLite 3.53.4 / commit no-git-repository
+Darwin 25.0.0 / arm64 / apfs / Apple M2 Max / 32 GiB / Node v25.8.2 / SQLite 3.53.4 / commit b85357df1b947ff7e26765eb8fcaf9081ff8a691
 
 ## Matrix
 | Gate | Sev | Status | Cases | Evidence | Limitations |

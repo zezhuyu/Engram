@@ -1,10 +1,10 @@
 {
   "suite": "recovery",
-  "git_commit": "no-git-repository",
+  "git_commit": "b85357df1b947ff7e26765eb8fcaf9081ff8a691",
   "status": "PASS",
-  "run_at": "2026-10-09T03:14:38.997Z",
+  "run_at": "2026-10-09T14:26:02.408Z",
   "command": "node --test --test-reporter=tap dist/tests/backups/backup-restore.test.js",
-  "durationMs": 8998,
+  "durationMs": 10053,
   "environment": {
     "os": "Darwin 25.0.0",
     "platform": "darwin",
@@ -78,11 +78,11 @@
       "name": "recovery/backup-under-write-restore",
       "status": "PASS",
       "detail": {
-        "files": 38,
-        "backupBytes": 28057,
-        "backupMs": 131,
-        "restoreMs": 124,
-        "restoredCommits": 14,
+        "files": 31,
+        "backupBytes": 18782,
+        "backupMs": 92,
+        "restoreMs": 187,
+        "restoredCommits": 7,
         "sourceCommitsAtEnd": 205,
         "rpoNote": "RPO = time since last backup; RTO = restore wall time above (small vault)."
       }
@@ -107,7 +107,7 @@
       "status": "PASS",
       "detail": {
         "files": 130,
-        "bytes": 78310
+        "bytes": 78337
       }
     }
   ]
