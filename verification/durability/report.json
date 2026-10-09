@@ -1,0 +1,29 @@
+{
+  "workstream": "Power-Loss Durability",
+  "branch": "durability/power-loss",
+  "status": "INCOMPLETE",
+  "results": {
+    "deterministic_fault_and_process_crash_recovery": { "status": "PASS", "tests": 55, "passed": 55, "failed": 0, "skipped": 0 },
+    "storage_index_source_and_sqlite_regressions": { "status": "PASS", "tests": 22, "passed": 22, "failed": 0, "skipped": 0 },
+    "independent_ack_ledger_process_crash_check": { "status": "PASS", "acknowledged_records": 1, "recovered_records_verified": 1, "ledger_location": "outside vault, same host filesystem" },
+    "isolated_vm_or_physical_power_loss": { "status": "NOT_RUN", "reason": "Docker Desktop's Linux VM is shared with the parallel workstream; no independent disposable VM or power-cut rig was available." },
+    "actual_kernel_fsync_eio": { "status": "NOT_RUN", "reason": "Tests inject EIO at deterministic pre-syscall boundaries; no FUSE, dm-error, or faulting filesystem was available." }
+  },
+  "commands": [
+    "npm run lint && npm run typecheck && npm run test:reliability",
+    "node --test --test-reporter=tap --test-concurrency=1 dist/tests/storage.test.js dist/tests/durability.test.js dist/tests/search/golden.test.js"
+  ],
+  "environment": {
+    "host": "Darwin 25.0.0 arm64, APFS, Apple M2 Max",
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "container_runtime": "Docker Desktop Linux VM, overlayfs (shared; not terminated)"
+  },
+  "durable_commit_point": "Complete newline-terminated journal record append followed by successful journal FileHandle.sync().",
+  "limitations": [
+    "Process SIGKILL preserves the host page cache and cannot prove power-loss ordering.",
+    "Durability remains conditional on honest file and directory fsync behavior, atomic local hard-link/rename semantics, and storage hardware/controller cache guarantees.",
+    "Directory fsync errors EINVAL, ENOTSUP, and EBADF are tolerated for platform compatibility; those paths do not establish durable directory entries.",
+    "The repository had an unborn main branch with no existing commits. This branch uses an isolated orphan root snapshot; integration is via patch/cherry-pick after the shared baseline is established, not a normal merge-base merge."
+  ]
+}

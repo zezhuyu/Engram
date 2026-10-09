@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "implementationHooks": {
+    "writes": ["revision.temp_written", "atomic.temp_written", "journal.before_append", "journal.after_append_before_fsync"],
+    "fileSync": ["revision.fsync.before", "revision.fsync.after", "journal.fsync.before", "journal.fsync.after", "fsync.file.before", "fsync.file.after"],
+    "directorySync": ["revision.directory_fsync.before", "revision.directory_fsync.after", "fsync.directory.before", "fsync.directory.after"],
+    "publication": ["revision.after_link", "atomic.before_rename", "atomic.after_rename", "head.before_replace", "view.before_replace", "view.after_replace", "commit.before_ack"],
+    "recovery": ["recover.before_journal_repair", "recover.after_journal_repair", "recover.before_view_repair", "recover.after_view_repair", "recover.before_head_write", "atomic.temp_written", "atomic.before_rename", "atomic.after_rename"]
+  },
+  "tested": {
+    "processTermination": "SIGKILL in disposable child processes",
+    "thrownFailures": ["EIO", "ENOSPC", "EACCES"],
+    "journalTails": ["1 byte", "10 bytes", "half record", "all but final byte"],
+    "syncBoundaryFailures": ["revision file sync before call", "revision directory sync before call", "journal sync before call", "projection file sync before call", "projection directory sync before call", "vault initialization parent-directory sync before call"],
+    "recoveryInterruption": ["before view repair", "before head write", "repeated process termination and subsequent convergence"],
+    "integrityAndFallback": ["missing revision refused by backup verification", "corrupt/truncated/deleted SQLite fallback and rebuild", "source byte/hash immutability", "SQLite disabled retrieval"]
+  },
+  "notTested": [
+    "A kernel FileHandle.sync syscall itself returning EIO (injected errors are thrown immediately before the syscall)",
+    "Physical host power loss or volatile device-cache loss",
+    "Abrupt termination of an isolated disposable VM; available Docker Desktop VM is shared",
+    "Independent acknowledgment ledger on a physically separate device",
+    "Real short writes and actual ENOSPC from a faulting filesystem"
+  ]
+}
