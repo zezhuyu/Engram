@@ -1,0 +1,27 @@
+{
+  "case": "hypothetical",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The only statement is an explicitly hypothetical, hedged musing about a migration approach, not an enduring fact or preference stated by the user.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user's statement is explicitly a hypothetical about what they might do, not an enduring fact or preference about themself.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The statement is an explicitly labeled hypothetical about what the user might do, not an enduring fact or preference about themself.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

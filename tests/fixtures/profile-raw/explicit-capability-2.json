@@ -1,0 +1,27 @@
+{
+  "case": "explicit-capability-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Can handle Postgres replication failovers independently\", \"body\": \"The user is the on-call owner for their team's Postgres clusters and can handle replication failovers themself.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13uz13_9801a2bbcc4f4219bb7c7c91ddb137a0\", \"revisionId\": \"rev_mv13uz13_c22374b688364d19a32839a1130d06eb\", \"span\": \"I'm the on-call owner for our Postgres clusters and I can handle replication failovers myself.\"}], \"metadata\": {\"category\": \"capability\", \"preferenceKey\": \"postgres-replication-failover\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Handles Postgres replication failovers as on-call owner\", \"body\": \"The user is the on-call owner for their team's Postgres clusters and can handle replication failovers independently.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13xlag_3e929302c6744882aa5aace7484f079b\", \"revisionId\": \"rev_mv13xlag_acc49d70654f4074b01b082adaec0f5e\", \"span\": \"I'm the on-call owner for our Postgres clusters and I can handle replication failovers myself.\"}], \"metadata\": {\"category\": \"capability\", \"preferenceKey\": \"postgres-replication-failover\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Handles Postgres replication failovers independently\", \"body\": \"The user is the on-call owner for their team's Postgres clusters and can handle replication failovers on their own.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv1407ee_be0f7c05e7ce40ab8258c996051a7f38\", \"revisionId\": \"rev_mv1407ee_b05ae38224a24d91abf105e068f1d437\", \"span\": \"I'm the on-call owner for our Postgres clusters and I can handle replication failovers myself.\"}], \"metadata\": {\"category\": \"capability\", \"preferenceKey\": \"postgres-failover\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Download Source"
+  short_description: "Download videos, pages, PDFs, and direct files"
+  default_prompt: "Use $download-source to fetch a source URL into .content."

@@ -1,0 +1,27 @@
+{
+  "case": "neg-undecided-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly states they are undecided between spaces and tabs, so no enduring preference can be extracted.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly stated they are undecided between spaces and tabs, so no enduring preference exists.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly said they are undecided between spaces and tabs, so there is no enduring preference to record.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

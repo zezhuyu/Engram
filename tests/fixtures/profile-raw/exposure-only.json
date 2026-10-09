@@ -1,0 +1,27 @@
+{
+  "case": "exposure-only",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user only reports passing exposure to a Kubernetes article and explicitly states they have no view, so no enduring preference, goal, or interest is established.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user only reported passing exposure to an article about Kubernetes and explicitly stated they have no view, so there is no enduring preference, goal, interest, or capability to record.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user only reports passing exposure to a Kubernetes article and explicitly states no view, so there is no enduring preference, goal, or interest to record.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

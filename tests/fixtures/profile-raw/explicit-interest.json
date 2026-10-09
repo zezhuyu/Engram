@@ -1,0 +1,27 @@
+{
+  "case": "explicit-interest",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Interested in property-based testing\", \"body\": \"The user is interested in property-based testing and wants to learn more about it.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13v888_432e4b6bb5d747d6baa54a7ed5655031\", \"revisionId\": \"rev_mv13v888_21ae4c02b63648e1ab61c42f38294cae\", \"span\": \"I'm really interested in property-based testing and want to learn more about it.\"}], \"metadata\": {\"category\": \"interest\", \"preferenceKey\": \"property-based-testing\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Interested in property-based testing\", \"body\": \"The user is interested in property-based testing and wants to learn more about it.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13xu4b_509aa51a0a2d414491511b72816a30fc\", \"revisionId\": \"rev_mv13xu4b_839f201f296749f081b2f8308217e23a\", \"span\": \"I'm really interested in property-based testing and want to learn more about it.\"}], \"metadata\": {\"category\": \"interest\", \"preferenceKey\": \"property-based-testing\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\":\"user_insight\",\"title\":\"Interested in property-based testing\",\"body\":\"The user is interested in property-based testing and wants to learn more about it.\",\"evidence\":[{\"uri\":\"mdb://profile/objects/obj_mv140gzl_3158d1fd7b1247b5a773945b9e4f930c\",\"revisionId\":\"rev_mv140gzl_163d2b274f584b60ae545e8b33b331bc\",\"span\":\"I'm really interested in property-based testing and want to learn more about it.\"}],\"metadata\":{\"category\":\"interest\",\"preferenceKey\":\"property-based-testing\",\"sensitivity\":\"none\",\"explicitStatement\":true}}\n"
+      ]
+    }
+  ]
+}

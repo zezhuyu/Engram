@@ -1,0 +1,27 @@
+{
+  "case": "explicit-no-memory",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly asked not to have this remembered or turned into a lasting preference, and the text states no fact about themself.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly asked not to remember this and not to infer a lasting preference from it.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly asked not to remember this or infer a lasting preference from it.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "case": "explicit-format-bullets",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers bullet-list summaries\", \"body\": \"The user prefers summaries formatted as bullet lists rather than long paragraphs.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13ugkl_94ee9118bf4f490db97758b2bcf310e7\", \"revisionId\": \"rev_mv13ugkl_715342b5d1464293a758bdd271c6f072\", \"span\": \"Please use bullet lists instead of long paragraphs when you summarize things for me.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"summary-format\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers bullet lists for summaries\", \"body\": \"The user prefers summaries formatted as bullet lists rather than long paragraphs.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13x5uo_76dfad9e6031400dacfa408ef7e9f061\", \"revisionId\": \"rev_mv13x5uo_e182924be3194a23bb45c50f676b1a1f\", \"span\": \"Please use bullet lists instead of long paragraphs when you summarize things for me.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"summary-format\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers bullet lists over long paragraphs in summaries\", \"body\": \"The user prefers summaries formatted as bullet lists rather than long paragraphs.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13zomm_0987fd9ed6914ff6aa719d2c6c197763\", \"revisionId\": \"rev_mv13zomm_230cd3d42c02453db268b5b144e47a4b\", \"span\": \"Please use bullet lists instead of long paragraphs when you summarize things for me.\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"summary-format\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

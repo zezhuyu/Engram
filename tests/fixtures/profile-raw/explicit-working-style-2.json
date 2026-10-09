@@ -1,0 +1,27 @@
+{
+  "case": "explicit-working-style-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Wants files listed before refactors\", \"body\": \"When a refactor is proposed, the user wants the list of files that would be touched shown before any changes are made.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13v2dv_f64356e783424283a66266ae776a469b\", \"revisionId\": \"rev_mv13v2dv_89017f4881ed4640a26071811b0808bf\", \"span\": \"When you propose a refactor, list the files you would touch before changing anything.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"refactor-file-list-first\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"List files to touch before refactoring\", \"body\": \"When proposing a refactor, the user wants the files that would be touched listed before any changes are made.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13xohu_1719e668dd90484386ee2075100b30f2\", \"revisionId\": \"rev_mv13xohu_af41b43f2c04499ab953d56908d9a769\", \"span\": \"When you propose a refactor, list the files you would touch before changing anything.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"refactor-file-list-first\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"List files to touch before refactoring\", \"body\": \"When proposing a refactor, the user wants the files that would be touched listed before any changes are made.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv140axr_a9497318a6894da9bb9f4535122efb91\", \"revisionId\": \"rev_mv140axr_790e6073d40a4232981bd7edb46e6b38\", \"span\": \"When you propose a refactor, list the files you would touch before changing anything.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"refactor_file_list_first\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

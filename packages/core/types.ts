@@ -1,0 +1,40 @@
+export type Scope = { type: 'global'; area: 'wiki' | 'shared' | 'discoveries' | 'profile' } | { type: 'workspace'; workspaceId: string; collectionId?: string };
+export interface ActorContext { actorId: string; permissions: string[]; /** When set by HTTP auth, the permission list is a ceiling that workspace grants cannot widen. */ credentialBound?: boolean }
+export const OWNER: ActorContext = { actorId: 'owner', permissions: ['*'] };
+export interface Relation { type: string; target: string; revisionId?: string }
+export interface Evidence { uri: string; revisionId: string; span?: string }
+export interface PutInput { scope: Scope; kind: string; title: string; body: string; tags?: string[]; links?: Relation[]; evidence?: Evidence[]; status?: string; idempotencyKey?: string; metadata?: Record<string, unknown> }
+export interface PatchInput { objectId: string; expectedRevisionId: string; title?: string; body?: string; tags?: string[]; links?: Relation[]; evidence?: Evidence[]; status?: string; metadataPatch?: Record<string, unknown> }
+export interface Document { id: string; revisionId: string; revisionNumber: number; previousRevisionId?: string; scope: Scope; kind: string; title: string; body: string; tags: string[]; links: Relation[]; evidence: Evidence[]; status: string; createdAt: string; updatedAt: string; createdBy: string; metadata: Record<string, unknown>; path: string; uri: string }
+export interface SearchInput { query: string; mode?: 'grep' | 'keyword' | 'semantic' | 'hybrid' | 'auto'; regex?: boolean; caseSensitive?: boolean; scopes?: Scope[]; kinds?: string[]; tags?: string[]; since?: string; until?: string; limit?: number; cursor?: string; includeHistory?: boolean; allowFallback?: boolean }
+export interface SearchHit { objectId: string; uri: string; revisionId: string; title: string; kind: string; snippet: string; lineStart: number; lineEnd: number; matchedHeading?: string; score: number; retrievalMode: string; /** which retrievals contributed (hybrid): keyword and/or semantic */ sources?: string[] }
+/** `mode` is the mode that actually ran. `requestedMode` is present when it differs (for example auto became hybrid, or hybrid fell back to keyword). */
+export interface SearchResult { hits: SearchHit[]; mode: string; backend: string; fallback?: string; cursor?: string; requestedMode?: string;
+  /** how hits were ordered: lexical (built-in scorer), bm25 (SQLite FTS5), rrf (reciprocal rank fusion of keyword and semantic rankings), similarity (cosine) */ ranking?: string;
+  vector?: { backend: string; model: string; dimensions: number; lagObjects: number; note?: string } }
+/** Optional semantic retrieval. Absent or provider:null means disabled; nothing else in the system depends on it. API keys are read from the environment only. */
+export interface EmbeddingConfig { provider: 'openai' | 'ollama' | 'openai-compatible' | null; baseUrl?: string; model?: string; apiKeyEnv?: string; dimensions?: number; allowNetwork?: boolean; locality?: 'local' | 'remote'; timeoutMs?: number; maxRetries?: number; batchSize?: number;
+  /** Remote embedding services may receive text of workspace (private) documents only when this is true. Global wiki/shared knowledge is not private. */ allowPrivateContentToRemote?: boolean;
+  /** `auto` search runs hybrid retrieval whenever the vector backend is ready; set false to keep auto lexical. */ autoHybrid?: boolean;
+  /** Optional sqlite-vec acceleration: a path to the loadable extension, or true to look for the `sqlite-vec` package. Without it vectors are scanned in JavaScript. */ sqliteVec?: string | boolean }
+export interface VaultConfig { schemaVersion: 1; sqlite: { enabled: boolean }; postgres?: { enabled: boolean; connectionStringEnv?: string; schema?: string }; capture: { enabled: boolean; allowedSources: string[] }; model: ModelConfig; dream: DreamConfig; embedding?: EmbeddingConfig }
+export interface Workspace { id: string; description: string; grants: Record<string, ('read' | 'write' | 'promote')[]> }
+export interface Collection { id: string; workspaceId: string; description: string; grants?: Record<string, ('read' | 'write' | 'promote')[]> }
+export interface CommitEvent { sequence: number; transactionId: string; objectId: string; revisionId: string; previousRevisionId?: string; path: string; scope: Scope; operation: string; timestamp: string; idempotencyKey?: string; revisionSha256?: string }
+export interface ObjectStore { read(key: string): Promise<Uint8Array>; readMany?(keys: string[], concurrency?: number): Promise<Uint8Array[]>; stat(key: string): Promise<{ etag?: string; size: number } | null>; list(prefix: string): AsyncIterable<{ key: string; size: number }>; putImmutable(key: string, bytes: Uint8Array): Promise<void>; compareAndSwapPointer(key: string, expected: string | null, value: string): Promise<boolean>; removeForAuthorizedPurge(key: string): Promise<void> }
+/** Optional remote commit log. A successful append is the commit point; records publish atomically. */
+export interface CommitJournalStore { initializeJournal(): Promise<void>; readCommittedJournal(): Promise<CommitEvent[]>; appendCommittedEvent(event: CommitEvent): Promise<CommitEvent>; rewriteCommittedJournal?(events: CommitEvent[]): Promise<void> }
+export interface SearchIndexAdapter { capabilities(): Record<string, boolean>; query(input: SearchInput, actor: ActorContext): Promise<SearchResult>; rebuild(scope?: Scope): Promise<void>; health(): Promise<Record<string, unknown>> }
+export interface EmbeddingProvider { modelId: string; dimensions: number; locality?: 'local' | 'remote'; embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]> }
+export interface VectorIndexAdapter { query(vector: number[], actor: ActorContext, scopes: Scope[]): Promise<SearchHit[]> }
+export interface ModelConfig { provider: string | null; allowNetwork: boolean; baseUrl?: string; modelName?: string; apiKeyEnv?: string; timeoutMs?: number; maxRetries?: number; maxInputTokens?: number; maxOutputTokens?: number; allowPrivateContentToRemote?: boolean; critic?: boolean; command?: string; locality?: 'local' | 'remote' }
+/** Dreaming is off by default; deep and strategic modes are separate opt-ins. All limits are per run unless stated. */
+export interface DreamConfig { enabled: boolean; maxCandidates: number; /** queue micro/strategic/deep dreams automatically when knowledge changes (default true when dreaming is enabled) */ eventDriven?: boolean; modes?: Array<'micro' | 'deep' | 'strategic'>; maxProposalsPerRun?: number; maxRunsPerDay?: number; maxDurationMs?: number; deepThreshold?: number; autoAccept?: boolean; quietHours?: { startHour: number; endHour: number } }
+export interface ModelProposal { kind: string; title: string; body: string; evidence: Evidence[]; status?: string; metadata?: Record<string, unknown> }
+export interface ModelCallOptions { signal?: AbortSignal; maxOutputTokens?: number }
+export interface ModelRequest { job: string; documents: Document[]; goals: string; instruction: string }
+export interface CritiqueRequest { proposal: ModelProposal; evidence: Document[]; instruction: string }
+export interface CriticVerdict { verdict: 'accept' | 'reject'; rationale: string; flags?: string[] }
+/** locality: 'remote' providers receive no private workspace content unless the vault config explicitly allows it. Omitted means in-process host code (treated as local). */
+export interface ModelProvider { id: string; locality?: 'local' | 'remote'; generate(input: ModelRequest, options?: ModelCallOptions): Promise<ModelProposal>; critique?(input: CritiqueRequest, options?: ModelCallOptions): Promise<CriticVerdict> }
+export class MDBError extends Error { constructor(public code: string, message: string) { super(message); this.name = 'MDBError'; } }

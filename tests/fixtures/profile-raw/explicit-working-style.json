@@ -1,0 +1,27 @@
+{
+  "case": "explicit-working-style",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Debugging output order: repro, minimal fix, verification\", \"body\": \"When debugging, the user wants to see the failing reproduction first, then the smallest fix, then the verification result.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13tnv7_9144bdc0237e4397ae6447685dccd079\", \"revisionId\": \"rev_mv13tnv7_34a06e073dc949a0a6e7d874a837a20a\", \"span\": \"When debugging, show me the failing reproduction first, then the smallest fix and the verification r\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"debugging-report-order\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers debugging output ordered as reproduction, minimal fix, then verification\", \"body\": \"When debugging, the user wants to see the failing reproduction first, then the smallest fix, and then the verification result.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13wbxr_75da7fd9c47b45ac8b85110e87f8ddc9\", \"revisionId\": \"rev_mv13wbxr_d4f2f0d65f6041aaa0e3d2a71f8e82b7\", \"span\": \"When debugging, show me the failing reproduction first, then the smallest fix and the verification\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"debugging-response-order\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Debugging output order: reproduction, minimal fix, verification\", \"body\": \"When debugging, the user wants to see the failing reproduction first, then the smallest fix, and then the verification result.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13yv9v_edb567ea94fd4ced8976f949e7fa1c8d\", \"revisionId\": \"rev_mv13yv9v_892594fa0cc94cd787aadf829597a521\", \"span\": \"When debugging, show me the failing reproduction first, then the smallest fix and the verification r\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"debugging-response-order\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

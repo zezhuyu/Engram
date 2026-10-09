@@ -1,0 +1,27 @@
+{
+  "case": "explicit-goal-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Goal: migrate billing service off legacy queue\", \"body\": \"The user's goal for the next month is to migrate their team's billing service off the legacy queue.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13unb6_0035ba25bfb24dffa90b44f1123d669f\", \"revisionId\": \"rev_mv13unb6_13302bc1f0714dc49cfb15d3e5fe1196\", \"span\": \"My goal for the next month is to migrate our billing service off the legacy queue.\"}], \"metadata\": {\"category\": \"goal\", \"preferenceKey\": \"billing-queue-migration\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Goal: migrate billing service off legacy queue\", \"body\": \"The user's goal for the next month is to migrate their team's billing service off the legacy queue.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13xc7o_d1427bbeeeeb41978b0e9981aedb9538\", \"revisionId\": \"rev_mv13xc7o_6cf243a2c5bf4aae8b4bbb48a4e539ac\", \"span\": \"My goal for the next month is to migrate our billing service off the legacy queue.\"}], \"metadata\": {\"category\": \"goal\", \"preferenceKey\": \"billing-service-queue-migration\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Goal: migrate billing service off legacy queue\", \"body\": \"The user's goal for the next month is to migrate their team's billing service off the legacy queue.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13zugo_3fa895c2c63d4dea9b260f06507864ff\", \"revisionId\": \"rev_mv13zugo_f6d0ca2ef5e54445a9be1d42c1981bf5\", \"span\": \"My goal for the next month is to migrate our billing service off the legacy queue.\"}], \"metadata\": {\"category\": \"goal\", \"preferenceKey\": \"billing-queue-migration\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

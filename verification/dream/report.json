@@ -1,0 +1,228 @@
+{
+  "suite": "dream",
+  "git_commit": "no-git-repository",
+  "status": "PASS",
+  "run_at": "2026-10-09T15:07:22.362Z",
+  "command": "node --test --test-reporter=tap dist/tests/dream/retrieval.test.js dist/tests/dream/dream.test.js",
+  "durationMs": 34449,
+  "environment": {
+    "os": "Darwin 25.0.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "kernel": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:51 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6020",
+    "tmpFilesystem": "apfs",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2",
+    "sqlite": "3.53.4",
+    "ripgrep": "not installed"
+  },
+  "counts": {
+    "pass": 19,
+    "fail": 0,
+    "skipped": 0,
+    "total": 19
+  },
+  "tests": [
+    {
+      "name": "a Python API + JavaScript UI pair yields a candidate composition hypothesis, never a fact or a claim about the user",
+      "status": "PASS"
+    },
+    {
+      "name": "three modes, three different behaviours: algorithms, prompts, output schemas, budgets and candidate sets",
+      "status": "PASS"
+    },
+    {
+      "name": "modes are separate opt-ins and strategic dreaming needs a stated goal",
+      "status": "PASS"
+    },
+    {
+      "name": "critic: duplicate, trivial, unsupported, already-known and over-certain ideas are rejected, each with a persisted, restart-proof reason",
+      "status": "PASS"
+    },
+    {
+      "name": "privacy: an agent cannot dream over what it cannot read; a remote model never sees private notes; private-derived ideas are reviewed and kept out of shared indexes",
+      "status": "PASS"
+    },
+    {
+      "name": "feedback drives status and ranking; rejected ideas do not come back without new evidence; repetition never validates",
+      "status": "PASS"
+    },
+    {
+      "name": "model failure modes are safe: malformed, refusing, timing-out, unavailable and cancelled providers never write knowledge",
+      "status": "PASS"
+    },
+    {
+      "name": "no runaway dreaming: discoveries never seed dreams, triggers are rate-limited and deduplicated, and every budget is enforced",
+      "status": "PASS"
+    },
+    {
+      "name": "deep mode generates sibling candidates from different angles, keeps the best, and records the others as rejected, never as knowledge",
+      "status": "PASS"
+    },
+    {
+      "name": "deep discoveries must separate facts from speculation, name missing evidence, and cannot present conjecture as a sourced fact",
+      "status": "PASS"
+    },
+    {
+      "name": "a deep candidate that is repaired once is accepted only if the repaired answer passes the same checks",
+      "status": "PASS"
+    },
+    {
+      "name": "a contradiction between existing claims is kept as an unresolved deep discovery with one hop and no invented resolution",
+      "status": "PASS"
+    },
+    {
+      "name": "the evaluation pack has 20+ documents across 5 knowledge domains, contradictions and private notes",
+      "status": "PASS"
+    },
+    {
+      "name": "configured SQLite vectors add bounded semantic associations to Dream micro retrieval; unavailable backend preserves lexical graph behavior",
+      "status": "PASS"
+    },
+    {
+      "name": "micro: a local neighbourhood of the changed object plus a few complementary objects from other domains, within a small budget",
+      "status": "PASS"
+    },
+    {
+      "name": "deep: rare cross-domain bridges, provides/consumes pairs, contradictions and long paths, excluding direct neighbours and unrelated domains",
+      "status": "PASS"
+    },
+    {
+      "name": "strategic: goal-directed capabilities, competing domains and gaps; a goal nothing supports yields a gap report and no model call",
+      "status": "PASS"
+    },
+    {
+      "name": "the three modes use different algorithms, budgets and candidate sets; the retrieval trace shows it",
+      "status": "PASS"
+    },
+    {
+      "name": "retrieval respects authorization: an agent without access to the private workspace never gets its objects into the pool, graph or plan",
+      "status": "PASS"
+    }
+  ],
+  "cases": 18,
+  "caseFailures": [],
+  "seeds": [],
+  "invariantAssertions": null,
+  "gaps": [
+    {
+      "item": "Independent semantic quality scoring for novelty, feasibility, usefulness, contradictions and hallucinations",
+      "status": "FAIL",
+      "reason": "Real-model evaluation FAIL: mode mean qualities={\"micro\":{\"count\":1,\"meanQuality\":0.8333333333333334},\"deep\":{\"count\":1,\"meanQuality\":0.6666666666666666},\"strategic\":{\"count\":1,\"meanQuality\":1}}, critic rejection recall=1, supported acceptance=1, evidence grounding=1. See verification/dream/real-model-evaluation.json."
+    },
+    {
+      "item": "Discovery usefulness over time",
+      "status": "NOT_RUN",
+      "reason": "Feedback and success-rate weighting are tested for mechanics; no longitudinal data exists."
+    },
+    {
+      "item": "Experiment execution",
+      "status": "UNSUPPORTED",
+      "reason": "Validation needs user confirmation or recorded experiment evidence; Engram never runs experiments."
+    }
+  ],
+  "limitations": [
+    "Discoveries are hypotheses. The critic is heuristic (lexical similarity); novelty is not proven."
+  ],
+  "repro": "npm run build && node --test --test-reporter=tap dist/tests/dream/retrieval.test.js dist/tests/dream/dream.test.js",
+  "caseDetails": [
+    {
+      "name": "dream/evaluation-pack",
+      "status": "PASS",
+      "detail": {
+        "documents": 21,
+        "domains": 7
+      }
+    },
+    {
+      "name": "dream/composition-hypothesis",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/micro-retrieval",
+      "status": "PASS",
+      "detail": {
+        "objects": 6
+      }
+    },
+    {
+      "name": "dream/deep-retrieval",
+      "status": "PASS",
+      "detail": {
+        "clusters": 5,
+        "domains": 5
+      }
+    },
+    {
+      "name": "dream/mode-differences-end-to-end",
+      "status": "PASS",
+      "detail": {
+        "deepProposals": 9,
+        "microProposals": 1,
+        "strategicProposals": 1
+      }
+    },
+    {
+      "name": "dream/strategic-retrieval",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/mode-differences",
+      "status": "PASS",
+      "detail": {
+        "microObjects": 6,
+        "deepObjects": 10,
+        "strategicObjects": 4
+      }
+    },
+    {
+      "name": "dream/mode-opt-in",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/retrieval-acl",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/critic-rejections-persisted",
+      "status": "PASS",
+      "detail": {
+        "rejectedRecords": 4
+      }
+    },
+    {
+      "name": "dream/dream-privacy",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/feedback-learning-suppression",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/dream-failure-modes",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/no-runaway-and-budgets",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/deep-sibling-candidates-selection",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/deep-facts-vs-speculation-enforced",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/deep-bounded-repair",
+      "status": "PASS"
+    },
+    {
+      "name": "dream/deep-contradiction-single-hop",
+      "status": "PASS"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "case": "explicit-correction-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers quiet logs showing errors only\", \"body\": \"The user prefers quiet logs that show errors only, replacing an earlier preference for verbose logs.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13v597_ff969d31eeb448efb2c49ba871bd816d\", \"revisionId\": \"rev_mv13v597_f5549a28cfac43b99b7977d39c25f76b\", \"span\": \"now I prefer quiet logs with errors only\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"log-verbosity\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers quiet logs with errors only\", \"body\": \"The user prefers quiet logs that show errors only, replacing their earlier preference for verbose logs.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13xrcy_5a2520bb87ed48068b468c25640dda6d\", \"revisionId\": \"rev_mv13xrcy_f71442d2d3ca4908a6d6133dd5582247\", \"span\": \"now I prefer quiet logs with errors only\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"log-verbosity\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Prefers quiet logs with errors only\", \"body\": \"The user prefers quiet logs that show errors only, replacing an earlier preference for verbose logs.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv140dxj_9edf0c62edde484b8a5270ee61f902f4\", \"revisionId\": \"rev_mv140dxj_b1a7eb6c02e944bb8bc00c0362feee11\", \"span\": \"now I prefer quiet logs with errors only\"}], \"metadata\": {\"category\": \"preference\", \"preferenceKey\": \"log-verbosity\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

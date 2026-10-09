@@ -1,0 +1,27 @@
+{
+  "case": "no-preference",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly stated they have no preference about indentation in this repository, which is an undecided/absent preference rather than an enduring fact to record.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly stated they have no preference about indentation in this repository, so there is no enduring preference to record.\", \"evidence\": []}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"no_insight\", \"title\": \"No insight\", \"body\": \"The user explicitly stated they have no preference about indentation in this repository, so there is no enduring preference to record.\", \"evidence\": []}\n"
+      ]
+    }
+  ]
+}

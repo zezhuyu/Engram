@@ -1,0 +1,5 @@
+subject=CN = xhost-a
+issuer=CN = xhost test CA
+Verification: OK
+New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
+Verify return code: 0 (ok)

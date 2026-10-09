@@ -1,0 +1,27 @@
+{
+  "case": "project-specific-2",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Ask before adding runtime dependencies in Orion\", \"body\": \"In the Orion project, the user wants to be asked first before any new runtime dependencies are added.\", \"evidence\": [{\"uri\": \"mdb://workspaces/orion/objects/obj_mv13uqxs_0ee1f1b7a06d44ec8d5ae22291dbf46b\", \"revisionId\": \"rev_mv13uqxs_c2bf2ae0c4514a1cbb2ab7b784fd6e87\", \"span\": \"In the Orion project specifically, never add new runtime dependencies without asking me first.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"orion-runtime-dependency-approval\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Ask before adding runtime dependencies in Orion\", \"body\": \"In the Orion project, the user wants to be asked first before any new runtime dependencies are added.\", \"evidence\": [{\"uri\": \"mdb://workspaces/orion/objects/obj_mv13xfi8_8a7d3a638ad04d96af82471abf7a101b\", \"revisionId\": \"rev_mv13xfi8_96ad907c557d4e7aa3750ec7bb8a0d53\", \"span\": \"In the Orion project specifically, never add new runtime dependencies without asking me first.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"orion-runtime-dependency-approval\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Ask before adding runtime dependencies in Orion\", \"body\": \"In the Orion project, the user wants to be asked before any new runtime dependencies are added.\", \"evidence\": [{\"uri\": \"mdb://workspaces/orion/objects/obj_mv13zy0s_39e9cb9a18c04308bdb5dc4b63baefcc\", \"revisionId\": \"rev_mv13zy0s_7faad3a5eb2f4aa7b3d51e5663e824d0\", \"span\": \"In the Orion project specifically, never add new runtime dependencies without asking me first.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"orion-runtime-dependency-approval\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

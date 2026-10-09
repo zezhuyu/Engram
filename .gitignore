@@ -1,0 +1,280 @@
+# ---------------------------------------------------------------------------
+# Dependencies and build output
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+build/
+out/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+.eslintcache
+*.tgz
+docs/*.md
+.omx/
+verification/
+
+# ---------------------------------------------------------------------------
+# Secrets and credentials. Never commit these. Real values belong in the
+# environment or a secret manager; commit only *.example templates.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+.envrc
+.npmrc
+.yarnrc.yml
+.netrc
+.pypirc
+*.pem
+*.key
+*.crt
+*.cer
+*.csr
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.gpg
+*.asc
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+*_rsa
+*_ed25519
+ssh_host_*_key
+known_hosts
+auth.json
+credentials.json
+service-account*.json
+*-credentials.json
+*.token
+secrets/
+.secrets/
+.aws/
+.ssh/
+.gnupg/
+# bearer-token files and remote-capture spools hold credentials/captured prompts
+.Engram-remote-spool/
+.engram-remote-spool/
+*.spool
+
+# ---------------------------------------------------------------------------
+# Local agent / assistant / tool state (machine- and user-specific)
+# ---------------------------------------------------------------------------
+.omx/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.aider*
+.continue/
+.windsurf/
+.copilot/
+.claude-mem/
+.cache/
+CLAUDE.local.md
+AGENTS.local.md
+*.local.md
+*.local.json
+*.local.yaml
+*.local.yml
+
+# ---------------------------------------------------------------------------
+# OS and editor files
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.Spotlight-V100
+.Trashes
+._*
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+\#*\#
+
+# ---------------------------------------------------------------------------
+# Python (bundled skills include helper scripts)
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Local vaults and user data (never commit user memory or knowledge bases)
+# ---------------------------------------------------------------------------
+.Engram/
+.engram/
+.mdb/
+/vault/
+/vaults/
+/qbench-*/
+# the shipped synthetic example is the only vault allowed in the tree
+!examples/sample-vault/
+
+# derived indexes and databases (rebuildable from the Markdown vault)
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# backups and restores of vaults
+*.bak
+*.orig
+*.rej
+engram-backup-*/
+mdb-backup-*/
+backup-*/
+restore-*/
+
+# ---------------------------------------------------------------------------
+# Generated verification output. Reports (report.json/md, *evaluation.json,
+# v1-gates.json) are kept; raw logs, console dumps and benchmark data are not.
+# ---------------------------------------------------------------------------
+verification/**/cases.jsonl
+verification/**/last-output.txt
+verification/benchmarks/corpora/
+verification/benchmarks/runs/
+verification/benchmarks/profiles/
+# VM/disk images and host keys used by the optional crash-test harness
+*.qcow2
+*.vmdk
+*.vdi
+verification/**/*.qcow2
+verification/**/*.img
+verification/**/*.iso
+verification/**/*.raw
+verification/**/*.vmdk
+verification/**/*.vdi
+verification/**/vmlinuz*
+verification/**/initramfs*
+verification/**/id_*
+verification/**/*.pid
+verification/**/*.sock
+verification/**/ssh-*
+verification/**/known_hosts*
+
+# ---------------------------------------------------------------------------
+# Development-process files: task notes, plans, agent instructions, handoffs,
+# memory dumps. The repository ships the framework, its tests, tooling and
+# product documentation only.
+# ---------------------------------------------------------------------------
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/CODEX.md
+/MEMORY.md
+/NOTES.md
+/TODO.md
+/TASKS.md
+/PLAN.md
+/ROADMAP.md
+/HANDOFF*.md
+/TASK*.md
+/*.handoff.md
+/notes/
+/tasks/
+/todo/
+/plans/
+/handoff/
+/handoffs/
+/memory/
+/.memory/
+/.tasks/
+/.task/
+/.notes/
+/.planning/
+/.handoff/
+*.notes.md
+*.scratch.md
+*.draft.md
+scratch.*
+# agent task / implementation guides and plans under docs/
+/docs/CODEX_START_HERE.md
+/docs/MDB_IMPLEMENTATION_GUIDE.md
+/docs/plans/
+/docs/cross-machine-verification.md
+/docs/handoff/
+/docs/notes/
+# per-task test fixtures that only hold recorded model transcripts
+/tests/fixtures/profile-raw/
+
+# ---------------------------------------------------------------------------
+# verification/: keep the inputs the scripts read and the hand-written protocol
+# documents; everything produced by a run, and every phase/milestone/task note,
+# is regenerated locally and stays out of the repository.
+# ---------------------------------------------------------------------------
+/verification/*
+!/verification/README.md
+!/verification/release-matrix.json
+!/verification/v1-gates.json
+!/verification/live-backends/
+!/verification/profile/
+/verification/profile/*
+!/verification/profile/labeled-corpus.json
+!/verification/dream/
+/verification/dream/*
+!/verification/dream/labeled-scenarios.json
+!/verification/acid/
+/verification/acid/*
+!/verification/acid/journal-protocol.md
+!/verification/acid/fault-points.json
+!/verification/durability/
+/verification/durability/*
+!/verification/durability/commit-protocol.md
+!/verification/durability/fault-points.json
+!/verification/durability/vm/
+/verification/durability/vm/*
+!/verification/durability/vm/README.md
+!/verification/durability/vm/agent.mjs
+!/verification/durability/vm/fsync-eio.c
+!/verification/durability/vm/run-kernel-fsync-eio.sh
+!/verification/durability/vm/run-powercuts.sh
+!/verification/benchmarks/
+/verification/benchmarks/*
+!/verification/benchmarks/methodology.md
+!/verification/benchmarks/corpus-manifest.json
+
+# ---------------------------------------------------------------------------
+# Docker / compose overrides and local test infrastructure
+# ---------------------------------------------------------------------------
+docker-compose.override.yml
+compose.override.yml
+docker-compose.override.yaml
+compose.override.yaml
+.docker/
+
+# ---------------------------------------------------------------------------
+# Logs, scratch and temporary files
+# ---------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tmp
+*.temp
+tmp/
+temp/
+scratch/
+.tmp/
+*.pid
+*.heapsnapshot
+*.cpuprofile
+*.prof
+isolate-*.log
+# (not ignoring core dumps by bare name: it would match packages/core/)

@@ -1,0 +1,70 @@
+{
+ "host": "claude-code",
+ "captured": "2026-10-08 with claude 2.1.285, hooks via --settings",
+ "payloads": {
+  "SessionStart": {
+   "session_id": "00000000-0000-4000-8000-000000000001",
+   "transcript_path": "/home/user/.claude/projects/demo/00000000.jsonl",
+   "cwd": "/home/user/project",
+   "hook_event_name": "SessionStart",
+   "source": "startup"
+  },
+  "UserPromptSubmit": {
+   "session_id": "00000000-0000-4000-8000-000000000001",
+   "transcript_path": "/home/user/.claude/projects/demo/00000000.jsonl",
+   "cwd": "/home/user/project",
+   "prompt_id": "id_redacted",
+   "permission_mode": "default",
+   "hook_event_name": "UserPromptSubmit",
+   "prompt": "Run the shell command: echo hello-probe. Then reply with the single word done."
+  },
+  "PostToolUse": {
+   "session_id": "00000000-0000-4000-8000-000000000001",
+   "transcript_path": "/home/user/.claude/projects/demo/00000000.jsonl",
+   "cwd": "/home/user/project",
+   "prompt_id": "id_redacted",
+   "permission_mode": "default",
+   "effort": {
+    "level": "medium"
+   },
+   "hook_event_name": "PostToolUse",
+   "tool_name": "Bash",
+   "tool_input": {
+    "command": "echo hello-probe",
+    "description": "Print probe string"
+   },
+   "tool_response": {
+    "stdout": "hello-probe",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+   },
+   "tool_use_id": "id_redacted",
+   "duration_ms": 967
+  },
+  "Stop": {
+   "session_id": "00000000-0000-4000-8000-000000000001",
+   "transcript_path": "/home/user/.claude/projects/demo/00000000.jsonl",
+   "cwd": "/home/user/project",
+   "prompt_id": "id_redacted",
+   "permission_mode": "default",
+   "effort": {
+    "level": "medium"
+   },
+   "hook_event_name": "Stop",
+   "stop_hook_active": false,
+   "last_assistant_message": "done",
+   "background_tasks": [],
+   "session_crons": []
+  },
+  "SessionEnd": {
+   "session_id": "00000000-0000-4000-8000-000000000001",
+   "transcript_path": "/home/user/.claude/projects/demo/00000000.jsonl",
+   "cwd": "/home/user/project",
+   "prompt_id": "id_redacted",
+   "hook_event_name": "SessionEnd",
+   "reason": "other"
+  }
+ }
+}

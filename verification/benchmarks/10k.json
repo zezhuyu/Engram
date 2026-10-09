@@ -1,0 +1,417 @@
+{
+  "suite": "benchmark",
+  "label": "10k",
+  "synthetic": true,
+  "seed": 20261007,
+  "runs": 15,
+  "timestamp": "2026-10-08T17:50:57.592Z",
+  "cacheState": "warm (sequential repeated queries; no OS cache purge, cold NOT_RUN)",
+  "hardware": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M2 Max",
+    "logicalCpus": 12,
+    "memoryBytes": 34359738368,
+    "node": "v25.8.2"
+  },
+  "corpus": {
+    "documents": 10000,
+    "workspaces": 20,
+    "bodyBytes": 9256816,
+    "canonicalBytes": 15245959,
+    "knownHits": {
+      "rare": 40,
+      "cjk": 487,
+      "phrase": 104,
+      "punctuation": 31,
+      "tagAlpha": 2443
+    }
+  },
+  "build": {
+    "wallMs": 380478,
+    "docsPerSecond": 26.3,
+    "durableCommit": {
+      "p50Ms": 33.59,
+      "p95Ms": 54.41,
+      "p99Ms": 90.19,
+      "samples": 10000,
+      "p95Under50ms": false
+    }
+  },
+  "filesystem": {
+    "grep-rare": {
+      "p50Ms": 758.81,
+      "p95Ms": 3943.55,
+      "p99Ms": 3943.55,
+      "samples": 15,
+      "hits": 40,
+      "expectedHits": 40,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "grep-common": {
+      "p50Ms": 1686.89,
+      "p95Ms": 1741.83,
+      "p99Ms": 1741.83,
+      "samples": 15,
+      "hits": 50,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "filesystem"
+    },
+    "grep-nonexistent": {
+      "p50Ms": 765.28,
+      "p95Ms": 799.69,
+      "p99Ms": 799.69,
+      "samples": 15,
+      "hits": 0,
+      "expectedHits": 0,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "grep-punctuation": {
+      "p50Ms": 774.3,
+      "p95Ms": 807.3,
+      "p99Ms": 807.3,
+      "samples": 15,
+      "hits": 31,
+      "expectedHits": 31,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "grep-cjk": {
+      "p50Ms": 263.35,
+      "p95Ms": 272.57,
+      "p99Ms": 272.57,
+      "samples": 15,
+      "hits": 487,
+      "expectedHits": 487,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "keyword-single-rare": {
+      "p50Ms": 792.42,
+      "p95Ms": 1260.42,
+      "p99Ms": 1260.42,
+      "samples": 15,
+      "hits": 40,
+      "expectedHits": 40,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "keyword-phrase": {
+      "p50Ms": 784.44,
+      "p95Ms": 826.86,
+      "p99Ms": 826.86,
+      "samples": 15,
+      "hits": 104,
+      "expectedHits": 104,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "keyword-multi": {
+      "p50Ms": 1590.78,
+      "p95Ms": 2035.32,
+      "p99Ms": 2035.32,
+      "samples": 15,
+      "hits": 50,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "filesystem"
+    },
+    "keyword-boolean-not": {
+      "p50Ms": 772.84,
+      "p95Ms": 1141.79,
+      "p99Ms": 1141.79,
+      "samples": 15,
+      "hits": 0,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "filesystem"
+    },
+    "regex-anchored-alternation": {
+      "p50Ms": 1653.78,
+      "p95Ms": 1732.77,
+      "p99Ms": 1732.77,
+      "samples": 15,
+      "hits": 143,
+      "expectedHits": 143,
+      "correct": true,
+      "servedBy": "filesystem"
+    },
+    "metadata-tag": {
+      "p50Ms": 1097.25,
+      "p95Ms": 1387.05,
+      "p99Ms": 1387.05,
+      "samples": 15,
+      "hits": 100,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "filesystem"
+    },
+    "metadata-kind-scope": {
+      "p50Ms": 39.55,
+      "p95Ms": 43.32,
+      "p99Ms": 43.32,
+      "samples": 15,
+      "hits": 100,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "filesystem"
+    },
+    "read-single": {
+      "p50Ms": 0.2,
+      "p95Ms": 0.28,
+      "p99Ms": 0.31,
+      "samples": 60
+    },
+    "context-1000-tokens": {
+      "p50Ms": 1811.54,
+      "p95Ms": 1831.82,
+      "p99Ms": 1831.82,
+      "samples": 5
+    },
+    "context-4000-tokens": {
+      "p50Ms": 1806.74,
+      "p95Ms": 1814.58,
+      "p99Ms": 1814.58,
+      "samples": 5
+    },
+    "context-16000-tokens": {
+      "p50Ms": 1793.71,
+      "p95Ms": 1934.99,
+      "p99Ms": 1934.99,
+      "samples": 5
+    },
+    "related-depth-1": {
+      "p50Ms": 52.9,
+      "p95Ms": 53.76,
+      "p99Ms": 53.76,
+      "samples": 5
+    },
+    "related-depth-2": {
+      "p50Ms": 520.63,
+      "p95Ms": 528.36,
+      "p99Ms": 528.36,
+      "samples": 5
+    },
+    "related-depth-3": {
+      "p50Ms": 1064.94,
+      "p95Ms": 1084.29,
+      "p99Ms": 1084.29,
+      "samples": 5
+    },
+    "backlinks": {
+      "p50Ms": 21.09,
+      "p95Ms": 22.92,
+      "p99Ms": 22.92,
+      "samples": 15
+    }
+  },
+  "sqlite": {
+    "grep-rare": {
+      "p50Ms": 37.89,
+      "p95Ms": 45.5,
+      "p99Ms": 45.5,
+      "samples": 15,
+      "hits": 40,
+      "expectedHits": 40,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "grep-common": {
+      "p50Ms": 1062.05,
+      "p95Ms": 1129.23,
+      "p99Ms": 1129.23,
+      "samples": 15,
+      "hits": 50,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "sqlite"
+    },
+    "grep-nonexistent": {
+      "p50Ms": 27.72,
+      "p95Ms": 32.48,
+      "p99Ms": 32.48,
+      "samples": 15,
+      "hits": 0,
+      "expectedHits": 0,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "grep-punctuation": {
+      "p50Ms": 31.72,
+      "p95Ms": 36.51,
+      "p99Ms": 36.51,
+      "samples": 15,
+      "hits": 31,
+      "expectedHits": 31,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "grep-cjk": {
+      "p50Ms": 108.02,
+      "p95Ms": 111.81,
+      "p99Ms": 111.81,
+      "samples": 15,
+      "hits": 487,
+      "expectedHits": 487,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "keyword-single-rare": {
+      "p50Ms": 33.19,
+      "p95Ms": 37.19,
+      "p99Ms": 37.19,
+      "samples": 15,
+      "hits": 40,
+      "expectedHits": 40,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "keyword-phrase": {
+      "p50Ms": 46.11,
+      "p95Ms": 51.69,
+      "p99Ms": 51.69,
+      "samples": 15,
+      "hits": 104,
+      "expectedHits": 104,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "keyword-multi": {
+      "p50Ms": 1309.74,
+      "p95Ms": 1342.85,
+      "p99Ms": 1342.85,
+      "samples": 15,
+      "hits": 50,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "sqlite"
+    },
+    "keyword-boolean-not": {
+      "p50Ms": 42.66,
+      "p95Ms": 46.36,
+      "p99Ms": 46.36,
+      "samples": 15,
+      "hits": 0,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "sqlite"
+    },
+    "regex-anchored-alternation": {
+      "p50Ms": 1659.65,
+      "p95Ms": 1764.12,
+      "p99Ms": 1764.12,
+      "samples": 15,
+      "hits": 143,
+      "expectedHits": 143,
+      "correct": true,
+      "servedBy": "sqlite"
+    },
+    "metadata-tag": {
+      "p50Ms": 434.51,
+      "p95Ms": 438.35,
+      "p99Ms": 438.35,
+      "samples": 15,
+      "hits": 100,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "sqlite"
+    },
+    "metadata-kind-scope": {
+      "p50Ms": 27.7,
+      "p95Ms": 30.09,
+      "p99Ms": 30.09,
+      "samples": 15,
+      "hits": 100,
+      "expectedHits": null,
+      "correct": null,
+      "servedBy": "sqlite"
+    },
+    "read-single": {
+      "p50Ms": 0.2,
+      "p95Ms": 0.26,
+      "p99Ms": 0.28,
+      "samples": 60
+    },
+    "context-1000-tokens": {
+      "p50Ms": 1801.88,
+      "p95Ms": 1937.11,
+      "p99Ms": 1937.11,
+      "samples": 5
+    },
+    "context-4000-tokens": {
+      "p50Ms": 1794.6,
+      "p95Ms": 1863.58,
+      "p99Ms": 1863.58,
+      "samples": 5
+    },
+    "context-16000-tokens": {
+      "p50Ms": 1794.83,
+      "p95Ms": 1843.56,
+      "p99Ms": 1843.56,
+      "samples": 5
+    },
+    "related-depth-1": {
+      "p50Ms": 46.71,
+      "p95Ms": 49.36,
+      "p99Ms": 49.36,
+      "samples": 5
+    },
+    "related-depth-2": {
+      "p50Ms": 452.09,
+      "p95Ms": 456.47,
+      "p99Ms": 456.47,
+      "samples": 5
+    },
+    "related-depth-3": {
+      "p50Ms": 943.09,
+      "p95Ms": 965.72,
+      "p99Ms": 965.72,
+      "samples": 5
+    },
+    "backlinks": {
+      "p50Ms": 20.89,
+      "p95Ms": 23.53,
+      "p99Ms": 23.53,
+      "samples": 15
+    },
+    "rebuildMs": 5638,
+    "indexBytes": 69615243
+  },
+  "parity": {
+    "grep-rare": true,
+    "grep-common": true,
+    "grep-nonexistent": true,
+    "grep-punctuation": true,
+    "grep-cjk": true,
+    "keyword-single-rare": true,
+    "keyword-phrase": true,
+    "keyword-multi": true,
+    "keyword-boolean-not": true,
+    "regex-anchored-alternation": true,
+    "metadata-tag": true,
+    "metadata-kind-scope": true
+  },
+  "parityAll": true,
+  "operations": {
+    "verifyMs": 3258,
+    "backup": {
+      "backupMs": 68158,
+      "backupBytes": 117309529,
+      "backupFiles": 30175,
+      "restoreMs": 172648
+    }
+  },
+  "process": {
+    "peakRssBytes": 1206665216
+  },
+  "notMeasured": [
+    "Cold-cache runs (needs privileged cache purge)",
+    "Mixed 50 reader / 5 writer load",
+    "Incremental SQLite update (the adapter only supports full rebuild)",
+    "CPU and I/O volume counters",
+    "Embedding size (semantic search is not implemented)"
+  ]
+}

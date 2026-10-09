@@ -1,0 +1,11 @@
+{
+  "installed": false,
+  "capture": [],
+  "recall": true,
+  "coverage": "none",
+  "notes": [
+    "Hook payload fields recorded from a live Claude Code 2.1.285 session (tests/fixtures/hook-payloads/claude-code.json). SessionEnd is best-effort: other hooks were cancelled at exit in -p mode."
+  ],
+  "registrations": [],
+  "settingsPath": "/root/.claude/settings.json"
+}

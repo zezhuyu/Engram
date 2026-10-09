@@ -1,0 +1,27 @@
+{
+  "case": "explicit-tests",
+  "note": "Redacted raw Claude CLI responses for a synthetic case.",
+  "attempts": [
+    {
+      "run": 1,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Wants tests run and tradeoffs explained before finishing coding tasks\", \"body\": \"The user wants the assistant to run the relevant tests and explain important tradeoffs before finishing coding tasks.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13tbh8_91eb6e7076564c4f9fb27a4ccc821757\", \"revisionId\": \"rev_mv13tbh8_150f9c10f52e427db6412b74d98652d6\", \"span\": \"I want you to run the relevant tests and explain important tradeoffs before you finish coding tasks.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"coding-task-completion\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 2,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Run relevant tests and explain tradeoffs before finishing coding tasks\", \"body\": \"The user wants relevant tests run and important tradeoffs explained before coding tasks are considered finished.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13vzjr_89ed3691169e46d9a06d4cc3e3270a37\", \"revisionId\": \"rev_mv13vzjr_911c876fccc94c33873c7c4605d83c71\", \"span\": \"I want you to run the relevant tests and explain important tradeoffs before you finish coding tasks.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"coding-task-completion\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    },
+    {
+      "run": 3,
+      "jobStatus": "complete",
+      "responses": [
+        "{\"kind\": \"user_insight\", \"title\": \"Run relevant tests and explain tradeoffs before finishing coding tasks\", \"body\": \"The user wants the agent to run the relevant tests and explain important tradeoffs before finishing coding tasks.\", \"evidence\": [{\"uri\": \"mdb://profile/objects/obj_mv13yjri_b4738d5b66a247f180b851e44c2ba06e\", \"revisionId\": \"rev_mv13yjri_5f931065dc054f5382f1fc777ab76236\", \"span\": \"I want you to run the relevant tests and explain important tradeoffs before you finish coding tasks.\"}], \"metadata\": {\"category\": \"working_style\", \"preferenceKey\": \"tests-and-tradeoffs-before-finish\", \"sensitivity\": \"none\", \"explicitStatement\": true}}\n"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "gates": [
+    {
+      "id": "PREFERENCES",
+      "status": "PASS",
+      "evidence": [
+        "verification/profile/report.json",
+        "verification/profile/real-model-evaluation.json",
+        "verification/profile/labeled-corpus.json",
+        "tests/profile/insights.test.ts",
+        "tests/fixtures/profile-raw/",
+        "docs/user-insight.md"
+      ],
+      "detail": "Fresh run on the combined A+B+C tree (2026-10-09T15:18:16.123Z): real Claude CLI, 32-case labeled corpus, 3 runs, 96 jobs: completed 96/96 (95% CI 0.962-1), 48 proposals + 48 valid abstentions, 0 malformed, 0 repairs needed by the real model; precision 1, recall 0.917 (CI 0.804-0.967), false-positive rate 0, scope 1, grounding 1, correction override True. Root cause and fix (from the Agent A work, unchanged): valid abstentions had no legal envelope (evidence required 1..40) and the old repair step never ran because the provider throws during its own parse; fixed with the versioned profile-extraction/v1 schema, first-class no_insight, bounded repair and separate counters. Repair paths are covered by mock-provider tests only. External factual calibration NOT_RUN."
+    },
+    {
+      "id": "REMOTE_CAPTURE",
+      "status": "INCOMPLETE",
+      "evidence": [
+        "docs/cross-machine-verification.md",
+        "scripts/xhost/run.mjs",
+        "tests/memory/remote-real-host.test.ts",
+        "tests/memory/remote-spool.test.ts",
+        "verification/memory/cross-machine-report.md",
+        "verification/memory/remote-real-host-evaluation.json",
+        "verification/memory/report.json",
+        "verification/memory/xhost/results.json"
+      ],
+      "detail": "Fresh run on the combined tree: all 14 scenarios PASS on three Docker containers (own filesystems and network namespaces, dedicated network, real TLS with a test CA, real disconnects, server restart, 1100-hook buffer cap, duplicate/reorder/replay, revocation and reissue, client SIGKILL). The earlier live Claude Code + Codex run on one machine is prior evidence and was not repeated. PHYSICAL separate hosts NOT_RUN (none configured or authorized), so the gate stays INCOMPLETE. Not fixed, documented: no autonomous retry/backoff; head-of-line blocking by a permanently rejected envelope untested; hanging-connection, packet-loss and clock-skew cases NOT_RUN. Also fixed on integration: a drain-lock initialization race in packages/memory/capture.ts (regression test added); container harness re-run on the merged tree in the Engram folder: 14/14 PASS."
+    },
+    {
+      "id": "AGENT_IDENTITY",
+      "status": "PASS",
+      "evidence": [
+        "verification/security/report.json",
+        "verification/identity/report.json",
+        "docs/security.md",
+        "deploy/Caddyfile"
+      ],
+      "detail": "Fresh run on the combined tree: verify:security 25/25 and the identity cases pass. Security and identity tests pass for server-bound actors, spoof rejection, two independently scoped HTTP clients, cross-workspace denial, concurrent provisioning, creation/revocation/rotation/authorization-failure audit, atomic rotate-and-reissue with immediate old-token invalidation and scope narrowing, and the supported loopback-upstream Caddy HTTPS configuration."
+    },
+    {
+      "id": "DREAM_ENGINE",
+      "status": "PASS",
+      "evidence": [
+        "verification/dream/report.json",
+        "verification/dream/labeled-scenarios.json",
+        "verification/dream/real-model-evaluation.json",
+        "tests/dream/retrieval.test.ts",
+        "tests/dream/dream.test.ts",
+        "tests/dream/dream.test.ts"
+      ],
+      "detail": "Fresh run on the combined tree (this session): real Claude CLI, 3 runs, fresh vault per scenario, thresholds unchanged (0.75/mode): micro 0.889, deep 0.986 (legacy scorer 0.796), strategic 0.944; evidence grounding 1; critic rejected all adversarial cases and accepted the supported case in every run. Original deep 0.667 was two scorer defects (feasibility read prose instead of metadata; quoted source claims counted as hallucination); generation changes: 3 sibling angles, hops/facts/speculation/missingEvidence, bounded repair, deterministic selection, not_selected records. Caveats: deep sample is 3 isolated 2-3 document scenarios; sibling selection gain is small; micro feasibility 0.17 under the stricter scorer; hybrid semantic retrieval comparison NOT_RUN (no embedding model)."
+    }
+  ]
+}
