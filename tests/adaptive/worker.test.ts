@@ -99,3 +99,10 @@ test('service definitions are printed, never installed, and carry the explicit w
   assert.deepEqual(await execute(['--root', w.root, 'intelligence', 'schedule', 'events']), []);
   recordCase({ suite: 'adaptive', name: 'service-print-and-cli', status: 'PASS' });
 });
+
+test('a skip whose reason only differs in numbers (load average, minutes) is logged once, not on every tick', async t => {
+  const w = await world(t, { config: { timezone: NY } }); const scheduler = w.ai.scheduler as unknown as { noteSkip(reason: string): Promise<void> };
+  for (const load of ['12.5', '13.1', '14.9', '9.8']) await scheduler.noteSkip(`load average ${load} > 9`); await scheduler.noteSkip('PAUSED');
+  const skips = (await w.ai.events(20)).filter(e => e.type === 'dream_skipped'); assert.deepEqual(skips.map(e => e.reason), ['load average 12.5 > 9', 'PAUSED']);
+  recordCase({ suite: 'adaptive', name: 'skip-reason-dedupe', status: 'PASS' });
+});

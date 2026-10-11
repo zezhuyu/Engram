@@ -69,3 +69,12 @@ test('labels keep their origin: real-user, validated-evidence and simulated feed
   assert.equal((await readFeedbackLog(vault)).filter(e => e.origin === 'simulated-reviewer').length, 1);
   recordCase({ suite: 'dream', name: 'learning-origin-labels', status: 'PASS' });
 });
+
+test('CLI --origin records provenance for ratings and rejects unknown origins', async t => {
+  const { root, vault } = await disposableVault(t); const d = await discovery(vault, ['c1', 'c2']); const { execute } = await import('../../packages/cli/index.js');
+  await execute(['--root', root, 'dream', 'rate', d.id, '--label', 'useful', '--note', 'scripted', '--origin', 'simulated-reviewer']);
+  await execute(['--root', root, 'dream', 'rate', d.id, '--label', 'useful', '--note', 'a person']);
+  const status = await execute(['--root', root, 'dream', 'learning', 'status']) as { byOrigin: Record<string, number> }; assert.deepEqual(status.byOrigin, { 'simulated-reviewer': 1, 'real-user': 1 });
+  await assert.rejects(() => execute(['--root', root, 'dream', 'rate', d.id, '--label', 'useful', '--note', 'x', '--origin', 'trust-me']), /--origin must be/);
+  recordCase({ suite: 'dream', name: 'learning-cli-origin', status: 'PASS' });
+});

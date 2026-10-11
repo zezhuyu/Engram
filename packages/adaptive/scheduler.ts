@@ -51,7 +51,7 @@ export class AdaptiveScheduler {
   }
   /** Logs a skip/wait once per distinct reason, so a worker polling every few minutes does not flood the log. */
   private async noteSkip(reason: string, extra: Partial<ScheduleEvent> = {}): Promise<void> {
-    const last = (await this.store.events(1))[0]; if (last?.type === 'dream_skipped' && last.reason === reason) return;
+    const last = (await this.store.events(1))[0]; const shape = (r?: string) => r?.replace(/[\d.]+/g, '#'); if (last?.type === 'dream_skipped' && shape(last.reason) === shape(reason)) return; /* numbers (load average, minutes) change every tick: the same kind of reason is logged once */
     await this.store.appendEvent({ type: 'dream_skipped', reason, trigger: 'daily', ...extra });
   }
   async tick(now = new Date(), options: { signal?: AbortSignal; instance?: string } = {}): Promise<{ decision: Decision; run?: RunResult }> {

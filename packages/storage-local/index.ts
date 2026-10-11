@@ -78,6 +78,34 @@ export async function atomicWrite(root: string, key: string, data: string | Uint
     fault?.('atomic.before_rename'); await fs.rename(temporary, target); fault?.('atomic.after_rename'); await syncDirectory(path.dirname(target), fault);
   } finally { await fs.rm(temporary, { force: true }); }
 }
+/**
+ * Atomic replace WITHOUT fsync, for REBUILDABLE PROJECTIONS ONLY (head pointers and Markdown views). The rename keeps readers from ever seeing a partial file in normal operation;
+ * durability is deferred to flushKeys() and, after a power loss, restored from the committed revision by tail reconciliation or recover(). Never use for revisions, the journal or config.
+ */
+export async function atomicWriteVolatile(root: string, key: string, data: string | Uint8Array, fault?: FaultHook): Promise<void> {
+  const target = await safePath(root, key);
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await safePath(root, key);
+  const temporary = target + '.' + randomUUID() + '.tmp';
+  const handle = await openVerifiedTemp(root, temporary);
+  try {
+    try { await handle.writeFile(data); fault?.('atomic.temp_written'); }
+    finally { await handle.close(); }
+    fault?.('atomic.before_rename'); await fs.rename(temporary, target); fault?.('atomic.after_rename');
+  } finally { await fs.rm(temporary, { force: true }); }
+}
+/** Makes previously written projection files durable: fsync each existing file, then each distinct parent directory once. Missing files (purged since) are skipped. */
+export async function flushKeys(root: string, keys: string[], fault?: FaultHook): Promise<{ files: number; directories: number }> {
+  const directories = new Set<string>(); let files = 0;
+  for (const key of keys) {
+    let target: string; try { target = await safePath(root, key); } catch { continue; }
+    let handle: fs.FileHandle; try { handle = await fs.open(target, 'r'); } catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) continue; throw error; }
+    try { fault?.('projection.flush.file'); await profileAsync('fsync.projection.file', () => handle.sync()); files++; } finally { await handle.close(); }
+    directories.add(path.dirname(target));
+  }
+  for (const directory of directories) { fault?.('projection.flush.directory'); await syncDirectory(directory); }
+  return { files, directories: directories.size };
+}
 const LOCK_GRACE_MS = 2000;
 /** A lock is stale when its owner process is gone, or when it never recorded (or tore) its owner file and has been idle past the grace period. */
 async function lockIsStale(target: string): Promise<boolean> {

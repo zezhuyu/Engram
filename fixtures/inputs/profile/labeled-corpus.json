@@ -1,0 +1,312 @@
+{
+  "version": 2,
+  "description": "Synthetic, hand-labeled user-conversation extraction corpus. v2 adds 16 cases (8 positive, 8 negative) to the original v1 16; thresholds unchanged. Every case is independent and contains no real user data.",
+  "thresholds": {
+    "precision": 0.9,
+    "recall": 0.8,
+    "falsePositiveRate": 0.1,
+    "jobSuccessRate": 0.9,
+    "scopeAccuracy": 1.0,
+    "evidenceGrounding": 1.0
+  },
+  "cases": [
+    {
+      "id": "explicit-concise",
+      "scope": "global",
+      "text": "For future code reviews, I prefer concise feedback with one concrete test result.",
+      "expected": {
+        "category": "preference",
+        "key": "code-review-style",
+        "terms": [
+          "concise",
+          "test"
+        ]
+      }
+    },
+    {
+      "id": "explicit-tests",
+      "scope": "global",
+      "text": "I want you to run the relevant tests and explain important tradeoffs before you finish coding tasks.",
+      "expected": {
+        "category": "working_style",
+        "key": "coding-completion",
+        "terms": [
+          "test",
+          "tradeoff"
+        ]
+      }
+    },
+    {
+      "id": "explicit-negated-choice",
+      "scope": "global",
+      "text": "I don't like hard-coded environment values; please make them configurable.",
+      "expected": {
+        "category": "preference",
+        "key": "configuration",
+        "terms": [
+          "hard-coded",
+          "configurable"
+        ]
+      }
+    },
+    {
+      "id": "explicit-correction",
+      "scope": "global",
+      "text": "Actually, correction: I now prefer detailed review feedback rather than concise summaries. I changed my mind about this.",
+      "expected": {
+        "category": "preference",
+        "key": "code-review-style",
+        "terms": [
+          "detailed",
+          "review"
+        ]
+      },
+      "supersedes": "inferred-concise"
+    },
+    {
+      "id": "project-specific",
+      "scope": "project:orion",
+      "text": "For the Orion project only, keep the public API backward compatible, even when a breaking redesign would be cleaner.",
+      "expected": {
+        "category": "preference",
+        "key": "api-compatibility",
+        "terms": [
+          "backward compatible"
+        ]
+      }
+    },
+    {
+      "id": "explicit-working-style",
+      "scope": "global",
+      "text": "When debugging, show me the failing reproduction first, then the smallest fix and the verification result.",
+      "expected": {
+        "category": "working_style",
+        "key": "debugging",
+        "terms": [
+          "reproduction",
+          "verification"
+        ]
+      }
+    },
+    {
+      "id": "explicit-goal",
+      "scope": "global",
+      "text": "My goal this quarter is to reduce the build pipeline time below five minutes.",
+      "expected": {
+        "category": "goal",
+        "key": "build-pipeline-time",
+        "terms": [
+          "build",
+          "five minutes"
+        ]
+      }
+    },
+    {
+      "id": "explicit-capability",
+      "scope": "global",
+      "text": "I maintain the Rust client and can review Rust lifetime and ownership changes myself.",
+      "expected": {
+        "category": "capability",
+        "key": "rust-review",
+        "terms": [
+          "rust",
+          "review"
+        ]
+      }
+    },
+    {
+      "id": "ambiguous",
+      "scope": "global",
+      "text": "Maybe a shorter answer would work here, but I haven't decided what format I prefer.",
+      "expected": null
+    },
+    {
+      "id": "no-preference",
+      "scope": "global",
+      "text": "I don't have a preference about indentation in this repository.",
+      "expected": null
+    },
+    {
+      "id": "explicit-no-memory",
+      "scope": "global",
+      "text": "I am not asking you to remember this and I do not want a lasting preference inferred from it.",
+      "expected": null
+    },
+    {
+      "id": "third-party",
+      "scope": "global",
+      "text": "My teammate prefers very short pull request descriptions, but I have not said what I prefer.",
+      "expected": null
+    },
+    {
+      "id": "hypothetical",
+      "scope": "global",
+      "text": "If I were leading the migration, I might choose a full rewrite; this is only a hypothetical.",
+      "expected": null
+    },
+    {
+      "id": "exposure-only",
+      "scope": "global",
+      "text": "I read an article about Kubernetes yesterday; I have no view on whether we should use it.",
+      "expected": null
+    },
+    {
+      "id": "question",
+      "scope": "global",
+      "text": "Would you prefer a table or a paragraph for this comparison?",
+      "expected": null
+    },
+    {
+      "id": "transient",
+      "scope": "global",
+      "text": "For this one quick reply, just say yes or no; that is only for this message.",
+      "expected": null
+    },
+    {
+      "id": "explicit-format-bullets",
+      "scope": "global",
+      "text": "Please use bullet lists instead of long paragraphs when you summarize things for me.",
+      "expected": {
+        "category": "preference",
+        "key": "summary-format",
+        "terms": [
+          "bullet"
+        ]
+      }
+    },
+    {
+      "id": "explicit-commit-style",
+      "scope": "global",
+      "text": "I always want commit messages that explain why the change was made, not just what changed.",
+      "expected": {
+        "category": "preference",
+        "key": "commit-messages",
+        "terms": [
+          "why"
+        ]
+      }
+    },
+    {
+      "id": "explicit-goal-2",
+      "scope": "global",
+      "text": "My goal for the next month is to migrate our billing service off the legacy queue.",
+      "expected": {
+        "category": "goal",
+        "key": "billing-migration",
+        "terms": [
+          "billing",
+          "queue"
+        ]
+      }
+    },
+    {
+      "id": "project-specific-2",
+      "scope": "project:orion",
+      "text": "In the Orion project specifically, never add new runtime dependencies without asking me first.",
+      "expected": {
+        "category": "preference",
+        "key": "orion-dependencies",
+        "terms": [
+          "dependenc"
+        ]
+      }
+    },
+    {
+      "id": "explicit-capability-2",
+      "scope": "global",
+      "text": "I'm the on-call owner for our Postgres clusters and I can handle replication failovers myself.",
+      "expected": {
+        "category": "capability",
+        "key": "postgres-ops",
+        "terms": [
+          "postgres"
+        ]
+      }
+    },
+    {
+      "id": "explicit-working-style-2",
+      "scope": "global",
+      "text": "When you propose a refactor, list the files you would touch before changing anything.",
+      "expected": {
+        "category": "working_style",
+        "key": "refactor-flow",
+        "terms": [
+          "files"
+        ]
+      }
+    },
+    {
+      "id": "explicit-correction-2",
+      "scope": "global",
+      "text": "Update: I used to want verbose logs, but now I prefer quiet logs with errors only. Please treat the new one as correct.",
+      "expected": {
+        "category": "preference",
+        "key": "log-verbosity",
+        "terms": [
+          "quiet",
+          "error"
+        ]
+      }
+    },
+    {
+      "id": "explicit-interest",
+      "scope": "global",
+      "text": "I'm really interested in property-based testing and want to learn more about it.",
+      "expected": {
+        "category": "interest",
+        "key": "property-testing",
+        "terms": [
+          "property"
+        ]
+      }
+    },
+    {
+      "id": "neg-question-2",
+      "scope": "global",
+      "text": "Which test runner would you pick for a small TypeScript library?",
+      "expected": null
+    },
+    {
+      "id": "neg-hypothetical-2",
+      "scope": "global",
+      "text": "Suppose we had a bigger budget, I imagine I would hire two more engineers, but that's just daydreaming.",
+      "expected": null
+    },
+    {
+      "id": "neg-third-party-2",
+      "scope": "global",
+      "text": "The vendor always wants invoices in PDF, which has nothing to do with my own habits.",
+      "expected": null
+    },
+    {
+      "id": "neg-temporary-2",
+      "scope": "global",
+      "text": "For this single answer only, please use French; go back to normal afterwards.",
+      "expected": null
+    },
+    {
+      "id": "neg-do-not-store",
+      "scope": "global",
+      "text": "Please forget this and do not save it anywhere: I sometimes like dark roast coffee.",
+      "expected": null
+    },
+    {
+      "id": "neg-exposure-2",
+      "scope": "global",
+      "text": "I saw a talk title about WebAssembly in my feed but I haven't read it or formed an opinion.",
+      "expected": null
+    },
+    {
+      "id": "neg-smalltalk",
+      "scope": "global",
+      "text": "Thanks, that worked. Have a good evening!",
+      "expected": null
+    },
+    {
+      "id": "neg-undecided-2",
+      "scope": "global",
+      "text": "I'm torn between spaces and tabs and honestly haven't made up my mind.",
+      "expected": null
+    }
+  ]
+}

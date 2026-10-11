@@ -1,0 +1,66 @@
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+/** Verification INPUT fixtures (not generated reports) live in the tracked fixtures/inputs/ tree; verification/ itself is generated output and is not tracked. */
+export function inputPath(relative: string): string { return existsSync(`fixtures/inputs/${relative}`) ? `fixtures/inputs/${relative}` : `verification/${relative}`; }
+export type Status = 'PASS' | 'FAIL' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
+export interface Gap { item: string; status: 'NOT_RUN' | 'UNSUPPORTED' | 'FAIL'; reason: string }
+export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; allowedSkips?: string[]; env?: Record<string, string>; concurrency?: number }
+export interface TestResult { name: string; status: Status }
+export interface SuiteReport {
+  suite: string; git_commit: string; status: Status; run_at: string; command: string; durationMs: number;
+  environment: Record<string, unknown>; counts: { pass: number; fail: number; skipped: number; total: number };
+  tests: TestResult[]; cases: number; caseFailures: unknown[]; seeds: number[]; invariantAssertions: number | null;
+  gaps: Gap[]; limitations: string[]; repro: string; caseDetails: { name: string; status: string; detail?: unknown }[];
+}
+const sh = (cmd: string, args: string[] = []): string => { const r = spawnSync(cmd, args, { encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : ''; };
+
+export function environment(): Record<string, unknown> {
+  const tmp = os.tmpdir(); let filesystem = 'unknown';
+  if (process.platform === 'darwin') { const dev = sh('df', ['-P', tmp]).split('\n')[1]?.split(/\s+/)[0]; const mount = sh('mount').split('\n').find(line => dev && line.startsWith(dev + ' ')); filesystem = /\((\w+)[,)]/.exec(mount ?? '')?.[1] ?? 'unknown'; }
+  else filesystem = sh('stat', ['-f', '-c', '%T', tmp]) || 'unknown';
+  let sqlite = 'unavailable'; try { sqlite = sh(process.execPath, ['-e', "const {DatabaseSync}=require('node:sqlite');console.log(new DatabaseSync(':memory:').prepare('select sqlite_version() v').get().v)"]) || 'unavailable'; } catch { /* absent */ }
+  return { os: `${os.type()} ${os.release()}`, platform: process.platform, arch: os.arch(), kernel: os.version(), tmpFilesystem: filesystem, cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, memoryBytes: os.totalmem(), node: process.version, sqlite, ripgrep: sh('rg', ['--version']).split('\n')[0] || 'not installed' };
+}
+export function gitCommit(): string { return sh('git', ['rev-parse', 'HEAD']) || 'no-git-repository'; }
+
+export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promise<SuiteReport> {
+  const outDir = path.join(outRoot, spec.name); await fs.mkdir(outDir, { recursive: true });
+  const casesFile = path.resolve(outDir, 'cases.jsonl'); await fs.rm(casesFile, { force: true });
+  const args = ['--test', '--test-reporter=tap', ...(spec.concurrency ? [`--test-concurrency=${spec.concurrency}`] : []), ...spec.files];
+  const started = Date.now();
+  const run = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env } });
+  const durationMs = Date.now() - started;
+  const tests: TestResult[] = [];
+  for (const line of run.stdout.split('\n')) {
+    const m = /^(not )?ok \d+ - (.*?)(?: # (SKIP|TODO).*)?$/.exec(line); if (!m) continue; // top-level only: subtests are indented
+    const skipped = m[3] === 'SKIP'; tests.push({ name: m[2]!, status: skipped ? (spec.allowedSkips?.some(s => m[2]!.includes(s)) ? 'SKIPPED' : 'SKIPPED') : m[1] ? 'FAIL' : 'PASS' });
+  }
+  const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
+  const counts = { pass: tests.filter(t => t.status === 'PASS').length, fail: tests.filter(t => t.status === 'FAIL').length, skipped: tests.filter(t => t.status === 'SKIPPED').length, total: tests.length };
+  const unapprovedSkips = tests.filter(t => t.status === 'SKIPPED' && !spec.allowedSkips?.some(s => t.name.includes(s)));
+  let status: Status = counts.total === 0 ? 'NOT_RUN' : counts.fail > 0 || run.status !== 0 ? 'FAIL' : unapprovedSkips.length ? 'SKIPPED' : 'PASS';
+  const caseFailures = caseLines.filter(c => c.status === 'FAIL'); if (caseFailures.length) status = 'FAIL';
+  const command = `node ${args.join(' ')}`;
+  const report: SuiteReport = {
+    suite: spec.name, git_commit: gitCommit(), status, run_at: new Date().toISOString(), command, durationMs, environment: environment(), counts, tests,
+    cases: caseLines.length, caseFailures, seeds: [...new Set(caseLines.map(c => c.seed).filter((s): s is number => typeof s === 'number'))], invariantAssertions: null,
+    gaps: spec.gaps, limitations: spec.limitations, repro: `npm run build && ${command}`, caseDetails: caseLines.map(c => ({ name: `${c.suite}/${c.name}`, status: c.status, ...(c.detail ? { detail: c.detail } : {}) }))
+  };
+  await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+  await fs.writeFile(path.join(outDir, 'report.md'), markdown(spec, report) + '\n');
+  if (status !== 'PASS') await fs.writeFile(path.join(outDir, 'last-output.txt'), run.stdout.slice(-200000) + '\n--- stderr ---\n' + run.stderr.slice(-20000));
+  return report;
+}
+function markdown(spec: SuiteSpec, r: SuiteReport): string {
+  const lines = [`# ${spec.title}`, '', `**Status: ${r.status}** — ${r.counts.pass}/${r.counts.total} tests passed, ${r.counts.fail} failed, ${r.counts.skipped} skipped; ${r.cases} recorded cases, ${r.caseFailures.length} case failures.`, '', `Run at ${r.run_at}, ${(r.durationMs / 1000).toFixed(1)} s. Commit: ${r.git_commit}.`, `Environment: ${r.environment.os} (${r.environment.arch}), tmp filesystem ${r.environment.tmpFilesystem}, Node ${r.environment.node}, SQLite ${r.environment.sqlite}, ${r.environment.cpu}.`, `Seeds: ${r.seeds.length ? r.seeds.join(', ') : 'none (deterministic)'}`, '', `Reproduce: \`${r.repro}\``, '', '## Tests', '', '| Status | Test |', '|---|---|', ...r.tests.map(t => `| ${t.status} | ${t.name.replace(/\|/g, '\\|')} |`), '', '## Not verified', '', '| Status | Item | Reason |', '|---|---|---|', ...spec.gaps.map(g => `| ${g.status} | ${g.item} | ${g.reason} |`), '', '## Limitations', '', ...spec.limitations.map(l => `- ${l}`)];
+  return lines.join('\n');
+}
+export function summarize(report: SuiteReport): void {
+  console.log(`${report.suite}: ${report.status} (${report.counts.pass}/${report.counts.total} tests, ${report.cases} cases, ${(report.durationMs / 1000).toFixed(1)} s)`);
+  for (const t of report.tests.filter(t => t.status !== 'PASS')) console.log(`  ${t.status}: ${t.name}`);
+  if (report.status !== 'PASS') process.exitCode = 1;
+}
