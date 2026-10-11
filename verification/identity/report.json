@@ -1,7 +1,0 @@
-{
-  "gate": "AGENT_IDENTITY",
-  "status": "PASS",
-  "deterministic_suite": {"status": "PASS", "command": "npm run verify:security", "passed": 25, "failed": 0, "identity_cases": ["atomic revoke-and-reissue invalidates old bearer immediately", "new bearer retains same server identity and reduced permissions", "creation/revocation/rotation/failed authorization audit excludes token secrets", "simultaneous provisioning is serialized", "unauthorized audit reads denied", "TLS reverse-proxy sample binds MCP upstream to loopback", "two independently scoped HTTP clients observe authorized shared workspace records and cannot cross workspace boundaries"]},
-  "evidence": ["verification/security/report.json", "tests/security/identity.test.ts", "docs/security.md", "deploy/Caddyfile"],
-  "not_run": ["live public TLS certificate issuance and proxy deployment; the checked-in Caddy configuration uses automatic HTTPS but no public service was deployed"]
-}

@@ -1,3 +1,0 @@
-MCP HTTP listening at http://127.0.0.1:3333/mcp
-MCP HTTP listening at http://127.0.0.1:3333/mcp
-MCP HTTP listening at http://127.0.0.1:3333/mcp
