@@ -4,7 +4,7 @@ const remote = await fs.readFile('verification/memory/remote-real-host-evaluatio
 const remoteEvidence = remote ? ` Recent opt-in live run: ${remote.status}, ${remote.testResult?.passed} passed/${remote.testResult?.failed} failed in ${remote.testResult?.durationMs} ms. It used two actual CLIs and credentials through a stopped/restarted HTTP MCP server, including buffered replay, idempotency, SessionEnd and model handoff; limitation: clients/server were on one physical machine, so cross-machine transport remains NOT_RUN.` : ' The opt-in two-host outage/restart test has not been run.';
 summarize(await runSuite({
   name: 'memory', title: 'Passive memory integration and secondary recall (M1)',
-  files: ['dist/tests/memory/capture.test.js', 'dist/tests/memory/recall.test.js', 'dist/tests/memory/real-host.test.js', 'dist/tests/memory/remote-real-host.test.js'],
+  files: ['dist/tests/memory/capture.test.js', 'dist/tests/memory/recall.test.js', 'dist/tests/memory/real-host.test.js', 'dist/tests/memory/remote-real-host.test.js', 'dist/tests/memory/remote-spool.test.js', 'dist/tests/memory/physical-merge.test.js'],
   allowedSkips: ['real Claude Code', 'real Codex CLI', 'real Claude Code and Codex remote capture'],
   gaps: [
     { item: 'Independent authenticated agents cross-deliver passively across machines, including disconnect, retry, restart recovery and end-of-session retrospective/handoff', status: 'NOT_RUN', reason: `Cross-machine transport: NOT_RUN. ${remoteEvidence} Run MDB_REAL_REMOTE_HOST_TEST=1 with clients on separate machines for that evidence.` },

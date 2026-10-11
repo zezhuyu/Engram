@@ -13,6 +13,11 @@ coverage/
 docs/*.md
 .omx/
 verification/
+examples/
+AGENTS.md
+CLAUDE.md
+docs/
+verification/
 
 # ---------------------------------------------------------------------------
 # Secrets and credentials. Never commit these. Real values belong in the
@@ -210,6 +215,8 @@ scratch.*
 /docs/cross-machine-verification.md
 /docs/handoff/
 /docs/notes/
+!/docs/adr/
+!/docs/remote-client-setup.md
 # per-task test fixtures that only hold recorded model transcripts
 /tests/fixtures/profile-raw/
 
@@ -248,6 +255,8 @@ scratch.*
 /verification/benchmarks/*
 !/verification/benchmarks/methodology.md
 !/verification/benchmarks/corpus-manifest.json
+!/verification/remote-clients/
+!/verification/remote-clients/**
 
 # ---------------------------------------------------------------------------
 # Docker / compose overrides and local test infrastructure

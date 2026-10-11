@@ -10,6 +10,7 @@ import { documentUri, parseDocument, Vault } from '../packages/core/vault.js';
 import { OWNER, type SearchInput, type Scope } from '../packages/core/types.js';
 import { FilesystemSearch } from '../packages/search-files/index.js';
 import { SQLiteSearch } from '../packages/search-sqlite/index.js';
+import { buildFsIndex, fsIndexStatus } from '../packages/search-files/postings.js';
 import { profileReport, resetProfile, withProfileContext } from '../packages/bench/instrumentation.js';
 
 const GENERATOR_VERSION = '2.0.0';
@@ -147,7 +148,8 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
     if (completed >= size) throw new Error('Resume target already has all documents; manifest finalization is not inferred');
     const workspaceCount = Math.min(20, Math.max(2, Math.floor(size / 200)));
     const workspaces = await initialVault.listWorkspaces();
-    if (workspaces.length !== workspaceCount || workspaces.some((workspace, index) => workspace.id !== `bench${index}`)) throw new Error('Cannot resume safely: workspace set differs from deterministic build');
+    const expectedIds = new Set(Array.from({ length: workspaceCount }, (_, index) => `bench${index}`)); // listWorkspaces() is sorted lexicographically (bench10 before bench2), so compare as a set
+    if (workspaces.length !== workspaceCount || workspaces.some(workspace => !expectedIds.has(workspace.id))) throw new Error('Cannot resume safely: workspace set differs from deterministic build');
     resumeEvents = events;
   }
   const factories = deterministicFactories(seed, completed);
@@ -195,7 +197,7 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
     }
     const buildMs = performance.now() - started, buildCpu = process.cpuUsage(cpuStart), buildAllocationBytes = allocatedBytes() - allocationStart;
     const config = await vault.config(); config.sqlite.enabled = true; await fs.writeFile(path.join(root, 'mdb.yaml'), YAML.stringify(config));
-    const indexStart = performance.now(); await new SQLiteSearch(vault).rebuild(); const sqliteBuildMs = performance.now() - indexStart;
+    const indexStart = performance.now(); await new SQLiteSearch(vault).rebuild(); const sqliteBuildMs = performance.now() - indexStart; const fsIndexBuild = await buildFsIndex(vault);
     clearInterval(memoryTimer); memoryTimer = undefined; sampleBuildMemory();
     const workloads = buildWorkloads(seed, size, known, scopes);
     const sourcePath = path.resolve('scripts/benchmark.ts');
@@ -203,12 +205,12 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
     const base = {
       schemaVersion: 1 as const, generator: { name: 'engram-benchmark', version: GENERATOR_VERSION, sourceSha256: hash(await fs.readFile(sourcePath)), distribution: DISTRIBUTION },
       builtAt: new Date().toISOString(), seed, documents: size, workspaces: sizeOf, bodyBytes, knownHits: known, workloads, files, fileCount: files.length,
-      codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), benchmarkConfiguration: { buildMode: resume ? 'retained-resumed' : retain ? 'retained' : 'temporary', ...(resume ? { resumedAfterDocuments: completed } : {}), durableCommits: true, sqliteIndexBuilt: true, indexBuildMs: +sqliteBuildMs.toFixed(2), commitStats: stats(commit), commitCpuUserMs: buildCpu.user / 1000, commitCpuSystemMs: buildCpu.system / 1000, buildAllocationBytes, peakRssBytes: Math.max(...buildMemory.map(item => item.rssBytes)), peakHeapUsedBytes: Math.max(...buildMemory.map(item => item.heapUsedBytes)), peakExternalBytes: Math.max(...buildMemory.map(item => item.externalBytes)), memorySamples: buildMemory.length, instrumentation: profileReport() }
+      codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), benchmarkConfiguration: { buildMode: resume ? 'retained-resumed' : retain ? 'retained' : 'temporary', ...(resume ? { resumedAfterDocuments: completed } : {}), durableCommits: true, sqliteIndexBuilt: true, indexBuildMs: +sqliteBuildMs.toFixed(2), commitStats: stats(commit), commitCpuUserMs: buildCpu.user / 1000, commitCpuSystemMs: buildCpu.system / 1000, buildAllocationBytes, peakRssBytes: buildMemory.map(item => item.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: buildMemory.map(item => item.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: buildMemory.map(item => item.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), memorySamples: buildMemory.length, instrumentation: profileReport() }
     };
     const corpusId = hash(JSON.stringify({ seed, documents: size, generator: base.generator, files })).slice(0, 24);
     const manifest: CorpusManifest = { ...base, corpusId };
     await fs.writeFile(path.join(root, MANIFEST), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
-    console.log(JSON.stringify({ mode: 'build', corpusId, root, retained: retain, ...(resume ? { resumedAfterDocuments: completed } : {}), documents: size, fileCount: files.length, bodyBytes, buildMs: +buildMs.toFixed(2), sqliteBuildMs: +sqliteBuildMs.toFixed(2), cpu: { userMs: buildCpu.user / 1000, systemMs: buildCpu.system / 1000 }, allocationBytes: buildAllocationBytes, sourceSha256: base.generator.sourceSha256 }, null, 2));
+    console.log(JSON.stringify({ mode: 'build', fsIndexBuild, corpusId, root, retained: retain, ...(resume ? { resumedAfterDocuments: completed } : {}), documents: size, fileCount: files.length, bodyBytes, buildMs: +buildMs.toFixed(2), sqliteBuildMs: +sqliteBuildMs.toFixed(2), cpu: { userMs: buildCpu.user / 1000, systemMs: buildCpu.system / 1000 }, allocationBytes: buildAllocationBytes, sourceSha256: base.generator.sourceSha256 }, null, 2));
   } finally { if (memoryTimer) clearInterval(memoryTimer); if (!retain) await fs.rm(root, { recursive: true, force: true }); }
 }
 
@@ -232,11 +234,17 @@ async function queryPlans(root: string, rareQuery: string): Promise<Record<strin
 async function replay(opts: Record<string, string | boolean>): Promise<void> {
   if (typeof opts.root !== 'string') throw new Error('Replay requires --root <corpus-path>');
   const root = path.resolve(opts.root), runs = numberOption(opts, 'runs', 15), warmups = numberOption(opts, 'warmups', 2);
+  // Watchdog: a query that exceeds this is recorded as TIMED OUT (censored at the limit, never dropped), and its workload is reported INCOMPLETE rather than PASS.
+  const queryTimeoutMs = numberOption(opts, 'query-timeout-ms', Number(process.env.BENCH_QUERY_TIMEOUT_MS ?? 120_000)); const TIMED_OUT = Symbol('timed-out'); const timedOutSamples: Record<string, Record<string, number>> = { filesystem: {}, sqlite: {} };
+  const watched = async <T>(work: () => Promise<T>): Promise<T | typeof TIMED_OUT> => { let timer: NodeJS.Timeout | undefined; const limit = new Promise<typeof TIMED_OUT>(resolve => { timer = setTimeout(() => resolve(TIMED_OUT), queryTimeoutMs); }); try { return await Promise.race([work(), limit]); } finally { clearTimeout(timer); } };
   if (runs < 3 || runs > 200 || warmups < 0 || warmups > 20) throw new Error('runs must be 3..200; warmups must be 0..20');
   const manifest = await readManifest(root); await verifyCorpus(root, manifest);
   const vault = new Vault(root); const engines = { filesystem: new FilesystemSearch(vault), sqlite: new SQLiteSearch(vault) }; const workloads = manifest.workloads;
+  // The filesystem backend is measured with its persistent trigram index (the corpus manifest excludes .mdb/indexes). The build is reported, never hidden.
+  const fsIndexBuild = (await fsIndexStatus(vault)).present ? { reused: true as const } : { reused: false as const, ...(await buildFsIndex(vault)) };
   const timings: Record<string, Record<string, unknown>> = { filesystem: {}, sqlite: {} };
-  const parity: Record<string, boolean> = {}; const outputs: Record<string, Record<string, string[]>> = { filesystem: {}, sqlite: {} };
+  const parity: Record<string, boolean | null> = {}; const outputs: Record<string, Record<string, string[]>> = { filesystem: {}, sqlite: {} };
+  const truncatedOutputs: Record<string, Record<string, boolean>> = { filesystem: {}, sqlite: {} };
   const firstPass: Record<string, Record<string, number>> = { filesystem: {}, sqlite: {} };
   const memorySamples: Array<{ at: number; rssBytes: number; heapUsedBytes: number; externalBytes: number; allocatedBytes: number }> = [];
   const sampleMemory = () => { const usage = process.memoryUsage(); memorySamples.push({ at: +performance.now().toFixed(2), rssBytes: usage.rss, heapUsedBytes: usage.heapUsed, externalBytes: usage.external, allocatedBytes: allocatedBytes() }); };
@@ -246,19 +254,21 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
     // Capture one post-validation first pass, then interleave warmups and timed samples by workload.
     for (let wi = 0; wi < workloads.length; wi++) {
       const workload = workloads[wi]!; const order = wi % 2 ? ['sqlite', 'filesystem'] as const : ['filesystem', 'sqlite'] as const;
-      for (const backend of order) { const start = performance.now(); await withProfileContext(`firstpass.${backend}.${workload.name}`, () => engines[backend].query(workload.input)); firstPass[backend]![workload.name] = +(performance.now() - start).toFixed(2); }
-      for (let warmup = 0; warmup < warmups; warmup++) for (const backend of order) await withProfileContext(`warmup.${backend}.${workload.name}`, () => engines[backend].query(workload.input));
+      for (const backend of order) { const start = performance.now(); const first = await watched(() => withProfileContext(`firstpass.${backend}.${workload.name}`, () => engines[backend].query(workload.input))); if (first === TIMED_OUT) timedOutSamples[backend]![workload.name] = (timedOutSamples[backend]![workload.name] ?? 0) + 1; firstPass[backend]![workload.name] = +(performance.now() - start).toFixed(2); }
+      for (let warmup = 0; warmup < warmups; warmup++) for (const backend of order) { const w = await watched(() => withProfileContext(`warmup.${backend}.${workload.name}`, () => engines[backend].query(workload.input))); if (w === TIMED_OUT) timedOutSamples[backend]![workload.name] = (timedOutSamples[backend]![workload.name] ?? 0) + 1; }
     }
     resetProfile();
     for (let wi = 0; wi < workloads.length; wi++) {
       const workload = workloads[wi]!;
-      const createBucket = () => ({ elapsed: [] as number[], cpuUser: [] as number[], cpuSystem: [] as number[], last: [] as string[], indexInfo: null as unknown, allocatedBytes: 0, heapDeltas: [] as number[] });
+      const createBucket = () => ({ elapsed: [] as number[], cpuUser: [] as number[], cpuSystem: [] as number[], last: [] as string[], truncated: false, indexInfo: null as unknown, allocatedBytes: 0, heapDeltas: [] as number[] });
       const buckets = { filesystem: createBucket(), sqlite: createBucket() };
       for (let run = 0; run < runs; run++) {
         const order = (run + wi) % 2 ? ['sqlite', 'filesystem'] as const : ['filesystem', 'sqlite'] as const;
         for (const backend of order) {
           const bucket = buckets[backend], cpu = process.cpuUsage(), allocBefore = allocatedBytes(), heapBefore = process.memoryUsage().heapUsed, start = performance.now();
-          const result = await withProfileContext(`${backend}.${workload.name}`, () => engines[backend].query(workload.input));
+          const result = await watched(() => withProfileContext(`${backend}.${workload.name}`, () => engines[backend].query(workload.input)));
+          if (result === TIMED_OUT) { timedOutSamples[backend]![workload.name] = (timedOutSamples[backend]![workload.name] ?? 0) + 1; bucket.elapsed.push(queryTimeoutMs); bucket.cpuUser.push(0); bucket.cpuSystem.push(0); bucket.heapDeltas.push(0); continue; }
+          bucket.truncated ||= result.cursor !== undefined;
           bucket.elapsed.push(performance.now() - start); const used = process.cpuUsage(cpu); bucket.cpuUser.push(used.user / 1000); bucket.cpuSystem.push(used.system / 1000);
           bucket.allocatedBytes += allocatedBytes() - allocBefore; bucket.heapDeltas.push(process.memoryUsage().heapUsed - heapBefore);
           bucket.last = result.hits.map(hit => hit.objectId).sort(); bucket.indexInfo = (result as typeof result & { index?: unknown }).index ?? null;
@@ -266,30 +276,44 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
       }
       for (const backend of ['filesystem', 'sqlite'] as const) {
         const bucket = buckets[backend];
-        if (workload.expectedHits !== null && bucket.last.length !== workload.expectedHits) throw new Error(`${backend}/${workload.name}: expected ${workload.expectedHits} hits, found ${bucket.last.length}`);
-        timings[backend]![workload.name] = { ...stats(bucket.elapsed), firstPassMs: firstPass[backend]![workload.name], hits: bucket.last.length, expectedHits: workload.expectedHits, servedBy: backend, indexInfo: bucket.indexInfo,
+        // A query returns at most its limit, so a known count above the limit can only be verified up to the limit (recorded as truncatedByLimit); below it the count must match exactly.
+        const limit = workload.input.limit ?? 50, wanted = workload.expectedHits === null ? null : Math.min(workload.expectedHits, limit), cappedByLimit = workload.expectedHits !== null && workload.expectedHits > limit;
+        if (!timedOutSamples[backend]![workload.name] && wanted !== null && bucket.last.length !== wanted) throw new Error(`${backend}/${workload.name}: expected ${wanted}${cappedByLimit ? ` (known ${workload.expectedHits}, capped by limit ${limit})` : ''} hits, found ${bucket.last.length}`);
+        timings[backend]![workload.name] = { ...stats(bucket.elapsed), ...(timedOutSamples[backend]![workload.name] ? { timedOutSamples: timedOutSamples[backend]![workload.name], status: 'INCOMPLETE' } : {}), firstPassMs: firstPass[backend]![workload.name], hits: bucket.last.length, expectedHits: workload.expectedHits, ...(cappedByLimit ? { truncatedByLimit: true, verifiedUpTo: limit } : {}), servedBy: backend, indexInfo: bucket.indexInfo,
           cpuUserMs: { ...stats(bucket.cpuUser), totalMs: +bucket.cpuUser.reduce((a, b) => a + b, 0).toFixed(2) },
           cpuSystemMs: { ...stats(bucket.cpuSystem), totalMs: +bucket.cpuSystem.reduce((a, b) => a + b, 0).toFixed(2) },
-          allocatedBytes: bucket.allocatedBytes, heapDeltaBytes: { ...stats(bucket.heapDeltas), totalBytes: bucket.heapDeltas.reduce((sum, value) => sum + value, 0) } };
+          allocatedBytes: bucket.allocatedBytes, truncated: bucket.truncated, heapDeltaBytes: { ...stats(bucket.heapDeltas), totalBytes: bucket.heapDeltas.reduce((sum, value) => sum + value, 0) } };
         outputs[backend]![workload.name] = bucket.last;
+        truncatedOutputs[backend]![workload.name] = bucket.truncated;
       }
     }
-    for (const workload of workloads) parity[workload.name] = JSON.stringify(outputs.filesystem![workload.name]) === JSON.stringify(outputs.sqlite![workload.name]);
-    if (Object.values(parity).some(value => !value)) throw new Error('Filesystem/SQLite parity failed');
+    // Search backends may rank matches differently. Compare identity sets only when both results are complete; top-k pages cannot establish full set parity.
+    // Top-k pages cannot establish set parity, so a workload whose result was limit-truncated on either backend is re-run outside the timed loop, paging with the cursor until each backend's complete result set is collected. Complete sets are then compared exactly and checked against the known count.
+    const pageAll = async (backend: 'filesystem' | 'sqlite', input: SearchInput): Promise<string[]> => { const ids: string[] = []; let cursor: string | undefined; for (let page = 0; page < 100; page++) { const r = await engines[backend]!.query({ ...input, limit: 1000, ...(cursor ? { cursor } : {}) }); ids.push(...r.hits.map(hit => hit.objectId)); cursor = r.cursor; if (!cursor) return ids.sort(); } throw new Error(`${backend}/${input.query}: result set exceeds 100 pages`); };
+    const completeCounts: Record<string, number> = {};
+    for (const workload of workloads) {
+      if (truncatedOutputs.filesystem![workload.name] || truncatedOutputs.sqlite![workload.name]) {
+        const [full, indexed] = [await pageAll('filesystem', workload.input), await pageAll('sqlite', workload.input)]; completeCounts[workload.name] = full.length;
+        if (workload.expectedHits !== null && (full.length !== workload.expectedHits || indexed.length !== workload.expectedHits)) throw new Error(`${workload.name}: complete result sets have ${full.length}/${indexed.length} hits, expected ${workload.expectedHits}`);
+        parity[workload.name] = JSON.stringify(full) === JSON.stringify(indexed);
+      } else parity[workload.name] = JSON.stringify(outputs.filesystem![workload.name]) === JSON.stringify(outputs.sqlite![workload.name]);
+    }
+    if (Object.values(parity).some(value => value === false)) throw new Error('Filesystem/SQLite parity failed for a complete result set');
+    const parityAll = Object.values(parity).every(value => value !== false), parityComplete = Object.values(parity).every(value => value !== null);
     const processCpu = process.cpuUsage(processStart); sampleMemory();
     const plans = await queryPlans(root, `rare-marker-${manifest.seed}`);
     const report = {
       schemaVersion: 1, mode: 'replay', historicalComparison: false, corpus: { corpusId: manifest.corpusId, seed: manifest.seed, documents: manifest.documents, fileCount: manifest.fileCount, verifiedHashes: true, manifestPath: path.join(root, MANIFEST) },
       timestamp: new Date().toISOString(), runs, warmups, cache: { mode: 'first-pass-plus-warm-interleaved', firstPass: 'measured after hash verification; reflects a fresh query pass, not a cold OS page cache', osPageCachePurged: false, note: 'Hash verification can warm OS page cache; no cold-cache claim is made.' },
-      codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll: Object.values(parity).every(Boolean),
+      codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
       instrumentation: profileReport(), queryPlans: plans, cpu: { userMs: processCpu.user / 1000, systemMs: processCpu.system / 1000 },
       memory: { startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocatedBytes() - allocStart,
-        peakRssBytes: Math.max(...memorySamples.map(sample => sample.rssBytes)), peakHeapUsedBytes: Math.max(...memorySamples.map(sample => sample.heapUsedBytes)), peakExternalBytes: Math.max(...memorySamples.map(sample => sample.externalBytes)), samples: memorySamples.length, samplingIntervalMs: 50 }
+        peakRssBytes: memorySamples.map(sample => sample.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: memorySamples.map(sample => sample.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: memorySamples.map(sample => sample.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), samples: memorySamples.length, samplingIntervalMs: 50 }
     };
     const outputDir = path.resolve(String(opts['output-dir'] ?? `verification/benchmarks/runs/${manifest.corpusId}`));
     await fs.mkdir(outputDir, { recursive: true }); const output = path.join(outputDir, `${new Date().toISOString().replaceAll(':', '-')}.json`);
     await fs.writeFile(output, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
-    console.log(JSON.stringify({ mode: 'replay', corpusId: manifest.corpusId, output, runs, warmups, parityAll: report.parityAll,
+    console.log(JSON.stringify({ mode: 'replay', corpusId: manifest.corpusId, output, runs, warmups, parityAll: report.parityAll, parityComplete: report.parityComplete,
       filesystemRare: timings.filesystem!['grep-rare'], sqliteRare: timings.sqlite!['grep-rare'], instrumentation: report.instrumentation, cpu: report.cpu, memory: report.memory }, null, 2));
   } finally { clearInterval(interval); }
 }

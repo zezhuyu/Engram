@@ -38,28 +38,43 @@ async function persist(directory: string, capture: RemoteCapture): Promise<void>
   // Concurrent writers may both withdraw, which can leave the spool slightly under the cap, but never over it.
   if ((await fs.readdir(directory)).filter(name => name.endsWith('.json')).length > DEFAULT_CAP) { await fs.rm(target, { force: true }); await syncDirectory(directory).catch(() => undefined); throw new Error('Remote capture spool is full'); }
 }
-export async function drainRemoteCaptureSpool(options: { token: string; directory?: string; limit?: number }): Promise<{ delivered: number; queued: number }> {
-  const directory = options.directory ?? defaultRemoteSpoolDirectory(); let delivered = 0;
+export async function drainRemoteCaptureSpool(options: { token: string; directory?: string; limit?: number }): Promise<{ delivered: number; queued: number; rejected: number }> {
+  const directory = options.directory ?? defaultRemoteSpoolDirectory(); let delivered = 0, rejected = 0;
   const files = (await fs.readdir(directory).catch(() => [] as string[])).filter(name => name.endsWith('.json')).sort().slice(0, options.limit ?? 100);
   for (const name of files) {
     const file = path.join(directory, name); let capture: RemoteCapture;
-    try { capture = JSON.parse(await fs.readFile(file, 'utf8')) as RemoteCapture; } catch { continue; }
+    const quarantine = async (reason: string) => {
+      const rejectedDir = path.join(directory, 'rejected'); await fs.mkdir(rejectedDir, { recursive: true, mode: 0o700 });
+      await fs.rename(file, path.join(rejectedDir, name));
+      await fs.writeFile(path.join(rejectedDir, `${name}.reason.json`), JSON.stringify({ status: reason, rejectedAt: new Date().toISOString() }), { mode: 0o600 });
+      rejected++;
+    };
     try {
-      const response = await fetch(capture.url, { method: 'POST', headers: { Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ registrationId: capture.registrationId, payload: capture.payload }), signal: AbortSignal.timeout(2000) });
-      if (!response.ok) break;
+      capture = JSON.parse(await fs.readFile(file, 'utf8')) as RemoteCapture;
+      if (!capture || typeof capture.url !== 'string' || typeof capture.registrationId !== 'string' || !capture.payload || typeof capture.payload !== 'object' || Array.isArray(capture.payload) || typeof capture.queuedAt !== 'string' || !Number.isFinite(Date.parse(capture.queuedAt))) throw new Error('invalid queued capture');
+      const url = new URL(capture.url);
+      if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname))) throw new Error('invalid queued endpoint');
+    } catch { await quarantine('invalid queued capture'); continue; }
+    try {
+      const response = await fetch(capture.url, { method: 'POST', redirect: 'manual', headers: { Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ registrationId: capture.registrationId, payload: { ...capture.payload, _engramCapturedAt: capture.queuedAt } }), signal: AbortSignal.timeout(2000) });
+      if (!response.ok) {
+        // Transient (timeout, throttle, server error) and credential problems (401/403: revoked, rotated or expired token) are not properties of the envelope: stop and keep the backlog so it can be delivered after the server recovers or the client is re-authenticated. Only envelope-specific refusals are quarantined.
+        if (response.status === 408 || response.status === 425 || response.status === 429 || response.status === 401 || response.status === 403 || response.status >= 500) break;
+        await quarantine(`http-${response.status}`); continue;
+      }
       await fs.rm(file, { force: true }); delivered++;
     } catch { break; }
   }
   const queued = (await fs.readdir(directory).catch(() => [] as string[])).filter(name => name.endsWith('.json')).length;
-  return { delivered, queued };
+  return { delivered, queued, rejected };
 }
 /** Persist first, then attempt delivery. Tokens are supplied at send time and never enter the spool. */
-export async function queueRemoteCapture(options: { url: string; registrationId: string; token?: string; payload: Record<string, unknown>; directory?: string }): Promise<{ delivered: number; queued: number }> {
+export async function queueRemoteCapture(options: { url: string; registrationId: string; token?: string; payload: Record<string, unknown>; directory?: string }): Promise<{ delivered: number; queued: number; rejected: number }> {
   const url = new URL(options.url);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname))) throw new Error('Remote capture requires HTTPS except on localhost');
   if (url.pathname.endsWith('/mcp')) url.pathname = `${url.pathname.slice(0, -4)}/capture`;
   else if (!url.pathname.endsWith('/capture')) url.pathname = `${url.pathname.replace(/\/$/, '')}/capture`;
   const directory = options.directory ?? defaultRemoteSpoolDirectory();
   await persist(directory, { url: url.toString(), registrationId: options.registrationId, payload: minimized(options.payload), queuedAt: new Date().toISOString() });
-  return options.token ? drainRemoteCaptureSpool({ token: options.token, directory }) : { delivered: 0, queued: (await fs.readdir(directory)).filter(name => name.endsWith('.json')).length };
+  return options.token ? drainRemoteCaptureSpool({ token: options.token, directory }) : { delivered: 0, queued: (await fs.readdir(directory)).filter(name => name.endsWith('.json')).length, rejected: 0 };
 }

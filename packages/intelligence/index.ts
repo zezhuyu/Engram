@@ -18,10 +18,12 @@ import { checkDiscovery, docDomain, judgeDiscovery, scoreCandidate } from './dre
 import { DEEP_ANGLES, PROMPT_VERSION, SCHEMA_VERSION, type Cluster, type DreamMode } from './dream/types.js';
 import { applicability, commitInsight, correctInsight, evaluateInsight, projectProfile, type InsightCategory } from './insights.js';
 import { Vault } from '../core/vault.js';
+import type { SnapshotRef } from '../adaptive/types.js';
+import type { SnapshotView } from '../adaptive/snapshot.js';
 import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js';
 
 export type JobKind = 'index' | 'profile' | 'wiki' | 'memory' | 'reflect' | 'dream';
-export interface Job { id: string; kind: JobKind; /** retrieval trace of a dream run, kept for audit */ trace?: unknown; input: { scope?: Scope; objectIds?: string[]; instruction?: string; goals?: string; mode?: 'micro' | 'deep' | 'strategic'; incremental?: boolean; background?: boolean }; status: 'pending' | 'running' | 'complete' | 'blocked' | 'dead_letter'; /** model-call accounting for the last attempt */ telemetry?: JobTelemetry; attempts: number; nextAt: number; leaseUntil?: number; result?: string; error?: string }
+export interface Job { id: string; kind: JobKind; /** retrieval trace of a dream run, kept for audit */ trace?: unknown; input: { scope?: Scope; objectIds?: string[]; instruction?: string; goals?: string; mode?: 'micro' | 'deep' | 'strategic'; incremental?: boolean; background?: boolean; /** adaptive daily cycle: read only the sealed snapshot (exact revisions at or before the watermark) */ snapshot?: SnapshotRef; /** debounced micro-Dream trigger: the journal range that caused this job (makes the job idempotent per range; never shown to a model) */ trigger?: 'micro'; range?: [number, number] }; status: 'pending' | 'running' | 'complete' | 'blocked' | 'dead_letter'; /** model-call accounting for the last attempt */ telemetry?: JobTelemetry; attempts: number; nextAt: number; leaseUntil?: number; result?: string; error?: string }
 export interface JobTelemetry { modelCalls: number; malformed: number; repairs: number; outcome: 'pending' | 'proposed' | 'abstained' | 'malformed' }
 const PROFILE_MAX_REPAIRS = 2;
 export interface CriticRecord { verdict: 'accept' | 'reject' | 'review_required'; rationale: string; by: 'deterministic' | 'model' }
@@ -47,7 +49,17 @@ function sameScope(a: Scope, b: Scope): boolean { return JSON.stringify(a) === J
 /** Semantic output is an untrusted proposal. Only explicit review commits knowledge. */
 export class IntelligenceEngine {
   private key: string;
+  /** Resolves a sealed snapshot reference to its revision-consistent view. Set by the adaptive cycle runner; absent otherwise. */
+  snapshots?: (ref: SnapshotRef) => Promise<SnapshotView>;
   constructor(public readonly vault: Vault, public readonly provider?: ModelProvider) { this.key = `.mdb/intelligence/${digest(vault.actor.actorId)}.json`; }
+  /** Loads documents for a job. Under a sealed snapshot, only eligible objects are read, at their sealed revision; anything purged or no longer authorized is simply absent. */
+  private async load(entries: ManifestEntry[], job: Job): Promise<Document[]> {
+    const ref = job.input.snapshot; if (!ref) return loadDocuments(this.vault, entries);
+    if (!this.snapshots) throw new MDBError('CAPABILITY_UNAVAILABLE', 'A snapshot-bound job needs a snapshot resolver');
+    const view = await this.snapshots(ref); const out: Document[] = [];
+    for (const e of entries) { if (!view.eligible(e.id)) continue; const d = await view.read(this.vault, e.id); if (d) out.push(d); }
+    return out;
+  }
   private async state(): Promise<State> { try { return JSON.parse(await fs.readFile(await safePath(this.vault.root, this.key), 'utf8')) as State; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { jobs: [], proposals: [], cursor: 0 }; throw e; } }
   private async mutate<T>(action: (state: State) => T | Promise<T>): Promise<T> { return withVaultLock(this.vault.root, async () => { const state = await this.state(); const result = await action(state); await atomicWrite(this.vault.root, this.key, JSON.stringify(state, null, 2)); return result; }); }
   private async config(): Promise<VaultConfig> { return this.vault.config(); }
@@ -82,7 +94,7 @@ export class IntelligenceEngine {
     for (const ref of input.evidence) { if (!ref || typeof ref.uri !== 'string' || typeof ref.revisionId !== 'string') throw new MDBError('INVALID_MODEL_OUTPUT', 'Invalid evidence'); let target: Document; try { target = await this.vault.get(objectIdFromUri(ref.uri), ref.revisionId); } catch { const exists = await this.vault.get(objectIdFromUri(ref.uri)).then(() => true, () => false); throw new MDBError('INVALID_MODEL_OUTPUT', exists ? 'Evidence revision is unavailable' : 'Evidence is unavailable'); } if (target.uri !== ref.uri || target.status === 'deleted') throw new MDBError('INVALID_MODEL_OUTPUT', 'Evidence is unavailable'); const userPrivateInsight = (input.kind === 'user_insight' && input.scope.type === 'global' && input.scope.area === 'profile') || (input.kind === 'discovery' && input.scope.type === 'global' && input.scope.area === 'discoveries'); if (!userPrivateInsight && !sameScope(target.scope, input.scope) && target.scope.type !== 'global') throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Cross-scope semantic output requires explicit sanitized promotion'); }
     if (input.kind === 'discovery') { if (input.status !== 'hypothesis' || !Array.isArray(input.metadata?.testPlan) || !input.metadata.testPlan.length || !Array.isArray(input.metadata?.counterarguments) || !input.metadata.counterarguments.length) throw new MDBError('INVALID_MODEL_OUTPUT', 'Discovery requires hypothesis status, test plan and counterarguments'); }
   }
-  async propose(input: PutInput): Promise<Proposal> { await this.validate(input); const fingerprint = input.kind === 'discovery' ? digest({ kind: input.kind, scope: input.scope, evidence: [...input.evidence!].sort((a, b) => a.uri.localeCompare(b.uri)), goals: input.metadata?.goalsFingerprint, angle: input.metadata?.candidateAngle }) : digest({ ...input, idempotencyKey: undefined }); return this.mutate(state => { const existing = state.proposals.find(p => p.fingerprint === fingerprint); if (existing) return existing; const proposal: Proposal = { id: randomUUID(), input, fingerprint, status: 'pending' }; state.proposals.push(proposal); return proposal; }); }
+  async propose(input: PutInput): Promise<Proposal> { await this.validate(input); const fingerprint = input.kind === 'discovery' ? digest({ kind: input.kind, scope: input.scope, evidence: [...input.evidence!].sort((a, b) => a.uri.localeCompare(b.uri)), goals: input.metadata?.goalsFingerprint, angle: input.metadata?.candidateAngle }) : digest({ ...input, idempotencyKey: undefined, metadata: input.metadata && 'jobId' in input.metadata ? { ...input.metadata, jobId: undefined } : input.metadata }); return this.mutate(state => { const existing = state.proposals.find(p => p.fingerprint === fingerprint); if (existing) return existing; const proposal: Proposal = { id: randomUUID(), input, fingerprint, status: 'pending' }; state.proposals.push(proposal); return proposal; }); }
   async review(id: string, approve: boolean, reason?: string, options: { confirmSensitive?: boolean; confirmHypothesis?: boolean } = {}): Promise<Proposal> {
     const proposal = (await this.proposals()).find(item => item.id === id); if (!proposal) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Proposal unavailable'); if (proposal.status !== 'pending') return proposal;
     let document: Document | undefined;
@@ -130,13 +142,13 @@ export class IntelligenceEngine {
     if (modes.includes('deep') && pending >= (config.dream.deepThreshold ?? 40)) { await this.enqueue('dream', { mode: 'deep', incremental: true, background: true }); await this.mutate(state => { state.dreamPending = 0; }); }
   }
   private async checkpointEvents(): Promise<boolean> { let profileTouched = false; const events = await this.vault.eventsSince((await this.state()).cursor); const state = await this.state(); const config = await this.config(); for (const event of events.filter(event => event.sequence > state.cursor)) { if (event.scope.type === 'global' && event.scope.area === 'profile') profileTouched = true; if (await this.vault.canAccess(event.scope, 'read')) { await this.enqueue('index', { scope: event.scope }); const doc = await this.vault.get(event.objectId).catch(() => undefined); if (doc?.kind === 'source') await this.enqueue('wiki', { scope: event.scope, objectIds: [doc.id] }); else if (doc?.metadata.speaker === 'user' && doc.metadata.evidenceClass === 'user_authored') await this.enqueue('profile', { scope: event.scope, incremental: true }); if (doc && config.dream.enabled) await this.dreamTrigger(doc, config); } await this.mutate(current => { current.cursor = Math.max(current.cursor, event.sequence); }); } return profileTouched; }
-  async run(input: { job?: JobKind; limit?: number; signal?: AbortSignal } = {}): Promise<Job[]> {
+  async run(input: { job?: JobKind; jobId?: string; limit?: number; signal?: AbortSignal } = {}): Promise<Job[]> {
     const limit = input.limit ?? 10; if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new MDBError('INVALID_INPUT', 'Job limit must be 1..100');
-    const profileTouched = await this.checkpointEvents(); if (input.job) await this.ensureJob(input.job);
+    const profileTouched = input.jobId ? false : await this.checkpointEvents(); if (input.job && !input.jobId) await this.ensureJob(input.job);
     const completed: Job[] = []; let cancelled = false;
     for (let i = 0; i < limit && !cancelled; i++) {
       if (input.signal?.aborted) break;
-      const job = await this.mutate(async state => { let next: Job | undefined; for (const j of state.jobs) if (( (!input.job || j.kind === input.job) && (j.status === 'pending' || j.status === 'running' && (j.leaseUntil ?? 0) < Date.now()) && j.nextAt <= Date.now()) && await this.jobAccessible(j, state)) { next = j; break; } if (!next) return undefined; next.status = 'running'; next.leaseUntil = Date.now() + 60000; next.attempts++; return structuredClone(next); }); if (!job) break;
+      const job = await this.mutate(async state => { let next: Job | undefined; for (const j of state.jobs) if (( (!input.job || j.kind === input.job) && (!input.jobId || j.id === input.jobId) && (j.status === 'pending' || j.status === 'running' && (j.leaseUntil ?? 0) < Date.now()) && j.nextAt <= Date.now()) && await this.jobAccessible(j, state)) { next = j; break; } if (!next) return undefined; next.status = 'running'; next.leaseUntil = Date.now() + 60000; next.attempts++; return structuredClone(next); }); if (!job) break;
       try { job.result = await this.execute(job, input.signal); job.status = 'complete'; delete job.error; }
       catch (error) {
         const code = error instanceof MDBError ? error.code : 'PROVIDER_ERROR';
@@ -153,6 +165,9 @@ export class IntelligenceEngine {
     if (profileTouched || completed.some(job => job.kind === 'profile')) await this.reconcileProfile().catch(error => { if (!(error instanceof MDBError)) throw error; });
     return completed;
   }
+
+  /** Makes an unfinished job (pending with backoff, blocked or dead-lettered) runnable again. The adaptive cycle owns its own retry delay (RETRY_WAIT), so engine backoff must not stall a resume. */
+  async retryNow(jobId: string, options: { force?: boolean } = {}): Promise<boolean> { return this.mutate(state => { const job = state.jobs.find(j => j.id === jobId); if (!job || job.status === 'complete' || (job.status === 'running' && !options.force)) return false; job.status = 'pending'; job.nextAt = 0; job.attempts = 0; delete job.error; return true; }); }
 
   /** Queue the requested job kind unless one is already waiting; blocked jobs are released once a provider exists. */
   private async ensureJob(kind: JobKind): Promise<void> {
@@ -260,12 +275,13 @@ export class IntelligenceEngine {
     if ((job.input.incremental || job.input.background) && ((await this.state()).dreamRuns?.[dayKey] ?? 0) >= (config.dream.maxRunsPerDay ?? 8)) throw new MDBError('CAPABILITY_UNAVAILABLE', `Automatic ${mode} dreaming reached its daily limit (dream.maxRunsPerDay)`);
     const started = Date.now(); const budgets = budgetsFor(mode, config.dream);
     const workspaceId = job.input.scope?.type === 'workspace' ? job.input.scope.workspaceId : undefined;
-    const pool = await dreamPool(this.vault, mode === 'micro' && workspaceId ? { workspaceId } : {});
+    const snapshotView = job.input.snapshot && this.snapshots ? await this.snapshots(job.input.snapshot) : undefined;
+    const pool = (await dreamPool(this.vault, mode === 'micro' && workspaceId ? { workspaceId } : {})).filter(e => !snapshotView || snapshotView.eligible(e.id));
     const ctx = await planContext(this.vault, pool, budgets, rngFrom(job.id));
     const cursorKey = JSON.stringify(job.input.scope ?? 'all'); const cursor = (await this.state()).dreamCursor?.[cursorKey] ?? 0;
     // accepted goals: the user's stated goals that apply here (global, or this workspace)
     const goalEntries = (await readableEntries(this.vault, { kinds: ['user_insight'] })).filter(e => e.cat === 'goal' && e.status === 'accepted').sort(newestFirst).slice(0, 6);
-    const goalDocs = (await loadDocuments(this.vault, goalEntries)).filter(d => ['global', workspaceId].includes(applicability(d)) || !workspaceId);
+    const goalDocs = (await this.load(goalEntries, job)).filter(d => ['global', workspaceId].includes(applicability(d)) || !workspaceId);
     let plan: ReturnType<typeof planMicro>; const byId = new Map<string, ManifestEntry>([...pool, ...goalEntries].map(e => [e.id, e]));
     if (mode === 'micro') {
       const explicit = job.input.objectIds?.length ? job.input.objectIds.map(id => pool.find(e => e.id === id)).filter((e): e is ManifestEntry => !!e) : undefined;
@@ -311,7 +327,7 @@ export class IntelligenceEngine {
   }
   private async dreamCandidate(job: Job, mode: DreamMode, cluster: Cluster, byId: Map<string, ManifestEntry>, goalDocs: Document[], goalText: string, config: VaultConfig, provider: ModelProvider, signal?: AbortSignal, angle?: (typeof DEEP_ANGLES)[number]): Promise<{ id: string; score: number }> {
     const ordered = [...cluster.goalIds, ...cluster.ids.filter(id => !cluster.goalIds.includes(id))].map(id => byId.get(id)).filter((e): e is ManifestEntry => !!e);
-    let documents = await loadDocuments(this.vault, ordered);
+    let documents = await this.load(ordered, job);
     if (documents.length < 2) throw new MDBError('INVALID_MODEL_OUTPUT', 'Cluster objects are no longer readable');
     if (provider.locality === 'remote' && !config.model.allowPrivateContentToRemote && documents.some(d => d.scope.type === 'workspace')) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model provider may not receive private workspace content (model.allowPrivateContentToRemote is false)');
     const hints = cluster.hints.map(h => ({ kind: h.kind, why: h.why, via: h.via, distance: h.distance, objects: h.ids.map(id => byId.get(id)).filter((e): e is ManifestEntry => !!e).map(e => this.uriOfEntry(e)) }));
@@ -337,7 +353,7 @@ export class IntelligenceEngine {
     const candidateScore = mode === 'deep' ? scoreCandidate(output, normalized, documents) : { score: 0, components: {} };
     const proposal = await this.propose({
       ...output, scope: { type: 'global', area: 'discoveries' }, status: 'hypothesis',
-      metadata: { ...normalized, dreamSchema: SCHEMA_VERSION, mode, promptVersion: PROMPT_VERSION, modelProvider: provider.id, confidenceMethod: 'model-indicative', job: 'dream', visibility: 'user_private', clusterId: cluster.id, hintKinds: cluster.hints.map(h => h.kind), retrieval: cluster.hints.map(h => ({ via: h.via, distance: h.distance })), sourceRefs: output.evidence.filter(e => !goalUris.includes(e.uri)).map(e => ({ uri: e.uri, revisionId: e.revisionId })), relatedGoalRefs: goalUris, goalsFingerprint: digest({ goals: goalText, mode }), ...(angle ? { candidateAngle: angle.id, candidateScore: Number(candidateScore.score.toFixed(3)), candidateComponents: candidateScore.components } : {}) }
+      metadata: { ...normalized, dreamSchema: SCHEMA_VERSION, mode, promptVersion: PROMPT_VERSION, modelProvider: provider.id, confidenceMethod: 'model-indicative', job: 'dream', jobId: job.id, visibility: 'user_private', clusterId: cluster.id, hintKinds: cluster.hints.map(h => h.kind), retrieval: cluster.hints.map(h => ({ via: h.via, distance: h.distance })), sourceRefs: output.evidence.filter(e => !goalUris.includes(e.uri)).map(e => ({ uri: e.uri, revisionId: e.revisionId })), relatedGoalRefs: goalUris, goalsFingerprint: digest({ goals: goalText, mode }), ...(angle ? { candidateAngle: angle.id, candidateScore: Number(candidateScore.score.toFixed(3)), candidateComponents: candidateScore.components } : {}) }
     });
     await this.critiqueProposal(proposal.id, signal);
     const final = (await this.state()).proposals.find(p => p.id === proposal.id)!;
@@ -370,7 +386,7 @@ export class IntelligenceEngine {
       chosen = [...take('explicit', 6), ...take('user_conversation', 8), ...take('wiki_exposure', 4), ...take('agent_observation', 2)].sort((a, b) => SOURCE_PRIORITY[classOf(a)] - SOURCE_PRIORITY[classOf(b)] || a.first - b.first);
       profileMark = { key, last: Math.max(since, ...chosen.map(e => e.last)) };
     } else chosen = job.input.objectIds ? pool.filter(e => job.input.objectIds!.includes(e.id)).sort((a, b) => a.first - b.first).slice(0, limit) : pool.sort((a, b) => b.first - a.first).slice(0, limit).sort((a, b) => a.first - b.first);
-    let documents = await loadDocuments(this.vault, chosen);
+    let documents = await this.load(chosen, job);
     if (job.kind === 'wiki') { // incremental compile: the new sources plus only the pages they may affect (never the whole wiki)
       const pages = await affectedPages(this.vault, scope, documents.filter(d => d.kind !== 'wiki_page'));
       documents = [...documents.filter(d => d.kind !== 'wiki_page'), ...pages.filter(p => !documents.some(d => d.id === p.id))];
@@ -415,7 +431,7 @@ export class IntelligenceEngine {
     const handoff = job.kind === 'memory' && !!job.input.instruction?.startsWith('HANDOFF');
     if (handoff && output.kind !== 'working_memory') throw new MDBError('INVALID_MODEL_OUTPUT', 'A handoff must be a working_memory object');
     const proposalScope: Scope = job.kind === 'profile' ? { type: 'global', area: 'profile' } : scope; // insights are stored in the user-private profile area; `scopeLabel` says where they apply
-    const proposal = await this.propose({ ...output, ...(wiki ? { links: wiki.links } : {}), scope: proposalScope, status: 'candidate', metadata: { ...output.metadata, ...wiki?.metadata, ...(session && (job.kind === 'reflect' || job.kind === 'memory') ? { sessionId: session.id, ...(session.metadata.incomplete === true ? { incomplete: true } : {}) } : {}), ...(handoff ? { handoff: true } : {}), modelProvider: this.provider.id, confidenceMethod: 'model-indicative', job: job.kind, ...(job.kind === 'profile' ? { insightSchema: 1, scopeLabel: scope.type === 'workspace' ? scope.workspaceId : 'global' } : {}), } });
+    const proposal = await this.propose({ ...output, ...(wiki ? { links: wiki.links } : {}), scope: proposalScope, status: 'candidate', metadata: { ...output.metadata, ...wiki?.metadata, ...(session && (job.kind === 'reflect' || job.kind === 'memory') ? { sessionId: session.id, ...(session.metadata.incomplete === true ? { incomplete: true } : {}) } : {}), ...(handoff ? { handoff: true } : {}), modelProvider: this.provider.id, confidenceMethod: 'model-indicative', job: job.kind, jobId: job.id, ...(job.kind === 'profile' ? { insightSchema: 1, scopeLabel: scope.type === 'workspace' ? scope.workspaceId : 'global' } : {}), } });
     telemetry.outcome = 'proposed';
     await this.critiqueProposal(proposal.id, signal);
     if (profileMark && job.input.incremental) await this.mutate(state => { (state.profileCursor ??= {})[profileMark!.key] = profileMark!.last; });
