@@ -1,6 +1,0 @@
-id: research
-description: Synthetic agent research workspace
-grants:
-  sample-agent:
-    - read
-    - write

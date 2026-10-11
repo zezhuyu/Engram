@@ -1,4 +1,0 @@
-xhost-c
-
-entries/json/tmp=27/27/0
-{"good":27,"bad":0}

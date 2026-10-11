@@ -17,7 +17,6 @@ examples/
 AGENTS.md
 CLAUDE.md
 docs/
-verification/
 
 # ---------------------------------------------------------------------------
 # Secrets and credentials. Never commit these. Real values belong in the
