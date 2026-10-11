@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { CommitEvent } from '../core/types.js';
 import type { Vault } from '../core/vault.js';
 import { atomicWrite, safePath } from '../storage-local/index.js';
@@ -11,15 +14,25 @@ const ACTIVITY = '.mdb/adaptive/activity.json';
 export const isBackgroundEvent = (e: Pick<CommitEvent, 'idempotencyKey'>): boolean => !!e.idempotencyKey && (e.idempotencyKey.startsWith('adaptive:') || e.idempotencyKey.startsWith('proposal:') || e.idempotencyKey.startsWith('rejected:'));
 const inRanges = (sequence: number, ranges: Array<[number, number]>): boolean => ranges.some(([a, b]) => sequence >= a && sequence <= b);
 
-/** Foreground hook: callers (CLI, MCP, SDK) note that a person or agent is using the vault. Best effort and throttled; it can never fail the caller. */
+/**
+ * Foreground activity marker. It lives OUTSIDE the vault (a vault is never modified by being used): `$ENGRAM_STATE_DIR`, else `$XDG_STATE_HOME/engram`, else `~/.local/state/engram`,
+ * in `activity/<sha256 of the vault's real path>.json`. It is written only for vaults that have an enabled schedule (the marker exists so the nightly Dream waits while someone works)
+ * and only by commands that are not read-only; the CLI never calls it for search, grep, get, list, context or query. Best effort and throttled; it can never fail the caller.
+ */
+const stateDir = (): string => process.env.ENGRAM_STATE_DIR ?? path.join(process.env.XDG_STATE_HOME ?? path.join(os.homedir(), '.local', 'state'), 'engram');
+async function activityFile(root: string): Promise<string> { const real = await fs.realpath(root).catch(() => path.resolve(root)); return path.join(stateDir(), 'activity', `${createHash('sha256').update(real).digest('hex').slice(0, 32)}.json`); }
+async function scheduleEnabled(root: string): Promise<boolean> { try { return (JSON.parse(await fs.readFile(await safePath(root, '.mdb/adaptive/config.json'), 'utf8')) as { enabled?: boolean }).enabled === true; } catch { return false; } }
 export async function touchActivity(root: string, now = new Date()): Promise<void> {
   try {
-    const file = await safePath(root, ACTIVITY);
-    const stat = await fs.stat(file).catch(() => undefined); if (stat && now.getTime() - stat.mtimeMs < 2000) return;
-    await atomicWrite(root, ACTIVITY, JSON.stringify({ at: now.toISOString() }));
+    if (!(await scheduleEnabled(root))) return;
+    const file = await activityFile(root); const stat = await fs.stat(file).catch(() => undefined); if (stat && now.getTime() - stat.mtimeMs < 2000) return;
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 }); const temporary = `${file}.${process.pid}.tmp`; await fs.writeFile(temporary, JSON.stringify({ at: now.toISOString() }), { mode: 0o600 }); await fs.rename(temporary, file);
   } catch { /* activity tracking is advisory */ }
 }
-async function touched(root: string): Promise<number> { try { return Date.parse((JSON.parse(await fs.readFile(await safePath(root, ACTIVITY), 'utf8')) as { at: string }).at) || 0; } catch { return 0; } }
+async function touched(root: string): Promise<number> {
+  const read = async (file: string): Promise<number> => { try { return Date.parse((JSON.parse(await fs.readFile(file, 'utf8')) as { at: string }).at) || 0; } catch { return 0; } };
+  return Math.max(await read(await activityFile(root)), await read(await safePath(root, ACTIVITY).catch(() => '')).catch(() => 0)); // the legacy in-vault marker written by older versions is still honored
+}
 /** Most recent foreground activity: an explicit touch or a non-background journal commit, ignoring sequence ranges the running cycle committed itself. */
 export async function lastForegroundAt(vault: Vault, ownRanges: Array<[number, number]> = []): Promise<number> {
   let latest = await touched(vault.root); const events = await vault.events();

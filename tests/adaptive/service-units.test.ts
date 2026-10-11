@@ -28,3 +28,12 @@ test('systemd user unit has the required sections, an absolute ExecStart with qu
   assert.ok(!/(^|\n)\s*(User|Group)=/.test(def.content), 'a user unit never names a user, and nothing here needs root');
   recordCase({ suite: 'adaptive', name: 'service-unit-systemd-shape', status: 'PASS', detail: { validator: 'structural (systemd-analyze is not available on this host)' } });
 });
+
+test('launchd label and log path are configurable, validated, and escaped; an invalid label is refused', () => {
+  const def = serviceDefinition('launchd', { ...params, label: 'dev.engram.intelligence-worker.e2e1', logPath: '/tmp/a&b/worker.log' });
+  assert.equal(def.filename, 'dev.engram.intelligence-worker.e2e1.plist'); assert.ok(def.content.includes('<key>Label</key><string>dev.engram.intelligence-worker.e2e1</string>'));
+  assert.ok(def.content.includes('<key>StandardOutPath</key><string>/tmp/a&amp;b/worker.log</string>') && def.content.includes('<key>StandardErrorPath</key>'));
+  assert.ok(!serviceDefinition('launchd', params).content.includes('StandardOutPath'), 'no log keys unless asked');
+  assert.throws(() => serviceDefinition('launchd', { ...params, label: '../evil' }), /label may only contain/);
+  recordCase({ suite: 'adaptive', name: 'service-unit-label-and-log', status: 'PASS' });
+});

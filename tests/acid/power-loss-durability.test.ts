@@ -90,8 +90,10 @@ test('partial journal append interrupted before fsync is truncated without losin
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
-test('head or view fsync failures after the journal commit remain recoverable', async t => {
-  for (const stage of ['fsync.file.before', 'fsync.directory.before']) {
+// Head and view are rebuildable projections written WITHOUT fsync after the commit point (verification/durability/commit-protocol-adr.md). The failure points that still exist after
+// the journal fsync are therefore the temp write and the rename; failures of the deferred flush are covered in projection-durability.test.ts.
+test('head or view write failures after the journal commit remain recoverable', async t => {
+  for (const stage of ['atomic.temp_written', 'atomic.before_rename']) {
     await t.test(stage, async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-fsync-postcommit-'));
       try {

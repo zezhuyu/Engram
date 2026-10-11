@@ -2,7 +2,7 @@ import { promises as fs, watch as fsWatch } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import YAML from 'yaml';
-import { atomicWrite, LocalObjectStore, mkdirDurable, safePath, syncDirectory, withVaultLock } from '../storage-local/index.js';
+import { atomicWrite, atomicWriteVolatile, flushKeys, LocalObjectStore, mkdirDurable, safePath, syncDirectory, withVaultLock } from '../storage-local/index.js';
 import { createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 import { describeModel } from '../models/factory.js';
 import { profileAsync, profileBytes } from '../bench/instrumentation.js';
@@ -70,6 +70,13 @@ function validateInput(input: PutInput): void {
   if (input.metadata && (Array.isArray(input.metadata) || typeof input.metadata !== 'object')) throw new MDBError('INVALID_INPUT', 'Invalid metadata');
   if (input.idempotencyKey !== undefined && (typeof input.idempotencyKey !== 'string' || input.idempotencyKey.length > 256)) throw new MDBError('INVALID_INPUT', 'Invalid idempotency key');
 }
+/** Head/view projections are flushed this long after the first un-flushed write, and at process exit. */
+const PROJECTION_FLUSH_MS=500;
+/** Journal events whose projections are re-checked on the first owner operation of a Vault instance. */
+const PROJECTION_TAIL_EVENTS=512;
+const exitFlush=new Set<{flushProjections():Promise<unknown>}>();
+let exitHooked=false;
+function hookExit():void{if(exitHooked)return;exitHooked=true;process.on('beforeExit',()=>{for(const vault of [...exitFlush])void vault.flushProjections().catch(()=>undefined);});}
 export class Vault {
   readonly root: string;
   readonly store: ObjectStore;
@@ -211,7 +218,7 @@ export class Vault {
   async get(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.get', async () => this.visible(await this.rawDocument(objectId,revisionId))); }
   async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[]}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||s.collectionId===e.scope.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)result.push(await this.visible(d));}}return result;}
   private async commit(input:PutInput,previous?:Document,operation='put',idempotencyPayloadHash?:string):Promise<Document> {
-    validateInput(input);if(input.metadata?.profileRole)this.requireOwner();await this.requireAccess(input.scope,'write');const events=await this.repairJournal();this.options.fault?.('commit.before_revision');
+    validateInput(input);if(input.metadata?.profileRole)this.requireOwner();await this.requireAccess(input.scope,'write');const events=await this.repairJournal();await this.reconcileProjectionTail(events);this.options.fault?.('commit.before_revision');
     const payload = { ...input, idempotencyKey: undefined };
     const replayHash = idempotencyPayloadHash ?? payloadHash(operation, payload);
     if(input.idempotencyKey){const prior=events.find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(input.scope));if(prior){if((operation==='put'||operation==='patch') && (prior.idempotencyPayloadHash!==replayHash || prior.operation!==operation || prior.idempotencyActorId!==this.actor.actorId || previous && prior.objectId!==previous.id))throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}
@@ -220,7 +227,7 @@ export class Vault {
     const text=serializeDocument(doc);await this.store.putImmutable(`.mdb/objects/${objectId}/revs/${revisionId}.md`,Buffer.from(text));this.options.fault?.('after_revision');this.options.fault?.('after_revision_write');this.options.fault?.('revision.after_dirsync');
     const event:CommitEvent={sequence:events.length+1,transactionId:this.newId('tx'),objectId,revisionId,...(previous?{previousRevisionId:previous.revisionId}:{}),path:doc.path,scope:doc.scope,operation,timestamp:now,revisionSha256:createHash('sha256').update(text).digest('hex'),...(input.idempotencyKey?{idempotencyKey:input.idempotencyKey,idempotencyPayloadHash:replayHash,idempotencyActorId:this.actor.actorId}:{})};
     this.options.fault?.('journal.before_append');const committedEvent = await this.appendEvent(event);/* commit point: durable append or conditional S3 head publication */this.options.fault?.('after_journal');this.options.fault?.('after_journal_append');this.options.fault?.('before_view');this.options.fault?.('before_view_update');
-    this.options.fault?.('head.before_replace');await atomicWrite(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWrite(this.root,doc.path,text,this.options.fault);this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');return doc;
+    /* The commit point has passed. Head and view are rebuildable projections of the journal and the immutable revision: written atomically but NOT fsynced here; flushProjections() and tail reconciliation make them durable or repair them (see verification/durability/commit-protocol-adr.md). */this.options.fault?.('head.before_replace');await atomicWriteVolatile(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.noteProjections([`.mdb/heads/${objectId}.json`,doc.path]);this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');return doc;
   }
   async put(input:PutInput):Promise<Document> { return this.visible(await withVaultLock(this.root,()=>this.commit(input))); }
   async patch(input:PatchInput):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const previous=await this.rawDocument(input.objectId);await this.requireAccess(previous.scope,'write');if(previous.kind==='source')throw new MDBError('INVALID_INPUT','Source manifests are immutable; import a new source');if(input.metadataPatch&&Object.keys(input.metadataPatch).some(k=>k.startsWith('_')))throw new MDBError('INVALID_INPUT','Protected metadata cannot be patched');const patch={...input,idempotencyKey:undefined};const replayHash=payloadHash('patch',patch);if(input.idempotencyKey){const prior=(await this.rawEvents()).find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(previous.scope));if(prior){if(prior.idempotencyPayloadHash!==replayHash||prior.idempotencyActorId!==this.actor.actorId||prior.operation!=='patch'||prior.objectId!==previous.id)throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}if(previous.revisionId!==input.expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({scope:previous.scope,kind:previous.kind,title:input.title??previous.title,body:input.body??previous.body,tags:input.tags??previous.tags,links:input.links??previous.links,evidence:input.evidence??previous.evidence,status:input.status??previous.status,metadata:{...previous.metadata,...input.metadataPatch},idempotencyKey:input.idempotencyKey},previous,'patch',replayHash);}));}
@@ -235,6 +242,45 @@ export class Vault {
   private async repairJournal():Promise<CommitEvent[]> {const events=await this.rawEvents();if(this.remoteJournal())return events;const stat=await fs.stat(await safePath(this.root,'.mdb/events/commits.jsonl'));if(this.journalCache&&stat.size!==this.journalCache.offset){/* unterminated torn tail: rewrite the journal as exactly its committed records */this.options.fault?.('recover.before_journal_repair');await atomicWrite(this.root,'.mdb/events/commits.jsonl',events.map(e=>JSON.stringify(e)+'\n').join(''),this.options.fault);this.journalCache=undefined;await this.rawEvents();this.options.fault?.('recover.after_journal_repair');}return events;}
   /** True when `bytes` is exactly one of this object's committed revisions (a stale view left by a crash, not an external edit). */
   private async isCommittedRevision(objectId:string,events:CommitEvent[],bytes:Uint8Array):Promise<boolean> {for(const e of events){if(e.objectId!==objectId||e.operation==='purge')continue;try{if(Buffer.from(await this.store.read(`.mdb/objects/${objectId}/revs/${e.revisionId}.md`)).equals(Buffer.from(bytes)))return true;}catch{/* missing revision is reported by verify */}}return false;}
+  /** Projection files (heads, views) written since the last flush, with a version so a rewrite after the flush snapshot is not forgotten. */
+  private readonly pendingProjections=new Map<string,number>();private flushTimer?:NodeJS.Timeout;private flushChain:Promise<unknown>=Promise.resolve();private projectionVersion=0;private tailReconciled=false;
+  private noteProjections(keys:string[]):void{for(const key of keys)this.pendingProjections.set(key,++this.projectionVersion);if(!this.flushTimer){this.flushTimer=setTimeout(()=>{this.flushTimer=undefined;void this.flushProjections().catch(()=>undefined);},PROJECTION_FLUSH_MS);this.flushTimer.unref();exitFlush.add(this);hookExit();}}
+  /** Makes pending head/view writes durable (fsync each file, then each directory once). Never fails or delays an acknowledged commit: errors leave the keys pending for the next flush. */
+  flushProjections():Promise<{files:number;directories:number}>{
+    const run=this.flushChain.then(async()=>{const snapshot=[...this.pendingProjections];if(!snapshot.length){exitFlush.delete(this);return{files:0,directories:0};}const result=await flushKeys(this.root,snapshot.map(([key])=>key),this.options.fault);for(const[key,version]of snapshot)if(this.pendingProjections.get(key)===version)this.pendingProjections.delete(key);if(!this.pendingProjections.size)exitFlush.delete(this);return result;});
+    this.flushChain=run.then(()=>undefined,()=>undefined);return run;
+  }
+  /** Torn or empty projection left by a power loss: a (possibly empty) strict prefix of the committed bytes is a crash artifact, never an external edit. */
+  private isTornPrefix(current:Uint8Array,committed:Uint8Array):boolean{return current.byteLength<committed.byteLength&&Buffer.from(committed).subarray(0,current.byteLength).equals(Buffer.from(current));}
+  /** Restores one object's view and head from its committed revision. Durable (fsynced) because it is a repair; `recover()` always rewrites the head and also quarantines a diverging (externally edited) view; tail reconciliation repairs only crash artifacts (absent, empty/torn prefix, or an older committed revision) and leaves anything else for reconcile(). Returns true when the view had to be rewritten. */
+  private async repairProjection(e:CommitEvent,events:CommitEvent[],bytes:Uint8Array,mode:'recover'|'tail'='tail'):Promise<boolean>{
+    let current:Uint8Array|undefined;
+    try{current=await fs.readFile(await safePath(this.root,e.path));}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    let repaired=false;
+    if(!current||!Buffer.from(current).equals(Buffer.from(bytes))){
+      const crashArtifact=!current||this.isTornPrefix(current,bytes)||await this.isCommittedRevision(e.objectId,events,current);
+      if(mode==='tail'&&!crashArtifact)return false;/* diverging content may be a deliberate external edit awaiting reconcile(): automatic tail repair never overwrites or quarantines it; only recover() does */
+      if(current&&current.byteLength>0&&!this.isTornPrefix(current,bytes)&&!crashArtifact)await this.store.putImmutable(`.mdb/quarantine/${id('external')}.md`,current);
+      this.options.fault?.('recover.before_view_repair');await atomicWrite(this.root,e.path,bytes,this.options.fault);this.options.fault?.('recover.after_view_repair');repaired=true;
+    }
+    const headKey=`.mdb/heads/${e.objectId}.json`;const head=JSON.stringify(e);let currentHead:string|undefined;try{currentHead=await fs.readFile(await safePath(this.root,headKey),'utf8');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    if(mode==='recover'||currentHead!==head){this.options.fault?.('recover.before_head_write');await atomicWrite(this.root,headKey,head,this.options.fault);}
+    return repaired;
+  }
+  /**
+   * First owner operation of a Vault instance: re-check the projections of the most recent journal events and repair any that a power loss left stale, absent or torn. Bounded (the
+   * un-flushed window is at most the flush interval of commits), runs inside the vault lock (callers hold it), and is skipped for non-owner actors. recover() covers everything.
+   */
+  private async reconcileProjectionTail(events:CommitEvent[]):Promise<void>{
+    if(this.tailReconciled||!this.actor.permissions.includes('*'))return;this.tailReconciled=true;
+    const tail=events.slice(-PROJECTION_TAIL_EVENTS);const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const latest=new Map(events.map(e=>[e.objectId,e]));
+    for(const objectId of new Set(tail.map(e=>e.objectId))){
+      const e=latest.get(objectId)!;if(purged.has(objectId)||e.operation==='purge')continue;
+      let bytes:Uint8Array;try{bytes=await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`);}catch{continue;/* a missing revision is reported by verify and recover */}
+      if(e.revisionSha256&&createHash('sha256').update(bytes).digest('hex')!==e.revisionSha256)continue;
+      await this.repairProjection(e,events,bytes);
+    }
+  }
   private async sweepTemps(directory:string):Promise<number> {let removed=0;let entries:string[];try{entries=await fs.readdir(await safePath(this.root,directory));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT'||(e as NodeJS.ErrnoException).code==='ENOTDIR')return 0;throw e;}for(const name of entries)if(/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(name)){await fs.rm(await safePath(this.root,`${directory}/${name}`),{force:true});removed++;}return removed;}
   async recover():Promise<{committed:number;repaired:number;orphans:number;tempRemoved:number}> {
     this.requireOwner();return withVaultLock(this.root,async()=>{
@@ -250,13 +296,7 @@ export class Vault {
         if(e.revisionSha256&&createHash('sha256').update(bytes).digest('hex')!==e.revisionSha256)throw new MDBError('INTERNAL',`Revision content hash mismatch: ${e.objectId}/${e.revisionId}`);
         const doc=parseDocument(Buffer.from(bytes).toString('utf8'));
         if(doc.id!==e.objectId||doc.revisionId!==e.revisionId||doc.path!==e.path||scopeKey(doc.scope)!==scopeKey(e.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
-        let current:Uint8Array|undefined;
-        try{current=await fs.readFile(await safePath(this.root,e.path));}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-        if(!current||!Buffer.from(current).equals(Buffer.from(bytes))){
-          if(current&&!await this.isCommittedRevision(e.objectId,events,current))await this.store.putImmutable(`.mdb/quarantine/${id('external')}.md`,current);
-          this.options.fault?.('recover.before_view_repair');await atomicWrite(this.root,e.path,bytes,this.options.fault);this.options.fault?.('recover.after_view_repair');repaired++;
-        }
-        this.options.fault?.('recover.before_head_write');await atomicWrite(this.root,`.mdb/heads/${e.objectId}.json`,JSON.stringify(e),this.options.fault);
+        if(await this.repairProjection(e,events,bytes,'recover'))repaired++;
       }
       let tempRemoved=0;const sweep=new Set<string>(['.mdb/heads','.mdb/events']);
       for(const e of latest.values())if(!purged.has(e.objectId)){sweep.add(e.path.includes('/')?e.path.slice(0,e.path.lastIndexOf('/')):'.');sweep.add(`.mdb/objects/${e.objectId}/revs`);}
@@ -269,10 +309,10 @@ export class Vault {
         }
       }
       for(const directory of sweep)tempRemoved+=await this.sweepTemps(directory);
-      return{committed:events.length,repaired,orphans,tempRemoved};
+      await this.flushProjections().catch(()=>undefined);return{committed:events.length,repaired,orphans,tempRemoved};
     });
   }
-  async reconcile():Promise<{imported:number;conflicts:number}> {return withVaultLock(this.root,async()=>{const events=await this.repairJournal();const latest=[...new Map(events.map(e=>[e.objectId,e])).values()];let imported=0,conflicts=0;for(const e of latest){if(e.operation==='purge'||!(await this.canAccess(e.scope,'write'))||!(await this.canAccess(e.scope,'read')))continue;const canonical=Buffer.from(await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`)).toString('utf8');let edited:string;try{edited=Buffer.from(await this.store.read(e.path)).toString('utf8');}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')continue;throw error;}if(edited===canonical)continue;try{const d=parseDocument(edited),original=parseDocument(canonical);if(d.id!==e.objectId||d.revisionId!==e.revisionId||scopeKey(d.scope)!==scopeKey(original.scope)||d.kind!==original.kind||d.path!==original.path||d.uri!==original.uri||original.kind==='source')throw new MDBError('CONFLICT','External edit changed protected metadata');await this.commit({scope:original.scope,kind:original.kind,title:d.title,body:d.body,tags:d.tags,links:d.links,evidence:d.evidence,status:d.status,metadata:original.metadata},original,'external_edit');imported++;}catch{await this.store.putImmutable(`.mdb/quarantine/${this.newId('conflict')}.md`,Buffer.from(edited));await atomicWrite(this.root,e.path,canonical);conflicts++;}}return{imported,conflicts};});}
+  async reconcile():Promise<{imported:number;conflicts:number}> {return withVaultLock(this.root,async()=>{const events=await this.repairJournal();await this.reconcileProjectionTail(events);const latest=[...new Map(events.map(e=>[e.objectId,e])).values()];let imported=0,conflicts=0;for(const e of latest){if(e.operation==='purge'||!(await this.canAccess(e.scope,'write'))||!(await this.canAccess(e.scope,'read')))continue;const canonical=Buffer.from(await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`)).toString('utf8');let edited:string;try{edited=Buffer.from(await this.store.read(e.path)).toString('utf8');}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')continue;throw error;}if(edited===canonical)continue;try{const d=parseDocument(edited),original=parseDocument(canonical);if(d.id!==e.objectId||d.revisionId!==e.revisionId||scopeKey(d.scope)!==scopeKey(original.scope)||d.kind!==original.kind||d.path!==original.path||d.uri!==original.uri||original.kind==='source')throw new MDBError('CONFLICT','External edit changed protected metadata');await this.commit({scope:original.scope,kind:original.kind,title:d.title,body:d.body,tags:d.tags,links:d.links,evidence:d.evidence,status:d.status,metadata:original.metadata},original,'external_edit');imported++;}catch{await this.store.putImmutable(`.mdb/quarantine/${this.newId('conflict')}.md`,Buffer.from(edited));await atomicWrite(this.root,e.path,canonical);conflicts++;}}return{imported,conflicts};});}
   async promote(objectId:string,to:Scope,sanitizedBody:string,title?:string):Promise<Document> {const source=await this.rawDocument(objectId);await this.requireAccess(source.scope,'promote');if(to.type!=='global')throw new MDBError('INVALID_INPUT','Promotion target must be global');await this.requireAccess(to,'write');if(!sanitizedBody.trim())throw new MDBError('INVALID_INPUT','Promotion requires an explicitly sanitized derivative');return this.put({scope:to,kind:source.kind==='source'?'wiki_page':source.kind,title:title??'Promoted knowledge',body:sanitizedBody,status:'promoted',tags:[],metadata:{_promotionOrigin:{uri:source.uri,revisionId:source.revisionId},reviewed:true}});}
   private async appendEvent(event:CommitEvent):Promise<CommitEvent> {
     const remote = this.remoteJournal();

@@ -1,0 +1,10 @@
+{
+  "supportedPlatforms": [
+    "darwin"
+  ],
+  "decisionNotes": [
+    "Release is explicitly restricted to macOS (tests on APFS; 100k benchmarks on a Journaled HFS+ external volume). Linux/ext4 was NOT_RUN and is not a supported release platform until the reliability lane passes there.",
+    "Durability: process-crash atomicity and recovery are verified; QEMU abrupt-stop and kernel fsync-EIO injection are verified on the recorded storage sources (guest-crash simulation, not physical power removal); physical power loss and volatile device-cache loss are NOT_RUN.",
+    "Writes are serialized by one vault-wide lock; per-workspace write parallelism is not offered."
+  ]
+}

@@ -1,3 +1,5 @@
+import { mkdtempSync } from 'node:fs';
+import os from 'node:os';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
@@ -8,6 +10,8 @@ import { CancelledError } from '../../packages/models/errors.js';
 import type { Document, ModelCallOptions, ModelProposal, ModelProvider, ModelRequest, Scope } from '../../packages/sdk/index.js';
 import type { Vault } from '../../packages/core/vault.js';
 
+// The activity marker lives outside the vault, in the user state dir; tests must never write into the real one.
+process.env.ENGRAM_STATE_DIR ??= mkdtempSync(path.join(os.tmpdir(), 'engram-state-'));
 export type T = { after(fn: () => void | Promise<void>): void };
 export const ws = (workspaceId: string): Scope => ({ type: 'workspace', workspaceId });
 export const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
