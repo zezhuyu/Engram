@@ -5,7 +5,7 @@ import { crc32 } from 'node:zlib';
 import { MDBError } from '../core/types.js';
 import { safePath } from '../storage-local/index.js';
 import type { SearchVault } from './index.js';
-import { manifestFor, type ManifestEntry } from './manifest.js';
+import { manifestFor, type Manifest, type ManifestEntry } from './manifest.js';
 
 /**
  * Filesystem-only candidate index: trigram postings over the raw text (frontmatter + body) of every object's head revision.
@@ -17,7 +17,7 @@ import { manifestFor, type ManifestEntry } from './manifest.js';
 const DIR = '.mdb/indexes/fs-trigram';
 const SHARDS = 256;
 const BLOCK = 4000;
-const SCHEMA = 1;
+const SCHEMA = 2; // v2: every posting also carries min(3, occurrences of the trigram in the document), which yields proven upper bounds on term counts for exact top-K pruning
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Terms the index can serve: lower-casing is the identity or locale-independent (printable ASCII and CJK/Hangul), so the index and the scorer agree. */
 const ELIGIBLE = /^[\x20-\x7e぀-ヿ㐀-鿿가-힯]+$/;
@@ -50,11 +50,11 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
       }));
       const buckets: Array<Map<number, number[]>> = Array.from({ length: SHARDS }, () => new Map());
       for (let i = 0; i < slice.length; i++) { // ascending ordinal order keeps every posting list sorted
-        const text = texts[i]!; const ordinal = block * BLOCK + i; const seen = new Set<number>();
-        for (let p = 0; p + 2 < text.length; p++) {
-          const a = text.charCodeAt(p), b = text.charCodeAt(p + 1), c = text.charCodeAt(p + 2); const key = keyOf(a, b, c);
-          if (seen.has(key)) continue; seen.add(key);
-          const bucket = buckets[shardOf(a, b, c)]!; const list = bucket.get(key); if (list) list.push(ordinal); else bucket.set(key, [ordinal]);
+        const text = texts[i]!; const ordinal = block * BLOCK + i; const counts = new Map<number, number>();
+        for (let p = 0; p + 2 < text.length; p++) { const key = keyOf(text.charCodeAt(p), text.charCodeAt(p + 1), text.charCodeAt(p + 2)); const n = counts.get(key); if (n === undefined) counts.set(key, 1); else if (n < 3) counts.set(key, n + 1); }
+        for (const [key, tf] of counts) {
+          const a = Math.floor(key / 4294967296), b = Math.floor((key % 4294967296) / 65536), c = key % 65536; const encoded = ordinal * 4 + (tf - 1);
+          const bucket = buckets[shardOf(a, b, c)]!; const list = bucket.get(key); if (list) list.push(encoded); else bucket.set(key, [encoded]);
         }
       }
       for (let s = 0; s < SHARDS; s++) {
@@ -73,7 +73,7 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
       }
       const out: number[] = [];
       for (const key of [...merged.keys()].sort((x, y) => x - y)) {
-        const list = merged.get(key)!; const body: number[] = []; pushVarint(body, list.length); let previous = 0; for (const ordinal of list) { pushVarint(body, ordinal - previous); previous = ordinal; }
+        const list = merged.get(key)!; const body: number[] = []; pushVarint(body, list.length); let previous = 0; for (const encoded of list) { const ordinal = Math.floor(encoded / 4); pushVarint(body, (ordinal - previous) * 4 + (encoded % 4)); previous = ordinal; }
         const hi = Math.floor(key / 4294967296), lo = key % 4294967296; out.push(hi >> 8 & 0xff, hi & 0xff, lo >>> 24 & 0xff, lo >>> 16 & 0xff, lo >>> 8 & 0xff, lo & 0xff); pushVarint(out, body.length); for (const byte of body) out.push(byte);
       }
       const payload = Buffer.from(out); const file = Buffer.alloc(4 + payload.length); file.writeUInt32LE(crc32(payload), 0); payload.copy(file, 4); bytes += file.length;
@@ -90,7 +90,7 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
   } catch (error) { await fs.rm(work, { recursive: true, force: true }); throw error; }
 }
 
-interface Loaded { signature: string; documents: number; builtAt: string; ordinals: Map<string, { ordinal: number; rev: string }>; ids: string[]; shards: Map<number, Map<number, { start: number; end: number }> & { buffer?: Buffer }> }
+interface Loaded { decoded?: { map: Map<number, { ords: number[]; tfs: number[] }>; size: number }; stale?: { sequence: number; ids: Set<string> }; signature: string; documents: number; builtAt: string; ordinals: Map<string, { ordinal: number; rev: string }>; ids: string[]; shards: Map<number, Map<number, { start: number; end: number }> & { buffer?: Buffer }> }
 const cache = new Map<string, Loaded>();
 
 async function load(root: string): Promise<Loaded> {
@@ -119,14 +119,28 @@ async function shard(root: string, loaded: Loaded, s: number): Promise<Map<numbe
   loaded.shards.set(s, table); return table;
 }
 
-async function postings(root: string, loaded: Loaded, a: number, b: number, c: number): Promise<number[]> {
-  const table = await shard(root, loaded, shardOf(a, b, c)); const span = table.get(keyOf(a, b, c)); if (!span) return [];
-  const values = varints(table.buffer!, span.start, span.end); const count = values.next().value as number; const list: number[] = new Array(count); let previous = 0, i = 0;
-  for (const delta of values) { previous += delta; list[i++] = previous; }
-  return list;
+const DECODED_LIMIT = 6_000_000; // postings entries kept decoded per loaded index (a few tens of MB): repeated queries over common terms skip the varint decode
+async function postings(root: string, loaded: Loaded, a: number, b: number, c: number): Promise<{ ords: number[]; tfs: number[] }> {
+  const key = keyOf(a, b, c); const cache = (loaded.decoded ??= { map: new Map(), size: 0 }); const hit = cache.map.get(key); if (hit) { cache.map.delete(key); cache.map.set(key, hit); return hit; }
+  const table = await shard(root, loaded, shardOf(a, b, c)); const span = table.get(key); if (!span) return { ords: [], tfs: [] };
+  const values = varints(table.buffer!, span.start, span.end); const count = values.next().value as number; const ords: number[] = new Array(count), tfs: number[] = new Array(count); let previous = 0, i = 0;
+  for (const packed of values) { previous += Math.floor(packed / 4); ords[i] = previous; tfs[i++] = (packed % 4) + 1; }
+  const entry = { ords, tfs }; if (count <= DECODED_LIMIT / 4) { cache.map.set(key, entry); cache.size += count; for (const [oldKey, old] of cache.map) { if (cache.size <= DECODED_LIMIT) break; cache.map.delete(oldKey); cache.size -= old.ords.length; } }
+  return entry;
 }
-const intersect = (x: number[], y: number[]): number[] => { const out: number[] = []; let i = 0, j = 0; while (i < x.length && j < y.length) { const p = x[i]!, q = y[j]!; if (p === q) { out.push(p); i++; j++; } else if (p < q) i++; else j++; } return out; };
+/** Intersection of two ordinal lists that keeps, per surviving ordinal, the smaller of the two trigram counts (a term occurs at most as often as its rarest trigram). */
+const intersect = (x: { ords: number[]; tfs: number[] }, y: { ords: number[]; tfs: number[] }): { ords: number[]; tfs: number[] } => { const ords: number[] = [], tfs: number[] = []; let i = 0, j = 0; while (i < x.ords.length && j < y.ords.length) { const p = x.ords[i]!, q = y.ords[j]!; if (p === q) { ords.push(p); tfs.push(Math.min(x.tfs[i]!, y.tfs[j]!)); i++; j++; } else if (p < q) i++; else j++; } return { ords, tfs }; };
 
+/**
+ * Objects the index cannot vouch for: absent from it, or at a different head revision than when it was built. Computed once per loaded index and then maintained incrementally
+ * (only entries touched after the previous check are re-examined), so a query does not walk the whole manifest. May include ids that have since left the manifest: harmless.
+ */
+function staleIds(loaded: Loaded, manifest: Manifest): Set<string> {
+  const check = (e: ManifestEntry, into: Set<string>): void => { const known = loaded.ordinals.get(e.id); if (!known || known.rev !== e.rev) into.add(e.id); else into.delete(e.id); };
+  if (!loaded.stale) { const ids = new Set<string>(); for (const e of manifest.entries.values()) check(e, ids); loaded.stale = { sequence: manifest.sequence, ids }; return ids; }
+  if (loaded.stale.sequence !== manifest.sequence) { const after = loaded.stale.sequence; for (const e of manifest.entries.values()) if (e.last > after) check(e, loaded.stale.ids); loaded.stale.sequence = manifest.sequence; }
+  return loaded.stale.ids;
+}
 /** Drops decoded in-memory index state (a new process starts empty); used by tests to prove on-disk damage is detected on a cold read. */
 export const resetFsIndexCache = (): void => cache.clear();
 export const fsIndexServes = (terms: string[]): boolean => terms.every(term => term.length >= 3 && ELIGIBLE.test(term));
@@ -136,16 +150,20 @@ export async function fsIndexStatus(vault: SearchVault): Promise<FsIndexStatus> 
   catch (error) { return { present: false, reason: error instanceof Error ? error.message : String(error) }; }
 }
 
-/** Candidate ids per term (a superset of the entries whose text contains the term), or throws when the index is absent or damaged. */
-export async function fsIndexLookup(root: string, entries: ManifestEntry[], terms: string[], caseSensitive: boolean): Promise<{ byTerm: Map<string, Set<string>>; stale: number; indexed: number }> {
-  const loaded = await load(root); const byTerm = new Map<string, Set<string>>();
-  const stale: string[] = []; for (const e of entries) { const known = loaded.ordinals.get(e.id); if (!known || known.rev !== e.rev) stale.push(e.id); }
+/**
+ * Candidate ids per term (a superset of the entries whose text contains the term) and, per candidate, a PROVEN upper bound (1..3) on the number of occurrences of the term in its raw text,
+ * or throws when the index is absent or damaged. Entries newer than the index (or absent from it) are always candidates and carry no bound.
+ */
+export async function fsIndexLookup(root: string, manifest: Manifest, terms: string[], caseSensitive: boolean, wantBounds = true): Promise<{ byTerm: Map<string, Set<string>>; bounds: Map<string, Map<string, number>>; stale: number; indexed: number }> {
+  const loaded = await load(root); const byTerm = new Map<string, Set<string>>(); const bounds = new Map<string, Map<string, number>>();
+  const stale = staleIds(loaded, manifest);
   for (const term of terms) {
     const text = caseSensitive ? term.toLowerCase() : term; const keys = new Map<number, [number, number, number]>();
     for (let p = 0; p + 2 < text.length; p++) { const a = text.charCodeAt(p), b = text.charCodeAt(p + 1), c = text.charCodeAt(p + 2); keys.set(keyOf(a, b, c), [a, b, c]); }
-    const lists: number[][] = []; for (const [a, b, c] of keys.values()) lists.push(await postings(root, loaded, a, b, c));
-    lists.sort((x, y) => x.length - y.length); let current = lists[0] ?? []; for (let i = 1; i < lists.length && current.length; i++) current = intersect(current, lists[i]!);
-    const ids = new Set<string>(current.map(ordinal => loaded.ids[ordinal]!)); for (const id of stale) ids.add(id); byTerm.set(term, ids);
+    const lists: Array<{ ords: number[]; tfs: number[] }> = []; for (const [a, b, c] of keys.values()) lists.push(await postings(root, loaded, a, b, c));
+    lists.sort((x, y) => x.ords.length - y.ords.length); let current = lists[0] ?? { ords: [], tfs: [] }; for (let i = 1; i < lists.length && current.ords.length; i++) current = intersect(current, lists[i]!);
+    const ids = new Set<string>(), perId = new Map<string, number>(); current.ords.forEach((ordinal, i) => { const id = loaded.ids[ordinal]!; ids.add(id); if (wantBounds) perId.set(id, current.tfs[i]!); });
+    for (const id of stale) { ids.add(id); perId.delete(id); } byTerm.set(term, ids); bounds.set(term, perId);
   }
-  return { byTerm, stale: stale.length, indexed: loaded.documents };
+  return { byTerm, bounds, stale: stale.size, indexed: loaded.documents };
 }

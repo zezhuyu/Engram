@@ -59,3 +59,13 @@ test('first append carries the legacy per-family counters over exactly once', as
   assert.equal((await readFeedbackLog(vault)).filter(e => e.kind === 'legacy').length, 1);
   recordCase({ suite: 'dream', name: 'learning-legacy-carry-over', status: 'PASS' });
 });
+
+test('labels keep their origin: real-user, validated-evidence and simulated feedback are counted separately and a report can tell them apart', async t => {
+  const { vault } = await disposableVault(t); const a = await discovery(vault, ['o1', 'p1']); const b = await discovery(vault, ['o2', 'p2']); const c = await discovery(vault, ['o3', 'p3']);
+  await rateDiscovery(vault, a.id, { label: 'useful', note: 'a person said so' });
+  await rateDiscovery(vault, b.id, { label: 'useful', note: 'scripted reviewer', origin: 'simulated-reviewer' });
+  await rateDiscovery(vault, c.id, { label: 'useful', note: 'model opinion', source: 'model' });
+  const p = await learnedParams(vault); assert.deepEqual(p.byOrigin, { 'real-user': 1, 'simulated-reviewer': 1 }, 'the model-sourced label is excluded, the other two are labeled by origin');
+  assert.equal((await readFeedbackLog(vault)).filter(e => e.origin === 'simulated-reviewer').length, 1);
+  recordCase({ suite: 'dream', name: 'learning-origin-labels', status: 'PASS' });
+});

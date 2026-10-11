@@ -29,8 +29,15 @@ export interface ManifestEntry {
   pk?: string; ec?: string; cat?: string; ex?: boolean; /** knowledge domain (metadata.domain), used to find cross-domain associations */ dom?: string;
   /** Outgoing references: declared relations and body references, as [type, rawTarget]. Superset of what a viewer may see. */
   refs: Array<[string, string]>;
+  /** Lower-cased text of every Markdown heading in the body, newline-joined ('' = no headings); absent = unknown (too long to keep). Lets the ranking bound prove a term cannot score the heading bonus. */
+  hd?: string;
 }
 const FILE = '.mdb/indexes/manifest.v4.jsonl';
+/** Lower-cased heading lines of a Markdown body (matching the ranking rule `^#{1,6}\s`), or undefined when they would be larger than 1 KiB. */
+export function headingText(body: string): string | undefined {
+  const headings: string[] = []; for (const line of body.split('\n')) if (/^#{1,6}\s/.test(line)) headings.push(line.replace(/^#{1,6}\s+/, '').toLowerCase());
+  const joined = headings.join('\n'); return joined.length <= 1024 ? joined : undefined;
+}
 const BODY_REFERENCE = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]|mdb:\/\/[^\s)\]>]+/g;
 export const bodyReferences = (body: string): Array<[string, string]> => Array.from(body.matchAll(BODY_REFERENCE), match => ['references', match[1] ?? match[0]] as [string, string]);
 
@@ -71,7 +78,7 @@ export class Manifest {
     return descending ? this.recentOrder.descending : this.recentOrder.ascending;
   }
   static fromDocument(doc: Document, first: number, last: number): ManifestEntry {
-    return { id: doc.id, rev: doc.revisionId, first, last, scope: doc.scope, sk: scopeKey(doc.scope), kind: doc.kind, title: doc.title, tags: doc.tags, status: doc.status, updated: doc.updatedAt, at: typeof doc.metadata.eventTime === 'string' ? doc.metadata.eventTime : doc.createdAt, ...(typeof doc.metadata.sessionId === 'string' ? { sid: doc.metadata.sessionId } : {}), ...(typeof doc.metadata.hostSessionId === 'string' ? { hs: doc.metadata.hostSessionId } : {}), ...(typeof doc.metadata.eventType === 'string' ? { et: doc.metadata.eventType } : {}), ...(typeof doc.metadata.speaker === 'string' ? { sp: doc.metadata.speaker } : {}), ...(typeof doc.metadata.preferenceKey === 'string' ? { pk: doc.metadata.preferenceKey } : {}), ...(typeof doc.metadata.evidenceClass === 'string' ? { ec: doc.metadata.evidenceClass } : {}), ...(typeof doc.metadata.category === 'string' ? { cat: doc.metadata.category } : {}), ...(typeof doc.metadata.domain === 'string' ? { dom: doc.metadata.domain } : {}), ...(doc.metadata.explicitPreference === true || doc.metadata.evidenceClass === 'explicit' ? { ex: true } : {}), refs: [...doc.links.map(l => [l.type, l.target] as [string, string]), ...bodyReferences(doc.body)] };
+    const headings = headingText(doc.body); return { id: doc.id, rev: doc.revisionId, first, last, scope: doc.scope, sk: scopeKey(doc.scope), kind: doc.kind, title: doc.title, tags: doc.tags, status: doc.status, updated: doc.updatedAt, at: typeof doc.metadata.eventTime === 'string' ? doc.metadata.eventTime : doc.createdAt, ...(typeof doc.metadata.sessionId === 'string' ? { sid: doc.metadata.sessionId } : {}), ...(typeof doc.metadata.hostSessionId === 'string' ? { hs: doc.metadata.hostSessionId } : {}), ...(typeof doc.metadata.eventType === 'string' ? { et: doc.metadata.eventType } : {}), ...(typeof doc.metadata.speaker === 'string' ? { sp: doc.metadata.speaker } : {}), ...(typeof doc.metadata.preferenceKey === 'string' ? { pk: doc.metadata.preferenceKey } : {}), ...(typeof doc.metadata.evidenceClass === 'string' ? { ec: doc.metadata.evidenceClass } : {}), ...(typeof doc.metadata.category === 'string' ? { cat: doc.metadata.category } : {}), ...(typeof doc.metadata.domain === 'string' ? { dom: doc.metadata.domain } : {}), ...(doc.metadata.explicitPreference === true || doc.metadata.evidenceClass === 'explicit' ? { ex: true } : {}), refs: [...doc.links.map(l => [l.type, l.target] as [string, string]), ...bodyReferences(doc.body)], ...(headings === undefined ? {} : { hd: headings }) };
   }
 
   /** Applies every readable journal record newer than the manifest. Always completes before a query uses the manifest, so it can never be stale. */
@@ -118,7 +125,7 @@ export class Manifest {
   save(): Promise<void> {
     return this.exclusive(async () => {
       if (!this.isOwner()) return;
-      const lines = [JSON.stringify({ v: 4, sequence: this.sequence, lastTx: this.lastTx, count: this.entries.size })];
+      const lines = [JSON.stringify({ v: 4, hd: 1, sequence: this.sequence, lastTx: this.lastTx, count: this.entries.size })];
       for (const entry of this.entries.values()) lines.push(JSON.stringify(entry));
       await atomicWrite(this.source.root, FILE, lines.join('\n') + '\n'); this.persisted = true;
     });
@@ -129,8 +136,8 @@ export class Manifest {
       if (this.entries.size) return false;
       let text: string; try { text = await fs.readFile(await safePath(this.source.root, FILE), 'utf8'); } catch { return false; }
       try {
-        const lines = text.split('\n').filter(Boolean); const header = JSON.parse(lines[0]!) as { v: number; sequence: number; lastTx: string; count: number };
-        if (header.v !== 4 || !Number.isSafeInteger(header.sequence) || header.count !== lines.length - 1) return false;
+        const lines = text.split('\n').filter(Boolean); const header = JSON.parse(lines[0]!) as { v: number; hd?: number; sequence: number; lastTx: string; count: number };
+        if (header.v !== 4 || header.hd !== 1 || !Number.isSafeInteger(header.sequence) || header.count !== lines.length - 1) return false;
         // The manifest must have been built from THIS journal: the record at its sequence has to carry the recorded transaction id.
         const anchor = header.sequence ? (await this.source.journalSince(header.sequence - 1))[0] : undefined;
         if (header.sequence && (anchor?.sequence !== header.sequence || anchor.transactionId !== header.lastTx)) return false;
