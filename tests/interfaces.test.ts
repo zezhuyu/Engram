@@ -28,9 +28,9 @@ function mcp(root: string, calls: unknown[], actor = 'agent-a', permissions = ''
 }
 function call(id: number, name: string, args: unknown) { return { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }; }
 function result(reply: Reply): unknown { return JSON.parse(reply.result!.content![0]!.text); }
-async function spawnHttpMcp(root: string, t: { after(fn: () => void | Promise<void>): void }) {
-  const token = 'http-test-token-that-is-at-least-32-bytes-long';
-  const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_TOKEN: token, MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: '0', MDB_ACTOR_ID: 'http-agent', MDB_PERMISSIONS: '*', MDB_MCP_HTTP_ALLOWED_ORIGINS: 'https://agents.example' } });
+async function spawnHttpMcp(root: string, t: { after(fn: () => void | Promise<void>): void }, options: { token?: string; actor?: string; permissions?: string; toolset?: string } = {}) {
+  const token = options.token ?? 'http-test-token-that-is-at-least-32-bytes-long';
+  const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_TOKEN: token, MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: '0', MDB_ACTOR_ID: options.actor ?? 'http-agent', MDB_PERMISSIONS: options.permissions ?? '*', MDB_MCP_HTTP_ALLOWED_ORIGINS: 'https://agents.example', ...(options.toolset ? { MDB_MCP_TOOLSET: options.toolset } : {}) } });
   let stderr = '', resolveReady!: (url: string) => void, rejectReady!: (error: Error) => void;
   const ready = new Promise<string>((resolveUrl, reject) => { resolveReady = resolveUrl; rejectReady = reject; });
   child.stderr.setEncoding('utf8'); child.stderr.on('data', (chunk: string) => { stderr += chunk; const match = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(stderr); if (match) resolveReady(match[1]!); });
@@ -129,6 +129,62 @@ test('MCP HTTP transport is opt-in, authenticated, origin-checked, and serves th
     assert.equal(callReply.result.structuredContent.result[0]!.id, 'shared');
     assert.equal((await fetch(endpoint.replace('/mcp', '/wrong'), { headers: { Authorization: `Bearer ${token}` } })).status, 404);
     assert.equal((await httpPost(endpoint, token, { jsonrpc: '2.0', id: 4, method: 'ping' }, { 'Mcp-Session-Id': sessionId! })).status, 200);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('remote-web MCP exposes bounded authorized tools and idempotent versioned create/patch operations', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdb-web-mcp-'));
+  try {
+    const owner = new Engram(root); await owner.init({ sqlite: false }); await owner.createWorkspace('remote');
+    const credential = await createHttpCredential(owner.vault, 'web-connector', ['workspace:remote:read', 'workspace:remote:write']);
+    await owner.vault.grant('remote', 'web-connector', ['read', 'write']);
+    const { endpoint, token } = await spawnHttpMcp(root, t, { token: credential.token, actor: 'legacy-unused', permissions: '', toolset: 'remote-web' });
+    const initialized = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'web-client', version: '1' } } });
+    assert.equal(initialized.status, 200); assert.equal(initialized.headers.get('mcp-protocol-version'), '2025-03-26');
+    const session = initialized.headers.get('mcp-session-id')!;
+    const request = (id: number, name: string, args: unknown) => httpPost(endpoint, token, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
+    const listed = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
+    const tools = ((await listed.json()) as { result: { tools: Array<{ name: string }> } }).result.tools;
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_history', 'engram_patch', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_timeline'].sort());
+    const capability = await request(3, 'engram_capabilities', { scope: { type: 'workspace', workspaceId: 'remote' } });
+    assert.deepEqual((JSON.parse((await capability.json() as Reply).result!.content![0]!.text) as { authorization: unknown }).authorization, { read: true, write: true });
+    const denied = await request(4, 'engram_create', { scope: { type: 'workspace', workspaceId: 'secret' }, kind: 'note', title: 'Hidden', body: 'no leak', source: 'ChatGPT', idempotencyKey: 'denied-write' });
+    const deniedJson = await denied.json() as Reply; assert.equal(deniedJson.result?.isError, true); assert.match(deniedJson.result!.content![0]!.text, /NOT_FOUND_OR_FORBIDDEN/); assert.doesNotMatch(JSON.stringify(deniedJson), /secret/);
+    const createArgs = { scope: { type: 'workspace', workspaceId: 'remote' }, kind: 'decision', title: 'Remote decision', body: 'Use a narrow connector', source: 'Claude Web', idempotencyKey: 'create-1' };
+    const createdReply = await request(5, 'engram_create', createArgs); const created = JSON.parse((await createdReply.json() as Reply).result!.content![0]!.text) as { id: string; revisionId: string };
+    const otherActor = new Engram(root, { actorId: 'other-web-connector', permissions: [] });
+    await owner.vault.grant('remote', 'other-web-connector', ['read', 'write']);
+    await assert.rejects(() => otherActor.vault.put({ scope: { type: 'workspace', workspaceId: 'remote' }, kind: 'decision', title: 'Remote decision', body: 'Use a narrow connector', metadata: { authoredSource: 'Claude Web', capture: 'explicit' }, idempotencyKey: 'create-1' }), /Idempotency key was already used/);
+    const replayReply = await request(6, 'engram_create', createArgs); const replay = JSON.parse((await replayReply.json() as Reply).result!.content![0]!.text) as { id: string; revisionId: string };
+    assert.equal(replay.id, created.id); assert.equal(replay.revisionId, created.revisionId); assert.equal((await owner.vault.history(created.id)).length, 1);
+    const patchArgs = { objectId: created.id, expectedRevisionId: created.revisionId, body: 'Use the shared remote connector', idempotencyKey: 'patch-1' };
+    const firstPatchReply = await request(7, 'engram_patch', patchArgs); const firstPatch = JSON.parse((await firstPatchReply.json() as Reply).result!.content![0]!.text) as { revisionId: string };
+    const repeatedPatchReply = await request(8, 'engram_patch', patchArgs); const repeatedPatch = JSON.parse((await repeatedPatchReply.json() as Reply).result!.content![0]!.text) as { revisionId: string };
+    assert.equal(repeatedPatch.revisionId, firstPatch.revisionId); assert.equal((await owner.vault.history(created.id)).length, 2);
+    const conflictingReplay = await request(9, 'engram_patch', { ...patchArgs, body: 'Different payload' });
+    assert.match((await conflictingReplay.json() as Reply).result!.content![0]!.text, /CONFLICT/);
+    const stale = await request(10, 'engram_patch', { ...patchArgs, idempotencyKey: 'patch-2', body: 'Stale update' });
+    assert.match((await stale.json() as Reply).result!.content![0]!.text, /CONFLICT/);
+    const search = await request(11, 'engram_search', { query: 'shared remote connector', scopes: [{ type: 'workspace', workspaceId: 'remote' }] });
+    assert.match((await search.json() as Reply).result!.content![0]!.text, /Use the shared remote connector/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('remote-web MCP supports stateless server discovery and authorized tool calls for the current ChatGPT tunnel flow', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdb-web-discover-'));
+  try {
+    const owner = new Engram(root); await owner.init({ sqlite: false });
+    const { endpoint, token } = await spawnHttpMcp(root, t, { toolset: 'remote-web' });
+    const discovered = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 1, method: 'server/discover', params: {} });
+    assert.equal(discovered.status, 200); assert.equal(discovered.headers.get('mcp-protocol-version'), '2026-07-28');
+    const discovery = (await discovered.json() as Reply).result as { resultType: string; supportedVersions: string[]; cacheScope: string };
+    assert.equal(discovery.resultType, 'complete'); assert.ok(discovery.supportedVersions.includes('2026-07-28')); assert.equal(discovery.cacheScope, 'private');
+    const listed = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { 'MCP-Protocol-Version': '2026-07-28' });
+    assert.equal(listed.status, 200); assert.equal(listed.headers.get('mcp-session-id'), null);
+    const tools = ((await listed.json() as Reply).result as { tools: Array<{ name: string }> }).tools;
+    assert.ok(tools.some(tool => tool.name === 'engram_search'));
+    const called = await httpPost(endpoint, token, call(3, 'engram_capabilities', {}), { 'MCP-Protocol-Version': '2026-07-28' });
+    assert.equal(called.status, 200); assert.equal((await called.json() as Reply).result?.isError, undefined);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -236,9 +292,25 @@ test('remote capture spool redacts before persistence and retries delivery witho
   t.after(async () => { await new Promise<void>(resolveClose => server.close(() => resolveClose())); await rm(directory, { recursive: true, force: true }); });
   const token = 'remote-bearer-token-that-must-not-be-stored';
   const first = await queueRemoteCapture({ url: `http://127.0.0.1:${address.port}/mcp`, registrationId: 'reg_remote', token, directory, payload: { hook_event_name: 'UserPromptSubmit', session_id: 's-1', prompt: 'remember token=super-secret-value', transcript_path: '/private/transcript.jsonl' } });
-  assert.deepEqual(first, { delivered: 0, queued: 1 });
+  assert.deepEqual(first, { delivered: 0, queued: 1, rejected: 0 });
   const stored = await readFile(join(directory, (await readdir(directory))[0]!), 'utf8');
   assert.doesNotMatch(stored, /super-secret-value|remote-bearer-token|transcript\.jsonl/);
   assert.equal((await drainRemoteCaptureSpool({ token, directory })).queued, 0);
   assert.equal(attempts, 2); assert.match(received, /\[REDACTED\]/);
+});
+
+test('remote capture quarantines permanently rejected entries and continues with later events', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'mdb-remote-reject-')); const received: string[] = [];
+  const server = createServer((request, response) => { const chunks: Buffer[] = []; request.on('data', chunk => chunks.push(chunk)); request.on('end', () => { received.push(Buffer.concat(chunks).toString()); response.writeHead(received.length === 1 ? 400 : 202).end(); }); });
+  await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen)); const address = server.address(); assert.ok(address && typeof address === 'object');
+  t.after(async () => { await new Promise<void>(resolveClose => server.close(() => resolveClose())); await rm(directory, { recursive: true, force: true }); });
+  const url = `http://127.0.0.1:${address.port}/capture`, token = 'remote-bearer-token-that-must-not-be-stored';
+  const first = await queueRemoteCapture({ url, registrationId: 'reg', token, directory, payload: { hook_event_name: 'UserPromptSubmit', session_id: 's-1', prompt: 'rejected event' } });
+  assert.deepEqual(first, { delivered: 0, queued: 0, rejected: 1 });
+  const rejected = await readdir(join(directory, 'rejected')); assert.equal(rejected.filter(name => name.endsWith('.json') && !name.endsWith('.reason.json')).length, 1);
+  const second = await queueRemoteCapture({ url, registrationId: 'reg', token, directory, payload: { hook_event_name: 'UserPromptSubmit', session_id: 's-1', prompt: 'following event' } });
+  assert.deepEqual(second, { delivered: 1, queued: 0, rejected: 0 });
+  assert.equal(received.length, 2); assert.match(received[1]!, /following event/);
+  const delayedPayload = (JSON.parse(received[1]!) as { payload: { _engramCapturedAt?: string } }).payload;
+  assert.ok(Number.isFinite(Date.parse(delayedPayload._engramCapturedAt ?? '')));
 });

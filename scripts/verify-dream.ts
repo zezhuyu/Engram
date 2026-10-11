@@ -7,7 +7,7 @@ const criticPass = !!evaluation && Number(evaluation.metrics?.criticAdversarialR
 const criticGaps = criticPass ? [] : [{ item: 'Real-model Knowledge Critic rejection of unsupported/duplicate/contradictory claims and supported acceptance', status: evaluation ? 'FAIL' as const : 'NOT_RUN' as const, reason: modelSummary }];
 summarize(await runSuite({
   name: 'dream', title: 'Cross-domain dreaming: association retrieval, modes, critic, feedback (M4)',
-  files: ['dist/tests/dream/retrieval.test.js', 'dist/tests/dream/dream.test.js'],
+  files: ['dist/tests/dream/retrieval.test.js', 'dist/tests/dream/dream.test.js', 'dist/tests/dream/learning.test.js'],
   allowedSkips: ['real model'],
   gaps: [
     ...scoringGaps,

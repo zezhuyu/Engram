@@ -23,5 +23,25 @@ Codex `Stop` is not required; use `SessionEnd` or the equivalent finalization th
 ## Isolated-container tier (runs without physical hosts)
 `npm run verify:xhost` builds `ci/xhost/Dockerfile`, creates a dedicated Docker network (`xhost-net`, containers labelled `engram-xhost=1`; only those are ever removed), starts xhost-a (server + TLS), xhost-b and xhost-c, and executes all 14 scenarios, writing `verification/memory/xhost/` and `verification/memory/cross-machine-report.md`. It needs Docker and about five minutes. This is reported as its own tier and does not replace the physical-host run above. Set `XHOST_KEEP=1` to leave the containers up for debugging.
 
+
+## Physical-host kit (the only way REMOTE_CAPTURE can pass)
+
+`REMOTE_CAPTURE` is computed by `npm run verify:release`: it passes only when the container tier is green **and** `verification/memory/physical-hosts.json` says `physicalHostVerified: true`. That file is produced by `scripts/xhost/physical.mjs merge` from reports written on real, separate machines; the merge refuses a single machine, containers, a missing machine id, duplicated or lost events, an unreached step, or a step that was NOT_RUN.
+
+On the server machine (Engram HTTP MCP behind a CA-verifiable TLS certificate, workspace + credential + registration created as in `docs/memory.md`):
+
+```sh
+node scripts/xhost/physical.mjs server --root /srv/engram --run-id RUNID   # after the clients finished
+```
+
+On each client machine (a different physical host; `--cut`/`--restore` are commands you supply that really interrupt and restore this machine's path to the server, e.g. a firewall rule; `--restart-server` optionally restarts the server during the outage):
+
+```sh
+ENGRAM_TOKEN=... node scripts/xhost/physical.mjs client --url https://HOST/mcp --registration REG --token-env ENGRAM_TOKEN \
+  --run-id RUNID --cut 'sudo pfctl -f /etc/pf.block.conf -e' --restore 'sudo pfctl -d' [--restart-server 'ssh server sudo systemctl restart engram']
+```
+
+Copy the client and server JSON files to one place and run `node scripts/xhost/physical.mjs merge client.json [client2.json] server.json`. Revocation/reissue and client-process-kill scenarios stay with the container harness; the physical kit covers TLS verification, unauthorized rejection, online delivery, interruption, offline buffering and fail-open, duplicate/reordered replay, restoration and drain with exactly-once commit. Nothing here has been run on physical hosts yet; the acceptance rule itself is unit-tested (`tests/memory/physical-merge.test.ts`).
+
 ## Blocker recorded
 No second or third physical host is configured or authorized for this session (no SSH hosts in `~/.ssh/config`; the only reachable machine is the development workstation). Nothing was connected to without authorization.

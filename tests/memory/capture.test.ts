@@ -83,6 +83,12 @@ test('recorded Claude Code payloads flow hook -> spool -> drain -> Markdown evid
   recordCase({ suite: 'memory', name: 'claude-payload-pipeline', status: 'PASS' });
 });
 
+test('remote capture keeps the original local enqueue time when delivery is delayed', async t => {
+  const s = await setup(t); const capturedAt = '2026-10-09T20:30:00.000Z';
+  const event = eventFromHostPayload(s.registration, { hook_event_name: 'UserPromptSubmit', session_id: 'offline-session', prompt: 'captured before disconnect', _engramCapturedAt: capturedAt }, new Date('2026-10-09T23:00:00.000Z'));
+  assert.equal(event?.timestamp, capturedAt);
+});
+
 test('secrets are redacted before anything is queued or stored; hidden reasoning is never persisted; excluded content is never recorded', async t => {
   const s = await setup(t); const p = await claudePayloads();
   const secrets = ['sk-live-ABCDEFGH12345678', 'hunter2-secret-pw', 'AKIAABCDEFGHIJKLMNOP', 'ghp_abcdefghijklmnop123456', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEF123456'];

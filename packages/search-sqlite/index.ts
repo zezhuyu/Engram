@@ -7,6 +7,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { ActorContext, Document, Scope, SearchIndexAdapter, SearchInput, SearchResult } from '../core/types.js';
 import { authorizedDocuments, FilesystemSearch, mapBodyLines, searchDocuments, type SearchVault } from '../search-files/index.js';
 import { manifestFor, type ManifestEntry } from '../search-files/manifest.js';
+import { buildFsIndex, fsIndexStatus } from '../search-files/postings.js';
 import { combine, distinctTerms, retrieve, ripgrepAvailable, scanFiles, textSpec, titleMatches, type Prefilter } from '../search-files/retrieve.js';
 import { profileAsync, profileSync } from '../bench/instrumentation.js';
 import { VectorBackend, type SemanticMatch } from '../search-semantic/backend.js';
@@ -31,11 +32,19 @@ export class SQLiteSearch implements SearchIndexAdapter {
         CREATE VIRTUAL TABLE IF NOT EXISTS documents_trigram USING fts5(object_id UNINDEXED,title,body,tokenize='trigram');
         CREATE TABLE IF NOT EXISTS edges(from_id TEXT NOT NULL,to_uri TEXT NOT NULL,relation TEXT NOT NULL,PRIMARY KEY(from_id,to_uri,relation));
         CREATE TABLE IF NOT EXISTS index_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);`);
-      else database.prepare('SELECT count(*) FROM documents_fts').get();
+      // Cheap open probe: count(*) on an FTS5 table walks the whole docsize b-tree (about 160 ms per 5k-row bucket at 100k documents).
+      else { database.prepare('SELECT rowid FROM documents_fts LIMIT 1').get(); database.prepare('SELECT rowid FROM documents_trigram LIMIT 1').get(); }
       return database;
     } catch (error) { database.close(); throw error; }
   }
-  private bucketPath(scope: Scope): string { return join(this.vault.root, '.mdb', 'indexes', scope.type === 'workspace' ? `workspace-${scope.workspaceId}.sqlite` : 'global.sqlite'); }
+  private readonly bucketPaths = new Map<string, string>();
+  /** Memoized per scope: prefilter maps every manifest entry to its bucket, and path.join per entry cost about 50 ms at 100k documents. */
+  private bucketPath(scope: Scope): string {
+    const key = scope.type === 'workspace' ? `w:${scope.workspaceId}` : 'g';
+    let path = this.bucketPaths.get(key);
+    if (path === undefined) { path = join(this.vault.root, '.mdb', 'indexes', scope.type === 'workspace' ? `workspace-${scope.workspaceId}.sqlite` : 'global.sqlite'); this.bucketPaths.set(key, path); }
+    return path;
+  }
   private static readCheckpoint(database: DatabaseSync): number | undefined {
     const get = (key: string) => (database.prepare('SELECT value FROM index_state WHERE key=?').get(key) as { value: string } | undefined)?.value;
     if (get('schema_version') !== '2') return undefined;
@@ -288,7 +297,7 @@ export class SearchEngine implements SearchIndexAdapter {
     const config=await this.vault.config();
     if(config.postgres?.enabled)await this.postgres.rebuild(scope);
     else if (config.sqlite.enabled) await this.sqlite.rebuild(scope); // also persists the manifest
-    else { const manifest = await manifestFor(this.vault); await manifest.sync(); await manifest.save(); }
+    else { const manifest = await manifestFor(this.vault); await manifest.sync(); await manifest.save(); if (this.vault.actor.permissions.includes('*')) await buildFsIndex(this.vault); }
   }
   links(id: string) { return this.files.links(id); }
   backlinks(id: string) { return this.files.backlinks(id); }
@@ -304,7 +313,7 @@ export class SearchEngine implements SearchIndexAdapter {
     const config=await this.vault.config();const base = config.postgres?.enabled ? await this.postgres.health() : config.sqlite.enabled ? await this.sqlite.health() : await this.files.health();
     const vectorPromise=config.postgres?.enabled?this.postgres.vectorStatus():this.vectors.status();
     const vector=await vectorPromise.catch(e => ({ ready: false, reason: (e as Error).message }));
-    return { ...base, vector, manifest: { entries: manifest.entries.size, journalSequence: manifest.sequence, persisted: manifest.persisted, loadedFromDisk: manifest.loadedFromDisk }, ripgrep: ripgrepAvailable() };
+    return { ...base, vector, manifest: { entries: manifest.entries.size, journalSequence: manifest.sequence, persisted: manifest.persisted, loadedFromDisk: manifest.loadedFromDisk }, ripgrep: ripgrepAvailable(), ...(config.postgres?.enabled || config.sqlite.enabled ? {} : { fsIndex: await fsIndexStatus(this.vault) }) };
   }
   async close(): Promise<void> { await this.postgres.close(); }
 }

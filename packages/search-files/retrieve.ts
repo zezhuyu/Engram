@@ -7,8 +7,9 @@ import type { ActorContext, Document, SearchInput, SearchResult } from '../core/
 import { MDBError } from '../core/types.js';
 import { compareSearchHits, finishSearch, keywordGroups, mapBodyLines, prepareSearch, scopeMatches, type SearchVault } from './index.js';
 import { manifestFor, type Manifest, type ManifestEntry } from './manifest.js';
+import { fsIndexLookup, fsIndexServes } from './postings.js';
 
-export interface IndexInfo { /** reading stopped before all candidates were read because none could change the page */ stoppedEarly?: boolean; entries: number; candidates: number; loaded: number; candidateFilesExamined?: number; candidateFilesMatched?: number; ripgrepProcesses?: number; lagObjects?: number; fallbackScopes?: number; textPrefilter: 'none' | 'ripgrep' | 'file-scan' | 'fts5+trigram' | 'mixed'; autoSynced?: boolean }
+export interface IndexInfo { /** reading stopped before all candidates were read because none could change the page */ stoppedEarly?: boolean; entries: number; candidates: number; loaded: number; candidateFilesExamined?: number; candidateFilesMatched?: number; ripgrepProcesses?: number; lagObjects?: number; fallbackScopes?: number; textPrefilter: 'none' | 'ripgrep' | 'file-scan' | 'fts5+trigram' | 'fs-trigram' | 'mixed'; autoSynced?: boolean }
 export interface PrefilterContext { vault: SearchVault; manifest: Manifest; entries: ManifestEntry[]; input: SearchInput; actor: ActorContext }
 /** A prefilter returns a SUPERSET of the entries that can match (undefined = no narrowing). Final matching is always the shared scorer on authorized documents. */
 export type Prefilter = (ctx: PrefilterContext) => Promise<{ ids?: Set<string>; fallback?: string; backend?: string; info?: Partial<IndexInfo>;
@@ -22,12 +23,42 @@ export function assertSearchIdentity(vault: SearchVault, input: SearchInput, act
 export const metadataMatches = (input: SearchInput, e: { kind: string; tags: string[]; status: string; updated: string }): boolean =>
   e.status !== 'deleted' && e.status !== 'tombstone' && (!input.kinds?.length || input.kinds.includes(e.kind)) && (!input.tags?.length || input.tags.every(tag => e.tags.includes(tag))) && (!input.since || e.updated >= input.since) && (!input.until || e.updated <= input.until);
 
+
+/**
+ * Conservative narrowing for a regular expression: one literal that every match of each top-level alternative must contain, or undefined when any
+ * alternative has none of at least 3 characters (then nothing can be narrowed). Only plain printable-ASCII runs are used, lower-cased, so the result is
+ * a superset under the engine's case-insensitive, non-unicode RegExp. Groups, classes, counted repeats and anything unfamiliar give up; a character
+ * followed by ? or * is optional and never part of a literal.
+ */
+export function regexRequiredLiterals(source: string): string[] | undefined {
+  const branches: string[][] = [[]]; let run = '';
+  const endRun = () => { if (run) branches[branches.length - 1]!.push(run); run = ''; };
+  let i = 0; const skipQuantifiers = () => { while (source[i + 1] === '?' || source[i + 1] === '*' || source[i + 1] === '+') i++; };
+  for (; i < source.length; i++) {
+    let ch = source[i]!; let literal = false;
+    if (ch === '\\') { const next = source[++i]; if (next === undefined) return undefined; if (/[^A-Za-z0-9]/.test(next) && next >= ' ' && next <= '~') { ch = next; literal = true; } else if (/[dDwWsSbB]/.test(next)) { endRun(); skipQuantifiers(); continue; } else return undefined; }
+    else if (ch === '(' || ch === ')' || ch === '[' || ch === ']' || ch === '{' || ch === '}') return undefined;
+    else if (ch === '|') { endRun(); branches.push([]); continue; }
+    else if (ch === '.' || ch === '^' || ch === '$') { endRun(); skipQuantifiers(); continue; }
+    else if (ch === '?' || ch === '*' || ch === '+') return undefined; // a quantifier with no atom, or one we did not consume below
+    else literal = ch >= ' ' && ch <= '~';
+    const quantifier = source[i + 1];
+    if (quantifier === '?' || quantifier === '*') { endRun(); i++; if (source[i + 1] === '?') i++; continue; } // optional atom: contributes nothing
+    if (!literal) { endRun(); continue; }
+    run += ch.toLowerCase();
+    if (quantifier === '+') { endRun(); i++; if (source[i + 1] === '?') i++; }
+  }
+  endRun();
+  const result: string[] = [];
+  for (const runs of branches) { const best = runs.reduce((a, b) => b.length > a.length ? b : a, ''); if (best.length < 3 || best.includes('\n')) return undefined; result.push(best); }
+  return [...new Set(result)];
+}
 /** Terms a document must contain (per OR-group) to possibly match; undefined when the query cannot be narrowed by substring (regex, negative-only, multi-line). */
 export interface TextSpec { groups: string[][]; caseSensitive: boolean }
 export function textSpec(input: SearchInput): TextSpec | undefined {
   if (!input.query.trim()) return undefined;
   const grep = (input.mode ?? 'auto') === 'grep';
-  if (grep && input.regex) return undefined;
+  if (grep && input.regex) { const branches = regexRequiredLiterals(input.query); return branches ? { groups: branches.map(literal => [literal]), caseSensitive: false } : undefined; }
   const caseSensitive = !!input.caseSensitive && grep;
   let groups: string[][];
   if (grep) groups = [[caseSensitive ? input.query : input.query.toLocaleLowerCase()]];
@@ -209,6 +240,15 @@ export const filesPrefilter: Prefilter = async ({ vault, entries, input, actor }
   if (!spec) return { info: { textPrefilter: 'none' } };
   const owner = actor.permissions.includes('*');
   const terms = distinctTerms(spec);
+  // Persistent trigram index (built by `index rebuild` in filesystem-only mode). Absent or damaged: fall through to ripgrep / file scan and say why.
+  let indexNote: string | undefined;
+  if (fsIndexServes(terms)) {
+    try {
+      const found = await profileAsync('candidate.discovery.fs_trigram', () => fsIndexLookup(vault.root, entries, terms, spec.caseSensitive));
+      for (const term of terms) { const titles = titleMatches(entries, term, spec.caseSensitive); const set = found.byTerm.get(term) ?? new Set<string>(); for (const id of titles) set.add(id); found.byTerm.set(term, set); }
+      return { ids: combine(spec, found.byTerm), info: { textPrefilter: 'fs-trigram', lagObjects: found.stale } };
+    } catch (error) { if (!(error instanceof MDBError && error.code === 'CAPABILITY_UNAVAILABLE')) indexNote = `filesystem trigram index unusable (${error instanceof Error ? error.message : String(error)}); scanned files instead`; }
+  }
   let useRg = owner && ripgrepAvailable() && terms.every(rgSafe);
   let byTerm: Map<string, Set<string>>;
   let rgInfo: Partial<IndexInfo> = {};
@@ -217,5 +257,5 @@ export const filesPrefilter: Prefilter = async ({ vault, entries, input, actor }
     catch { useRg = false; byTerm = await scanFiles(vault.root, entries, spec); }
   } else byTerm = await scanFiles(vault.root, entries, spec);
   for (const term of terms) { const titles = titleMatches(entries, term, spec.caseSensitive); const set = byTerm.get(term) ?? new Set<string>(); for (const id of titles) set.add(id); byTerm.set(term, set); }
-  return { ids: combine(spec, byTerm), info: { textPrefilter: useRg ? 'ripgrep' : 'file-scan', ...rgInfo } };
+  return { ids: combine(spec, byTerm), ...(indexNote ? { fallback: indexNote } : {}), info: { textPrefilter: useRg ? 'ripgrep' : 'file-scan', ...rgInfo } };
 };

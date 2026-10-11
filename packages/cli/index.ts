@@ -3,11 +3,12 @@ import { queryCommand, lineGrep, STREAM_COMMANDS, STREAMED } from './query.js';
 import { detectUnix, unixMain } from './unix.js';
 import { resolve } from 'node:path';
 import { initializeProject } from '../project-init.js';
+import { touchActivity } from '../adaptive/activity.js';
 import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
 import { createRegistration, revokeRegistration } from '../memory/capture.js';
 import { drainRemoteCaptureSpool, queueRemoteCapture } from '../memory/remote-spool.js';
 import type { JobKind } from '../intelligence/index.js';
-import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput } from '../sdk/index.js';
+import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput } from '../sdk/index.js';
 
 /** Builds the vault-configured built-in provider (openai, ollama, openai-compatible). Returns undefined, with a stderr note, when unavailable. */
 async function configuredProvider(root: string): Promise<ModelProvider | undefined> {
@@ -40,7 +41,11 @@ session start --scope SCOPE | observe --session ID --body TEXT | end --session I
 profile show | propose --scope SCOPE | proposals | approve ID [--confirm-sensitive] [--confirm-hypothesis] | reject ID --reason TEXT | reconcile
 profile correct --key SLUG --claim TEXT --category preference|goal|interest|capability|working_style|knowledge_gap [--workspace W] [--reason T] [--source URI --revision R --span QUOTE] | profile project
 intelligence run --job index|profile|wiki|memory|reflect|dream
-dream run [--mode micro|deep|strategic] [--background] | dream feedback ID --outcome tested|validated|rejected|superseded --note T [--by user|experiment --evidence URI@REV] | dream status | dream list [--status S]
+intelligence run --snapshot now --stage daily [--key IDEMPOTENCY_KEY]   (sealed-snapshot daily cycle: workspaces -> global profile -> dream)
+intelligence schedule status|configure|pause|resume|tick|worker|service launchd|systemd|events   configure: --enable|--disable --timezone IANA --time HH:MM --quiet-start HH:MM --quiet-end HH:MM --mode adaptive|fixed --auto-accept none|low-risk --include A,B --exclude C
+intelligence cycles list | cycles show ID
+workspace daily list --workspace ID [--from DATE --to DATE] | daily show --workspace ID --date YYYY-MM-DD | changes --workspace ID --since DATE
+dream rate ID --label useful|not_useful|duplicate|incorrect|needs_evidence --note T | dream learning status [--as-of-version N] | dream learning reset --note T | dream run [--mode micro|deep|strategic] [--background] | dream feedback ID --outcome tested|validated|rejected|superseded --note T [--by user|experiment --evidence URI@REV] | dream status | dream list [--status S]
 jobs status | index status|rebuild|sync|verify
 query --json '{AST}' | --file F [--format table|json|jsonl|text] [--explain] | query save NAME --scope S --file F | query capabilities
 cat ID | grep PATTERN --path ID | head|tail -n N | cut -c R | sed SCRIPT | trim | split -d D | replace A B | uniq | distinct | sort --by f:desc | select|pluck|count|sum|avg|min|max   (stream aliases read JSONL from stdin)
@@ -65,7 +70,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['json', 'help', 'no-sqlite', 'postgres', 'project', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -134,6 +139,9 @@ function parseScope(flags: Flags): Scope {
 async function body(flags: Flags): Promise<string> { return text(flags, 'file') ? readFile(resolve(text(flags, 'file')!), 'utf8') : required(text(flags, 'body'), '--body or --file'); }
 function jsonInput(flags: Flags): Record<string, unknown> { const value = JSON.parse(text(flags, 'input', '{}')!); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new MDBError('INVALID_ARGUMENT', '--input must be a JSON object'); return value; }
 
+function summarizeRun(r: { cycle?: { id: string; state: string; watermark: number; error?: { category: string; message: string }; workspaces: Record<string, { status: string; outcome?: string }>; global: { status: string }; dream: { status: string; proposals: unknown[] } }; ran: boolean; reason?: string }): unknown {
+  const c = r.cycle; return { ran: r.ran, ...(r.reason ? { reason: r.reason } : {}), ...(c ? { cycle: c.id, state: c.state, watermark: c.watermark, workspaces: Object.fromEntries(Object.entries(c.workspaces).map(([k, w]) => [k, w.outcome ?? w.status])), global: c.global.status, dream: c.dream.status, dreams: c.dream.proposals.length, ...(c.error ? { error: `${c.error.category}: ${c.error.message}` } : {}) } : {}) };
+}
 export async function execute(argv: string[]): Promise<unknown> {
   const { args, flags } = parse(argv);
   const [command, sub, third, fourth] = args;
@@ -163,6 +171,8 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'recover': return v.recover();
     case 'reconcile': return v.reconcile();
     case 'workspace':
+      if (sub === 'daily') { const a = client.adaptive; const ws = required(text(flags, 'workspace'), '--workspace'); if (third === 'show') return a.dailyShow(ws, required(text(flags, 'date'), '--date')); return a.dailyList(ws, { ...(text(flags, 'from') ? { from: text(flags, 'from')! } : {}), ...(text(flags, 'to') ? { to: text(flags, 'to')! } : {}) }); }
+      if (sub === 'changes') return client.adaptive.changesSince(required(text(flags, 'workspace'), '--workspace'), required(text(flags, 'since'), '--since'));
       if (sub === 'create') return v.createWorkspace(required(third, 'workspace ID'), text(flags, 'description', ''));
       if (sub === 'list') return v.listWorkspaces();
       if (sub === 'info') return (await v.listWorkspaces()).find(w => w.id === required(third, 'workspace ID')) ?? null;
@@ -182,7 +192,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'diff': return v.diff(id(), required(third, 'from revision'), required(fourth, 'to revision'));
     case 'restore': return v.restore(id(), required(third, 'revision to restore'), revision());
     case 'ingest': return v.ingest(resolve(id()), parseScope(flags));
-    case 'grep': case 'search': return client.query(search());
+    case 'grep': case 'search': return await client.query(search());
     case 'context': return client.context({ ...search(), budgetTokens: number(flags, 'budget-tokens') });
     case 'links': return client.search.links(id());
     case 'backlinks': return client.search.backlinks(id());
@@ -202,10 +212,36 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'reconcile') return engine.reconcileProfile();
       if (sub === 'proposals') return engine.proposals();
       break;
-    case 'intelligence': if (sub === 'run') return engine.run({ job: text(flags, 'job') as JobKind | undefined, limit: number(flags, 'limit'), signal: abort.signal }); if (sub === 'proposals') return engine.proposals(); break;
+    case 'intelligence':
+      if (sub === 'run' && text(flags, 'snapshot')) {
+        if (text(flags, 'snapshot') !== 'now') throw new MDBError('INVALID_ARGUMENT', '--snapshot must be now'); if ((text(flags, 'stage') ?? 'daily') !== 'daily') throw new MDBError('INVALID_ARGUMENT', '--stage must be daily');
+        return summarizeRun(await client.adaptive.runCycle({ kind: 'manual', ...(text(flags, 'key') ? { idempotencyKey: text(flags, 'key')! } : {}), signal: abort.signal }));
+      }
+      if (sub === 'schedule') {
+        const a = client.adaptive; const action = third ?? 'status';
+        if (action === 'status') return a.status();
+        if (action === 'pause') return a.pause(); if (action === 'resume') return a.resume();
+        if (action === 'events') return a.events(number(flags, 'limit') ?? 50);
+        if (action === 'worker') { const summary = await a.worker({ intervalMs: (number(flags, 'interval-s') ?? 300) * 1000, signal: abort.signal, ...(number(flags, 'max-ticks') ? { maxTicks: number(flags, 'max-ticks')! } : {}), onTick: t => process.stderr.write(`${JSON.stringify(t)}\n`) }); return summary; }
+        if (action === 'service') { if (fourth !== 'launchd' && fourth !== 'systemd') throw new MDBError('INVALID_ARGUMENT', 'schedule service needs launchd or systemd'); const kind = fourth; const def = a.serviceDefinition(kind, { node: process.execPath, script: process.argv[1] ?? 'mdb', root, intervalSeconds: number(flags, 'interval-s') ?? 300 }); return { note: 'Printed only; nothing was installed or started.', filename: def.filename, install: def.install, content: def.content }; }
+        if (action === 'tick') { const r = await a.tick(undefined, { signal: abort.signal }); return { decision: r.decision, ...(r.run ? summarizeRun(r.run) as object : {}) }; }
+        if (action === 'configure') {
+          const patch: Record<string, unknown> = {}; if (flags.enable) patch.enabled = true; if (flags.disable) patch.enabled = false;
+          if (text(flags, 'timezone')) patch.timezone = text(flags, 'timezone'); if (text(flags, 'time')) patch.targetLocalTime = text(flags, 'time'); if (text(flags, 'quiet-start')) patch.quietStart = text(flags, 'quiet-start'); if (text(flags, 'quiet-end')) patch.quietEnd = text(flags, 'quiet-end');
+          if (text(flags, 'micro')) { const m = text(flags, 'micro'); if (m !== 'on' && m !== 'off') throw new MDBError('INVALID_ARGUMENT', '--micro must be on or off'); patch.micro = { ...(await a.store.config()).micro, enabled: m === 'on', ...(number(flags, 'micro-debounce-minutes') ? { debounceMinutes: number(flags, 'micro-debounce-minutes')! } : {}), ...(number(flags, 'micro-max-per-day') ? { maxPerDay: number(flags, 'micro-max-per-day')! } : {}) }; }
+          if (text(flags, 'mode')) patch.mode = text(flags, 'mode'); if (text(flags, 'auto-accept')) patch.autoAccept = text(flags, 'auto-accept'); if (text(flags, 'inactivity-minutes')) patch.inactivityMinutes = Number(text(flags, 'inactivity-minutes'));
+          if (list(flags, 'include')) patch.workspaces = { include: list(flags, 'include')!, exclude: list(flags, 'exclude') ?? [] }; else if (list(flags, 'exclude')) patch.workspaces = { include: (await a.store.config()).workspaces.include, exclude: list(flags, 'exclude')! };
+          return a.configure(patch as never);
+        }
+        throw new MDBError('INVALID_ARGUMENT', 'schedule action must be status, configure, pause, resume, tick, worker, service or events');
+      }
+      if (sub === 'cycles') { const a = client.adaptive; if (third === 'show') { const found = await a.cycle(required(fourth, 'cycle ID')); if (!found) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Cycle not found'); return found; } return (await a.cycles()).map(c => ({ id: c.id, kind: c.kind, localDate: c.localDate, state: c.state, watermark: c.watermark, workspaces: Object.keys(c.workspaces).length, dream: c.dream.status, updatedAt: c.updatedAt, ...(c.error ? { error: `${c.error.category}: ${c.error.message}` } : {}) })); }
+      if (sub === 'run') return engine.run({ job: text(flags, 'job') as JobKind | undefined, limit: number(flags, 'limit'), signal: abort.signal }); if (sub === 'proposals') return engine.proposals(); break;
     case 'dream':
       if (sub === 'run') { await engine.enqueue('dream', { mode: (text(flags, 'mode') ?? 'micro') as DreamMode, ...(flags.background ? { background: true } : {}), ...(flags.scope || flags.workspace ? { scope: parseScope(flags) } : {}) }); return engine.run({ job: 'dream', limit: number(flags, 'limit'), signal: abort.signal }); }
       if (sub === 'feedback') return recordFeedback(client.vault, required(third, 'discovery ID'), { outcome: required(text(flags, 'outcome'), '--outcome') as DiscoveryOutcome, note: required(text(flags, 'note'), '--note'), ...(text(flags, 'by') ? { validatedBy: text(flags, 'by') as 'user' | 'experiment' } : {}), ...(list(flags, 'evidence') ? { evidence: list(flags, 'evidence')!.map(item => { const [uri, revisionId] = item.split('@'); return { uri: required(uri, 'evidence uri'), revisionId: required(revisionId, 'evidence revision') }; }) } : {}), ...(list(flags, 'reused-by') ? { reusedBy: list(flags, 'reused-by')! } : {}) });
+      if (sub === 'rate') { const r = await rateDiscovery(client.vault, required(third, 'discovery ID'), { label: required(text(flags, 'label'), '--label') as RankingLabel, note: required(text(flags, 'note'), '--note') }); await client.adaptive.store.appendEvent({ type: 'feedback_applied', label: required(text(flags, 'label'), '--label'), family: familyOf(r.document) }); return { id: r.document.id, revisionId: r.document.revisionId, feedbackVersion: r.version }; }
+      if (sub === 'learning') { if (third === 'reset') return { resetAtVersion: await resetLearning(client.vault, required(text(flags, 'note'), '--note')) }; if (!third || third === 'status') return learnedParams(client.vault, ...(number(flags, 'as-of-version') ? [{ asOfVersion: number(flags, 'as-of-version')! }] : [])); throw new MDBError('INVALID_ARGUMENT', 'dream learning status|reset'); }
       if (sub === 'status') return { stats: await readStats(client.vault), stale: await staleDiscoveries(client.vault), jobs: (await engine.jobs()).filter(j => j.kind === 'dream').map(j => ({ id: j.id, status: j.status, mode: j.input.mode ?? 'micro', error: j.error, trace: j.trace })) };
       if (sub === 'list') { const docs = (await client.listDocuments()).filter(d => d.kind === 'discovery' && (!text(flags, 'status') || d.status === text(flags, 'status'))); return docs.map(d => ({ id: d.id, title: d.title, status: d.status, mode: d.metadata.mode, subtype: d.metadata.subtype, novelty: d.metadata.novelty, critic: d.metadata.critic })); }
       break;
@@ -238,7 +274,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); return { root: restored.root }; } return v.backup(resolve(id()));
   }
   throw new MDBError('INVALID_ARGUMENT', 'Unknown command. Run mdb help.');
-  } finally { process.removeListener('SIGINT', interrupt); }
+  } finally { process.removeListener('SIGINT', interrupt); if (!['init', 'help', 'intelligence'].includes(command)) await touchActivity(root); }
 }
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const unix = detectUnix(argv); if (unix) { process.exitCode = await unixMain(unix.command, unix.rest, unix.root); process.stdin.destroy(); return; } // Unix-style text tools: own option parsing and exit codes (docs/unix.md)

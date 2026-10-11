@@ -4,6 +4,7 @@ import { MDBError, type Document, type Evidence } from '../../core/types.js';
 import { objectIdFromUri, type Vault } from '../../core/vault.js';
 import { atomicWrite, safePath, withVaultLock } from '../../storage-local/index.js';
 import { loadDocuments, readableEntries } from '../corpus.js';
+import { appendFeedback } from './learning.js';
 
 /** candidate -> tested -> validated | rejected ; any -> superseded. A validated discovery needs the user's confirmation or a recorded experiment result. */
 export type DiscoveryOutcome = 'tested' | 'validated' | 'rejected' | 'superseded';
@@ -38,6 +39,7 @@ export async function recordFeedback(vault: Vault, id: string, input: { outcome:
     const stats = await readStats(vault); const family = familyOf(doc); const s = (stats[family] ??= { validated: 0, rejected: 0, tested: 0 });
     s[input.outcome as 'validated' | 'rejected' | 'tested']++; await atomicWrite(vault.root, STATS, JSON.stringify(stats, null, 1));
   });
+  if (['validated', 'rejected', 'tested'].includes(input.outcome)) await appendFeedback(vault, { kind: 'feedback', discoveryId: doc.id, family: familyOf(doc), label: input.outcome, source: input.validatedBy === 'experiment' ? 'experiment' : 'human', actorId: vault.actor.actorId, note: input.note.slice(0, 200) });
   return updated;
 }
 

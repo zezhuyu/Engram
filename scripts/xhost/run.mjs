@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+const IMAGE = 'engram-xhost:test';
 const OUT = 'verification/memory/xhost'; const NET = 'xhost-net'; const SUBNET = '172.31.77.0/24'; const LABEL = 'engram-xhost=1';
 const IP = { 'xhost-a': '172.31.77.10', 'xhost-b': '172.31.77.11', 'xhost-c': '172.31.77.12' };
 const secrets = new Set(); const results = []; const evidence = [];
@@ -40,9 +41,9 @@ async function setup() {
   const ctx = await fs.mkdtemp(path.join(os.tmpdir(), 'xhost-ctx-'));
   for (const f of ['dist', 'bin', 'package.json', 'node_modules']) await fs.cp(f, path.join(ctx, f), { recursive: true });
   await fs.mkdir(path.join(ctx, 'scripts'), { recursive: true }); await fs.cp('scripts/xhost', path.join(ctx, 'scripts/xhost'), { recursive: true }); await fs.copyFile('ci/xhost/Dockerfile', path.join(ctx, 'Dockerfile'));
-  const build = docker(['build', '-q', '-t', 'engram-xhost:test', ctx], { timeout: 600000 }); if (build.code !== 0) throw new Error(`image build failed: ${build.err}`); await fs.rm(ctx, { recursive: true, force: true });
+  const build = docker(['build', '-q', '-t', IMAGE, ctx], { timeout: 600000 }); if (build.code !== 0) throw new Error(`image build failed: ${build.err}`); await fs.rm(ctx, { recursive: true, force: true });
   if (docker(['network', 'create', '--driver', 'bridge', '--subnet', SUBNET, '--label', LABEL, NET]).code !== 0) throw new Error('network create failed');
-  for (const [name, ip] of Object.entries(IP)) { const r = docker(['run', '-d', '--name', name, '--hostname', name, '--network', NET, '--ip', ip, '--label', LABEL, 'engram-xhost:test']); if (r.code !== 0) throw new Error(`container ${name}: ${r.err}`); }
+  for (const [name, ip] of Object.entries(IP)) { const r = docker(['run', '-d', '--name', name, '--hostname', name, '--network', NET, '--ip', ip, '--label', LABEL, IMAGE]); if (r.code !== 0) throw new Error(`container ${name}: ${r.err}`); }
   // CA, server certificate, a rogue-CA certificate, and a certificate for the wrong host name. Private keys stay on xhost-a.
   const pki = `set -e; cd /etc/xhost
 openssl ecparam -name prime256v1 -genkey -noout -out ca.key; openssl req -x509 -new -key ca.key -sha256 -days 2 -subj "/CN=xhost test CA" -out ca.pem
@@ -154,8 +155,11 @@ out.forEach((t,i)=>fs.writeFileSync(p.join(d,String(i+1).padStart(14,'0')+'-shuf
   stopServer(); check(await waitLocal(false), 'X7: server process is really down (loopback upstream refuses)'); startServer(); check(await waitLocal(true), 'X7: server process restarted and answers (401 without token)');
   for (const k of ['b', 'c']) docker(['network', 'connect', '--ip', IP[`xhost-${k}`], NET, `xhost-${k}`]);
   check(await waitServer(true), 'X7/X8: server restarted while clients were offline; connectivity restored and TLS endpoint answers');
-  const drain = (k, token = S[k].cred.token) => { let delivered = 0, last; for (let i = 0; i < 30; i++) { const r = dx(`xhost-${k}`, `${m} memory drain-remote --token-env ENGRAM_TOKEN --json`, { env: { ...env(k), ENGRAM_TOKEN: token }, timeout: 120000 }); try { last = JSON.parse(r.out.trim().split('\n').pop()); } catch { last = { error: r.out + r.err }; } delivered += last.delivered ?? 0; if (last.queued === 0 || !last.delivered) break; } return { delivered, last }; };
-  const dB = drain('b'), dC = drain('c'); await raw('X8-drain', JSON.stringify({ dB, dC }));
+  // The server throttles each credential (120 requests/minute by default) and the client stops on 429 and keeps its backlog, so a large backlog drains over several windows.
+  // `patient` waits out a throttled pass (no progress while events remain) before giving up; it never changes what is delivered, only how long this harness is willing to wait.
+  const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const drain = (k, token = S[k].cred.token, patient = false) => { let delivered = 0, last, stalls = 0; for (let i = 0; i < (patient ? 200 : 30); i++) { const r = dx(`xhost-${k}`, `${m} memory drain-remote --token-env ENGRAM_TOKEN --json`, { env: { ...env(k), ENGRAM_TOKEN: token }, timeout: 120000 }); try { last = JSON.parse(r.out.trim().split('\n').pop()); } catch { last = { error: r.out + r.err }; } delivered += last.delivered ?? 0; if (last.queued === 0) break; if (!last.delivered) { if (!patient || ++stalls > 4) break; pause(20000); } else stalls = 0; } return { delivered, last }; };
+  const dB = drain('b', undefined, true), dC = drain('c', undefined, true); await raw('X8-drain', JSON.stringify({ dB, dC }));
   check(dB.last.queued === 0 && dC.last.queued === 0, 'X8: both client buffers drain to zero after restoration', { dB: dB.last, dC: dC.last });
   const s1 = await settled();
   await raw('X9-server-state', JSON.stringify({ count: s1.events.length, journal: s1.journal, serverSpool: s1.serverSpool }));
@@ -216,7 +220,8 @@ out.forEach((t,i)=>fs.writeFileSync(p.join(d,String(i+1).padStart(14,'0')+'-shuf
 }
 try { await main(); } catch (e) { scenario('HARNESS', 'harness error'); check(false, String(e.stack ?? e)); }
 finally {
-  if (process.env.XHOST_KEEP !== '1') { for (const n of ['xhost-a', 'xhost-b', 'xhost-c']) docker(['rm', '-f', n]); docker(['network', 'rm', NET]); }
+  // Always remove everything this run created, including the image it built (layers on the Docker VM disk are never reclaimed otherwise). XHOST_KEEP=1 keeps it for debugging.
+  if (process.env.XHOST_KEEP !== '1') { for (const n of ['xhost-a', 'xhost-b', 'xhost-c']) docker(['rm', '-f', '-v', n]); docker(['network', 'rm', NET]); docker(['rmi', '-f', IMAGE]); }
   const summary = { tier: 'ISOLATED_CONTAINERS', physicalHosts: false, runAt: new Date().toISOString(), docker: docker(['version', '--format', '{{.Server.Version}}']).out.trim(), topology: { network: NET, subnet: SUBNET, hosts: IP, tls: 'test CA (ECDSA P-256), node TLS terminator -> loopback HTTP upstream', ports: { valid: 8443, rogueCa: 8444, wrongHost: 8445 } }, scenarios: results };
   await fs.writeFile(path.join(OUT, 'results.json'), redact(JSON.stringify(summary, null, 2)) + '\n');
   const failed = results.filter(r => r.status === 'FAIL'); console.log(`\n${results.map(r => `${r.id}:${r.status}`).join(' ')}`); process.exitCode = failed.length ? 1 : 0;

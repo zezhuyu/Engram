@@ -2,6 +2,10 @@
 
 ## Unreleased - memory & dream update (M0-M5)
 
+### Added (adaptive background intelligence)
+- **Adaptive daily cycle** (`packages/adaptive`, `docs/adaptive-intelligence.md`): sealed committed-journal snapshots, workspace-first DAG (workspace daily summaries + scoped insights -> global profile roots -> Dream over the full authorized corpus), 03:00-local scheduler with conservative idle-window learning, cooperative pause/resume, purge propagation, crash-safe per-workspace cursors. CLI `mdb intelligence schedule|cycles|run --snapshot now`, `mdb workspace daily|changes`; SDK `engram.adaptive`; lane `verify:adaptive`; gates `ADAPTIVE_SCHEDULER`, `WORKSPACE_DAILY_SUMMARY`, `WORKSPACE_SCOPED_INSIGHT`, `GLOBAL_PROFILE_CONSOLIDATION`.
+- `IntelligenceEngine`: optional sealed-snapshot input (`job.input.snapshot` + resolver), `run({ jobId })`, `retryNow`; proposals carry `metadata.jobId`. All additive.
+
 ### Added
 - **Passive memory (M1):** host hooks (Claude Code, Codex) record sessions into a redacted, bounded, fail-open spool; owner-registered identity binding; recall tools (`recent`, `timeline`, `time_range`, `search`, `get`, `insight search`) with progressive disclosure and token budgets; `mdb capabilities`.
 - **Evidence-backed user insights (M2):** evidence classes (explicit, user_conversation, wiki_exposure, agent_observation, dream), hypothesis confirmation, conflict handling, `mdb profile correct|project|reconcile`, user-private storage with applicability scope.

@@ -25,13 +25,14 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   assert.ok(manifest.files.length > 10);
   assert.equal(manifest.workloads.length, 12);
   const outputDir = path.join(temp, 'reports');
-  const replayOutput = JSON.parse(run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir)) as { parityAll: boolean; corpusId: string };
-  assert.equal(replayOutput.parityAll, true);
+  const replayOutput = JSON.parse(run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir)) as { parityAll: boolean; parityComplete: boolean; corpusId: string };
+  assert.equal(replayOutput.parityAll, true); assert.equal(replayOutput.parityComplete, true);
   assert.equal(replayOutput.corpusId, a.corpusId);
-  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number } };
+  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number }; parity: Record<string, boolean | null>; parityComplete: boolean };
   assert.ok(Object.keys(report.instrumentation).some(key => key.includes('candidate.discovery')));
   assert.ok(report.queryPlans.length > 0);
   assert.ok(report.memory.allocatedBytes > 0);
+  assert.ok(Object.values(report.parity).every(value => value === true)); assert.equal(report.parityComplete, true);
   assert.throws(() => run('cleanup', '--root', first, '--confirm-id', 'wrong'), /Refusing cleanup/);
   run('cleanup', '--root', first, '--confirm-id', a.corpusId);
 });

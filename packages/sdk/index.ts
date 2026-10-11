@@ -5,6 +5,7 @@ import { capabilities as discoverCapabilities } from '../memory/capabilities.js'
 import { OWNER, type EmbeddingProvider, type ActorContext, type ModelProvider, type ObjectStore, type PatchInput, type PutInput, type SearchInput } from '../core/types.js';
 import { SearchEngine } from '../search-files/index.js';
 import { QueryApi } from '../query/index.js';
+import { AdaptiveIntelligence } from '../adaptive/index.js';
 import { IntelligenceEngine } from '../intelligence/index.js';
 import { listSkills, getSkill, runSkill } from '../skills/index.js';
 export * from '../core/types.js';
@@ -14,7 +15,8 @@ export { Vault } from '../core/vault.js';
 export { S3ObjectStore, createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 export * from '../memory/index.js';
 export { CATEGORIES as INSIGHT_CATEGORIES, evaluateInsight, correctInsight, projectProfile, commitInsight, isInsight, type InsightCategory, type InsightEval } from '../intelligence/insights.js';
-export { recordFeedback, staleDiscoveries, readStats, successRate, type DiscoveryOutcome } from '../intelligence/dream/lifecycle.js';
+export { rateDiscovery, resetLearning, learnedParams, readFeedbackLog, type RankingLabel, type FeedbackEvent, type LearnedParams } from '../intelligence/dream/learning.js';
+export { recordFeedback, familyOf, staleDiscoveries, readStats, successRate, type DiscoveryOutcome } from '../intelligence/dream/lifecycle.js';
 export { budgetsFor, planMicro, planDeep, planStrategic, domainOf, KNOWLEDGE_KINDS } from '../intelligence/dream/plan.js';
 export type { DreamMode, Trace as DreamTrace } from '../intelligence/dream/types.js';
 export { classifySource, SOURCE_PRIORITY, type SourceClass } from '../core/evidence.js';
@@ -27,6 +29,7 @@ export { ProviderError, CancelledError } from '../models/errors.js';
 export { criticize, isSensitive, type CriticResult } from '../intelligence/critic.js';
 
 /** Actor-bound API: hosts assign identity once, never from document/model arguments. */
+export { AdaptiveIntelligence, touchActivity } from '../adaptive/index.js';
 export class Engram {
   readonly vault: Vault;
   readonly search: SearchEngine;
@@ -35,7 +38,11 @@ export class Engram {
   readonly memory: MemoryRecall;
   /** Typed query AST engine (operators, joins, graph, time, saved queries). Same engine behind `mdb query` and the MCP mdb_query tool. */
   readonly queries: QueryApi;
+  private readonly modelProvider: ModelProvider | undefined; private adaptiveCache: AdaptiveIntelligence | undefined;
+  /** Adaptive background intelligence (daily sealed-snapshot cycles). Owner only. */
+  get adaptive(): AdaptiveIntelligence { return this.adaptiveCache ??= new AdaptiveIntelligence(this.vault, this.modelProvider); }
   constructor(root: string = resolveRoot(), actor: ActorContext = OWNER, provider?: ModelProvider, options: { embedder?: EmbeddingProvider; store?: ObjectStore; env?: Record<string,string|undefined> } = {}) {
+    this.modelProvider = provider;
     this.vault = new Vault(root, actor, options.store ? { store: options.store } : {});
     this.search = new SearchEngine(this.vault, options);
     this.intelligence = new IntelligenceEngine(this.vault, provider);

@@ -8,6 +8,7 @@ import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js'
 const FILE = '.mdb/http-credentials.json';
 const actorPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
 const permissionPattern = /^(?:workspace:[A-Za-z0-9][A-Za-z0-9_-]{0,99}:(?:read|write|promote|\*)|global:(?:wiki|shared|discoveries|profile|\*):(?:read|write|promote|\*))$/;
+export const isValidRemotePermission = (permission: string): boolean => permissionPattern.test(permission) && !permission.includes('*');
 type Credential = { id: string; tokenHash: string; actorId: string; permissions: string[]; createdAt: string };
 export interface CredentialAuditEvent { at: string; action: 'created' | 'revoked' | 'rotated' | 'authorization_failed'; actorId?: string; credentialId?: string; replacementId?: string; permissions?: string[] }
 type CredentialStore = { version: 1; credentials: Credential[]; audit?: CredentialAuditEvent[] };
@@ -28,6 +29,16 @@ async function readStore(root: string): Promise<CredentialStore> {
 
 export async function hasHttpCredentials(root: string): Promise<boolean> {
   return (await readStore(root)).credentials.length > 0;
+}
+
+/** Record one failed HTTP auth attempt after all configured credential types fail. */
+export async function recordHttpAuthorizationFailure(root: string): Promise<void> {
+  await withVaultLock(root, async () => {
+    const store = await readStore(root);
+    if (!store.credentials.length) return;
+    store.audit = appendAudit(store, { at: new Date().toISOString(), action: 'authorization_failed' });
+    await atomicWrite(root, FILE, JSON.stringify(store, null, 2));
+  });
 }
 
 export async function credentialAudit(owner: Vault): Promise<CredentialAuditEvent[]> {
@@ -80,10 +91,10 @@ export async function rotateHttpCredential(owner: Vault, credentialId: string, p
   return { id, token };
 }
 
-export async function resolveHttpActor(root: string, authorization: string | undefined, legacyToken?: string, legacyActor: ActorContext = { actorId: 'mcp-anonymous', permissions: [] }): Promise<ActorContext | undefined> {
+export async function resolveHttpActor(root: string, authorization: string | undefined, legacyToken?: string, legacyActor: ActorContext = { actorId: 'mcp-anonymous', permissions: [] }, auditFailure = true): Promise<ActorContext | undefined> {
   const match = /^Bearer ([^\s]+)$/.exec(authorization ?? '');
   if (!match) {
-    if (await hasHttpCredentials(root)) await withVaultLock(root, async () => { const latest = await readStore(root); latest.audit = appendAudit(latest, { at: new Date().toISOString(), action: 'authorization_failed' }); await atomicWrite(root, FILE, JSON.stringify(latest, null, 2)); });
+    if (auditFailure) await recordHttpAuthorizationFailure(root);
     return undefined;
   }
   const token = match[1]!; const digest = Buffer.from(hash(token));
@@ -91,13 +102,13 @@ export async function resolveHttpActor(root: string, authorization: string | und
   let resolved: ActorContext | undefined;
   for (const credential of store.credentials) {
     const expected = Buffer.from(credential.tokenHash);
-    if (expected.length === digest.length && timingSafeEqual(expected, digest)) resolved = { actorId: credential.actorId, permissions: [...credential.permissions], credentialBound: true };
+    if (expected.length === digest.length && timingSafeEqual(expected, digest)) resolved = { actorId: credential.actorId, permissions: [...credential.permissions], credentialBound: true, authId: `credential:${credential.id}` };
   }
   if (resolved) return resolved;
   if (legacyToken) {
     const provided = Buffer.from(token), expected = Buffer.from(legacyToken);
-    if (provided.length === expected.length && timingSafeEqual(provided, expected)) return { actorId: legacyActor.actorId, permissions: [...legacyActor.permissions] };
+    if (provided.length === expected.length && timingSafeEqual(provided, expected)) return { actorId: legacyActor.actorId, permissions: [...legacyActor.permissions], authId: `legacy:${hash(token)}` };
   }
-  if (store.credentials.length) await withVaultLock(root, async () => { const latest = await readStore(root); latest.audit = appendAudit(latest, { at: new Date().toISOString(), action: 'authorization_failed' }); await atomicWrite(root, FILE, JSON.stringify(latest, null, 2)); });
+  if (auditFailure && store.credentials.length) await recordHttpAuthorizationFailure(root);
   return undefined;
 }

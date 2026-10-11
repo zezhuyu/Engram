@@ -5,6 +5,7 @@ import os from 'node:os';
 import YAML from 'yaml';
 import { Vault } from '../packages/core/vault.js';
 import { SearchEngine } from '../packages/search-files/index.js';
+import { buildFsIndex, fsIndexStatus } from '../packages/search-files/postings.js';
 import { QueryApi } from '../packages/query/index.js';
 import { Prng } from '../tests/helpers/prng.js';
 import type { Scope } from '../packages/core/types.js';
@@ -41,6 +42,8 @@ if (!built) {
   }
   await new SearchEngine(vault).rebuild();
 } else { rareCount = Math.floor((size - 8) / 1000) + 1; obsCount = Math.ceil(size / 10); }
+// The filesystem path is measured with its persistent trigram index (disposable, rebuildable); its build is reported separately from the commit build.
+const fsIndexBuild = (await fsIndexStatus(vault)).present ? { reused: true } : await buildFsIndex(vault);
 const buildMs = performance.now() - buildStart;
 void ops;
 const pct = (xs: number[], q: number) => xs.length ? [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(q * xs.length))]! : 0;
@@ -85,7 +88,7 @@ async function measure(mode: 'filesystem' | 'sqlite') {
 result.filesystem = await measure('filesystem'); result.sqlite = await measure('sqlite');
 const indexBytes = async (dir: string): Promise<number> => { let n = 0; for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) { const p = path.join(dir, e.name); n += e.isDirectory() ? await indexBytes(p) : (await fs.stat(p)).size; } return n; };
 const report = { label, documents: size, runs, seed, node: process.version, platform: `${os.platform()} ${os.arch()}`, cpu: os.cpus()[0]?.model, memGiB: Math.round(os.totalmem() / 2 ** 30), run_at: new Date().toISOString(), cacheState: 'warm (no privileged purge): cold cache NOT_RUN',
-  build: { buildMs: Math.round(buildMs), reused: built, durableCommit: commits.length ? { p50Ms: +pct(commits, 0.5).toFixed(1), p95Ms: +pct(commits, 0.95).toFixed(1), p99Ms: +pct(commits, 0.99).toFixed(1) } : null }, indexBytes: await indexBytes(path.join(root, '.mdb/indexes')), peakRssMB: rssMB(), failures, ...result };
+  build: { buildMs: Math.round(buildMs), fsIndexBuild, reused: built, durableCommit: commits.length ? { p50Ms: +pct(commits, 0.5).toFixed(1), p95Ms: +pct(commits, 0.95).toFixed(1), p99Ms: +pct(commits, 0.99).toFixed(1) } : null }, indexBytes: await indexBytes(path.join(root, '.mdb/indexes')), peakRssMB: rssMB(), failures, ...result };
 const dir = path.resolve('verification/query/benchmarks'); await fs.mkdir(dir, { recursive: true }); await fs.writeFile(path.join(dir, `${label}.json`), JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify({ label, failures, peakRssMB: report.peakRssMB, build: report.build }, null, 1));
 for (const m of ['filesystem', 'sqlite'] as const) for (const [k, v] of Object.entries(result[m] as Record<string, { p50Ms: number; documentsMaterialized: number; backend: string }>)) if (!k.startsWith('_')) console.log(`${m}/${k}: p50 ${v.p50Ms} ms, docs materialized ${v.documentsMaterialized}, ${v.backend}`);

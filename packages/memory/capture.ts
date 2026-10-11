@@ -69,8 +69,10 @@ export function eventFromHostPayload(registration: Registration, payload: Record
   for (const pattern of registration.excludePatterns) { const re = new RegExp(pattern, 'i'); if (re.test(content) || re.test(cwd)) return undefined; }
   const redacted = redactText(content).slice(0, 20_000);
   const discriminator = str(pick(payload, 'prompt_id', 'turn_id', 'turnId', 'tool_use_id')) ?? '';
+  const capturedAt = str(payload._engramCapturedAt);
+  const timestamp = capturedAt && Number.isFinite(Date.parse(capturedAt)) ? new Date(capturedAt).toISOString() : now.toISOString();
   const event: MemoryEvent = {
-    eventId: sha([registration.host, sessionId, type, discriminator, sha(redacted)].join('\0')).slice(0, 32), timestamp: now.toISOString(), host: registration.host, sessionId: sessionId.replace(/[^A-Za-z0-9_.:-]/g, '_'),
+    eventId: sha([registration.host, sessionId, type, discriminator, sha(redacted)].join('\0')).slice(0, 32), timestamp, host: registration.host, sessionId: sessionId.replace(/[^A-Za-z0-9_.:-]/g, '_'),
     workspaceId: registration.workspaceId, ...(registration.collectionId ? { collectionId: registration.collectionId } : {}), principalId: registration.principalId, type,
     ...(str(payload.transcript_path) ? { sourceRef: String(payload.transcript_path).slice(0, 500) } : {}), contentHash: sha(redacted), classification: type === 'user.message' ? 'user_private' : 'workspace_private',
     consentPolicyId: registration.consentPolicyId, schemaVersion: 1, content: redacted, title

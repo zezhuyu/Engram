@@ -89,6 +89,10 @@ MDB_REAL_MODEL_TEST=1 MDB_TEST_PROVIDER=ollama MDB_TEST_MODEL=llama3.1 npm test
 ```
 Skipped by default. Sends only synthetic text; use `MDB_TEST_BASE_URL`, `MDB_TEST_API_KEY_ENV` and `MDB_TEST_ALLOW_NETWORK=1` for hosted endpoints.
 
+## Adaptive daily intelligence (opt-in)
+
+A daily, silent cycle seals a committed-journal snapshot at 03:00 local time (learned conservatively from activity metadata), writes evidence-linked workspace summaries and workspace-scoped insights, consolidates global profile roots, then runs Dream over the full authorized corpus. Capture and search never wait for it. See `docs/adaptive-intelligence.md`; try `mdb intelligence schedule status`.
+
 ## Capabilities and limits
 
 | Area | Behavior |

@@ -3,7 +3,8 @@ import type { Vault } from '../../core/vault.js';
 import { manifestFor, type ManifestEntry } from '../../search-files/manifest.js';
 import { loadDocuments, readableEntries } from '../corpus.js';
 import { KNOWLEDGE_KINDS } from './plan.js';
-import { readStats, successRate } from './lifecycle.js';
+import { readStats } from './lifecycle.js';
+import { learnedSuccess } from './learning.js';
 import type { Graph, PlanContext, Budgets } from './types.js';
 import { SearchEngine } from '../../search-sqlite/index.js';
 
@@ -55,6 +56,6 @@ export async function semanticAssociations(vault: Vault, pool: ManifestEntry[], 
 export async function planContext(vault: Vault, pool: ManifestEntry[], budgets: Budgets, rng: () => number, options: { search?: SearchEngine; semantic?: boolean } = {}): Promise<PlanContext & { knownDiscoveries: number; semanticAssociationCount: number }> {
   const semantic = options.semantic === false ? new Map<string, Set<string>>() : await semanticAssociations(vault, pool, options.search);
   const [graph, stats, supp] = await Promise.all([graphFor(vault, pool, semantic), readStats(vault), suppression(vault, pool)]);
-  return { pool, graph, budgets, rng, success: family => successRate(stats, family), suppressed: supp.suppressed, knownDiscoveries: supp.known, semanticAssociationCount: [...semantic.values()].reduce((sum, ids) => sum + ids.size, 0) / 2 };
+  return { pool, graph, budgets, rng, success: await learnedSuccess(vault, stats), suppressed: supp.suppressed, knownDiscoveries: supp.known, semanticAssociationCount: [...semantic.values()].reduce((sum, ids) => sum + ids.size, 0) / 2 };
 }
 export type { Document };
