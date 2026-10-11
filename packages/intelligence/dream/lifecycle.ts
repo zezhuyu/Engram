@@ -21,7 +21,7 @@ export const familyOf = (d: Pick<Document, 'metadata'>): string => `${d.metadata
  * Records what happened to a discovery as a NEW REVISION (the earlier ones stay readable) and feeds the ranking statistics.
  * Repeating a hypothesis never validates it: `validated` needs evidence (an experiment/result object) or the user's own confirmation.
  */
-export async function recordFeedback(vault: Vault, id: string, input: { outcome: DiscoveryOutcome; note: string; validatedBy?: 'user' | 'experiment'; evidence?: Evidence[]; supersededBy?: string; reusedBy?: string[] }): Promise<Document> {
+export async function recordFeedback(vault: Vault, id: string, input: { outcome: DiscoveryOutcome; note: string; validatedBy?: 'user' | 'experiment'; evidence?: Evidence[]; supersededBy?: string; reusedBy?: string[]; origin?: 'real-user' | 'validated-evidence' | 'synthetic' | 'simulated-reviewer' }): Promise<Document> {
   const doc = await vault.get(id); if (doc.kind !== 'discovery') throw new MDBError('INVALID_INPUT', 'Feedback applies to discoveries');
   if (!ALLOWED[doc.status]?.includes(input.outcome)) throw new MDBError('INVALID_INPUT', `A ${doc.status} discovery cannot become ${input.outcome}`);
   if (!input.note?.trim()) throw new MDBError('INVALID_INPUT', 'Feedback needs a note');
@@ -39,7 +39,7 @@ export async function recordFeedback(vault: Vault, id: string, input: { outcome:
     const stats = await readStats(vault); const family = familyOf(doc); const s = (stats[family] ??= { validated: 0, rejected: 0, tested: 0 });
     s[input.outcome as 'validated' | 'rejected' | 'tested']++; await atomicWrite(vault.root, STATS, JSON.stringify(stats, null, 1));
   });
-  if (['validated', 'rejected', 'tested'].includes(input.outcome)) await appendFeedback(vault, { kind: 'feedback', discoveryId: doc.id, family: familyOf(doc), label: input.outcome, source: input.validatedBy === 'experiment' ? 'experiment' : 'human', actorId: vault.actor.actorId, note: input.note.slice(0, 200) });
+  if (['validated', 'rejected', 'tested'].includes(input.outcome)) await appendFeedback(vault, { kind: 'feedback', discoveryId: doc.id, family: familyOf(doc), label: input.outcome, source: input.validatedBy === 'experiment' ? 'experiment' : 'human', ...(input.origin ? { origin: input.origin } : {}), actorId: vault.actor.actorId, note: input.note.slice(0, 200) });
   return updated;
 }
 

@@ -68,7 +68,34 @@ export function keywordGroups(query: string): Term[][] {
   return groups.filter(group => group.length);
 }
 
-export interface PreparedSearch { mode: string; /** Highest score a document with this (manifest) title can reach: exact title part plus the most the body and heading can add. Used to stop reading early. */ upperBound(title: string): number; score(doc: Document): SearchResult['hits'][number] | undefined }
+/** Optional per-object facts that tighten the score bound without changing any result. */
+export interface BoundHints {
+  /** The title already lower-cased (avoids repeating the conversion for every candidate). */
+  lowerTitle?: string;
+  /** Lower-cased text of the object's Markdown headings ('' = none); absent = unknown, so the heading bonus must be assumed. */
+  hd?: string;
+  /** A proven upper bound on min(3, occurrences) of `term` in title + body; absent = assume 3. */
+  count?: (term: string) => number | undefined;
+}
+export interface PreparedSearch { mode: string; /** Highest score a document with this (manifest) title can reach: exact title part plus the most the body and heading can add. Used to stop reading early. */ upperBound(title: string, hints?: BoundHints): number; score(doc: Document): SearchResult['hits'][number] | undefined }
+
+export const idRank = (c: number): number => c === 95 ? 0 : c >= 48 && c <= 57 ? c - 47 : c >= 97 && c <= 122 ? c - 86 : -1;
+/**
+ * Same ordering as String.prototype.localeCompare for strings made only of [_0-9a-z] (the generated object and revision ids: '_' < digits < letters), about 20x faster.
+ * Any other character falls back to localeCompare, so the contract never changes.
+ */
+export function compareIds(a: string, b: string): number {
+  if (a === b) return 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = idRank(a.charCodeAt(i)), y = idRank(b.charCodeAt(i));
+    if (x < 0 || y < 0) return Math.sign(a.localeCompare(b));
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  for (let i = n; i < a.length; i++) if (idRank(a.charCodeAt(i)) < 0) return Math.sign(a.localeCompare(b));
+  for (let i = n; i < b.length; i++) if (idRank(b.charCodeAt(i)) < 0) return Math.sign(a.localeCompare(b));
+  return a.length < b.length ? -1 : 1;
+}
 
 export function prepareSearch(input: SearchInput): PreparedSearch {
   const requested = input.mode ?? 'auto';
@@ -84,7 +111,7 @@ export function prepareSearch(input: SearchInput): PreparedSearch {
   }
   const groups = keywordGroups(input.query);
   const positive = groups.flat().filter(term => !term.negate).map(term => term.text);
-  return { mode, upperBound(title) { if (mode === 'grep') return 1; const lowerTitle = title.toLocaleLowerCase(); return positive.reduce((sum, term) => sum + (lowerTitle.includes(term) ? 5 : 0) + 5, 0); }, score(doc) {
+  return { mode, upperBound(title, hints) { if (mode === 'grep') return 1; const lowerTitle = hints?.lowerTitle ?? title.toLocaleLowerCase(); return positive.reduce((sum, term) => sum + (lowerTitle.includes(term) ? 5 : 0) + (hints?.hd !== undefined && !hints.hd.includes(term) ? 0 : 2) + (hints?.count?.(term) ?? 3), 0); }, score(doc) {
     const text = `${doc.title}\n${doc.body}`;
     const lower = text.toLocaleLowerCase();
     const literal = input.caseSensitive ? input.query : input.query.toLocaleLowerCase();
@@ -109,7 +136,7 @@ export function validateSearchPage(input: SearchInput): { limit: number; offset:
 }
 
 export function compareSearchHits(a: SearchResult['hits'][number], b: SearchResult['hits'][number]): number {
-  return b.score - a.score || a.objectId.localeCompare(b.objectId) || a.revisionId.localeCompare(b.revisionId);
+  return b.score - a.score || compareIds(a.objectId, b.objectId) || compareIds(a.revisionId, b.revisionId);
 }
 
 export function finishSearch(hits: SearchResult['hits'], input: SearchInput, backend: string, mode: string, matchedCount: number): SearchResult {

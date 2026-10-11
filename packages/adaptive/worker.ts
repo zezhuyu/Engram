@@ -49,8 +49,9 @@ export class MicroTrigger {
     await this.store.appendEvent({ type: 'dream_scheduled', runId, ...ids }); await this.store.appendEvent({ type: 'dream_claimed', runId, ...ids }); await this.store.appendEvent({ type: 'dream_started', runId, ...ids });
     await engine.run({ jobId: job.id, limit: 1, ...(signal ? { signal } : {}) });
     const after = (await engine.jobs()).find(j => j.id === job.id); const durationMs = Date.now() - startedAt;
-    if (after?.status === 'complete') { await this.store.advanceCursors(c => { c.micro = to; }); await this.store.appendEvent({ type: 'dream_completed', runId, ...ids, durationMs, attempts: after.attempts, state: 'complete' }); return 'completed'; }
-    if (after?.status === 'dead_letter') { await this.store.advanceCursors(c => { c.micro = to; }); await this.store.appendEvent({ type: 'dream_dead_letter', runId, ...ids, durationMs, attempts: after.attempts, ...(after.error ? { reason: 'JOB_FAILED' } : {}) }); return 'dead-lettered'; }
+    // The outcome event is written BEFORE the cursor moves: a crash between the two replays the (idempotent) range and logs the completion again, never loses it.
+    if (after?.status === 'complete') { await this.store.appendEvent({ type: 'dream_completed', runId, ...ids, durationMs, attempts: after.attempts, state: 'complete' }); await this.store.advanceCursors(c => { c.micro = to; }); return 'completed'; }
+    if (after?.status === 'dead_letter') { await this.store.appendEvent({ type: 'dream_dead_letter', runId, ...ids, durationMs, attempts: after.attempts, ...(after.error ? { reason: 'JOB_FAILED' } : {}) }); await this.store.advanceCursors(c => { c.micro = to; }); return 'dead-lettered'; }
     await this.store.appendEvent({ type: 'dream_retry', runId, ...ids, durationMs, attempts: after?.attempts ?? 0, state: after?.status ?? 'unknown', reason: after?.status === 'blocked' ? 'MODEL_UNAVAILABLE' : 'JOB_NOT_COMPLETE' });
     return `retry (${after?.status ?? 'unknown'})`;
   }

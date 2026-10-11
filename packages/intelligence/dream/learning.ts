@@ -13,8 +13,10 @@ import { familyOf, readStats } from './lifecycle.js';
  */
 export type RankingLabel = 'useful' | 'not_useful' | 'duplicate' | 'incorrect' | 'needs_evidence';
 export type FeedbackSource = 'human' | 'experiment' | 'model';
+/** Where a label came from, kept separate from `source` so synthetic and real evidence can never be mixed up in a report. */
+export type FeedbackOrigin = 'real-user' | 'validated-evidence' | 'synthetic' | 'simulated-reviewer';
 export interface FeedbackEvent {
-  v: number; at: string; kind: 'feedback' | 'reset' | 'legacy'; discoveryId?: string; family?: string; label?: string; source?: FeedbackSource; actorId?: string; note?: string;
+  v: number; at: string; kind: 'feedback' | 'reset' | 'legacy'; discoveryId?: string; family?: string; label?: string; source?: FeedbackSource; origin?: FeedbackOrigin; actorId?: string; note?: string;
   /** kind 'legacy': counters carried over from the pre-log statistics file. */
   counts?: { validated: number; rejected: number; tested: number };
 }
@@ -44,7 +46,7 @@ export async function appendFeedback(vault: Vault, event: Omit<FeedbackEvent, 'v
 }
 
 export interface FamilyParams { alpha: number; beta: number; observations: number; mean: number }
-export interface LearnedParams { version: number; resetAtVersion: number; families: Record<string, FamilyParams>; counted: number; excluded: { model: number; unreadableOrDeleted: number; beforeReset: number } }
+export interface LearnedParams { version: number; resetAtVersion: number; families: Record<string, FamilyParams>; counted: number; /** counted events by origin: 'real-user' evidence is reported separately from synthetic or simulated evidence */ byOrigin: Record<string, number>; excluded: { model: number; unreadableOrDeleted: number; beforeReset: number } }
 /**
  * Beta(1 + positive, 1 + negative) per family, derived from the log. Excludes model-sourced events, events about discoveries that no longer exist or are
  * not readable by the vault actor (deletion and privacy), and everything before the last reset. `asOfVersion` re-evaluates the parameters at an earlier version.
@@ -53,7 +55,7 @@ export async function learnedParams(vault: Vault, options: { asOfVersion?: numbe
   const events = (await readLines(vault)).filter(e => options.asOfVersion === undefined || e.v <= options.asOfVersion);
   const resetAt = events.filter(e => e.kind === 'reset').at(-1)?.v ?? 0;
   const readable = new Set((await readableEntries(vault, { kinds: ['discovery'] })).map(e => e.id));
-  const families: Record<string, FamilyParams> = {}; const excluded = { model: 0, unreadableOrDeleted: 0, beforeReset: 0 }; let counted = 0;
+  const families: Record<string, FamilyParams> = {}; const excluded = { model: 0, unreadableOrDeleted: 0, beforeReset: 0 }; let counted = 0; const byOrigin: Record<string, number> = {};
   const bump = (family: string, pos: number, neg: number) => { const f = (families[family] ??= { alpha: 1, beta: 1, observations: 0, mean: 0.5 }); f.alpha += pos; f.beta += neg; f.observations += pos + neg; f.mean = f.alpha / (f.alpha + f.beta); };
   for (const e of events) {
     if (e.kind === 'reset') continue;
@@ -62,9 +64,9 @@ export async function learnedParams(vault: Vault, options: { asOfVersion?: numbe
     if (e.kind !== 'feedback' || !e.family || !e.label) continue;
     if (!e.source || !COUNTED.includes(e.source)) { excluded.model++; continue; }
     if (e.discoveryId && !readable.has(e.discoveryId)) { excluded.unreadableOrDeleted++; continue; }
-    const w = LABEL_WEIGHT[e.label]; if (!w) continue; bump(e.family, w.pos, w.neg); counted++;
+    const w = LABEL_WEIGHT[e.label]; if (!w) continue; bump(e.family, w.pos, w.neg); counted++; const origin = e.origin ?? (e.source === 'experiment' ? 'validated-evidence' : 'real-user'); byOrigin[origin] = (byOrigin[origin] ?? 0) + 1;
   }
-  return { version: events.at(-1)?.v ?? 0, resetAtVersion: resetAt, families, counted, excluded };
+  return { version: events.at(-1)?.v ?? 0, resetAtVersion: resetAt, families, counted, byOrigin, excluded };
 }
 /** Planner hook: the family's learned success rate in (0, 1); 0.5 when nothing is known. Falls back to the legacy counters when no log exists yet. */
 export async function learnedSuccess(vault: Vault, legacy: Awaited<ReturnType<typeof readStats>>): Promise<(family: string) => number> {
@@ -73,13 +75,13 @@ export async function learnedSuccess(vault: Vault, legacy: Awaited<ReturnType<ty
 }
 
 /** Records ranking feedback on a discovery as a new revision (its status is unchanged) and as a log event. */
-export async function rateDiscovery(vault: Vault, id: string, input: { label: RankingLabel; note: string; source?: FeedbackSource }): Promise<{ document: Document; version: number }> {
+export async function rateDiscovery(vault: Vault, id: string, input: { label: RankingLabel; note: string; source?: FeedbackSource; origin?: FeedbackOrigin }): Promise<{ document: Document; version: number }> {
   if (!(input.label in LABEL_WEIGHT) || ['validated', 'rejected', 'tested'].includes(input.label)) throw new MDBError('INVALID_INPUT', 'Label must be useful, not_useful, duplicate, incorrect or needs_evidence (use dream feedback for status changes)');
   if (!input.note?.trim()) throw new MDBError('INVALID_INPUT', 'Feedback needs a note');
   const doc = await vault.get(id); if (doc.kind !== 'discovery') throw new MDBError('INVALID_INPUT', 'Ranking feedback applies to discoveries');
   const history = Array.isArray(doc.metadata.feedback) ? doc.metadata.feedback as unknown[] : []; const source = input.source ?? 'human';
   const document = await vault.patch({ objectId: doc.id, expectedRevisionId: doc.revisionId, metadataPatch: { feedback: [...history, { label: input.label, note: input.note.slice(0, 500), at: new Date().toISOString(), source }] } });
-  const version = await appendFeedback(vault, { kind: 'feedback', discoveryId: doc.id, family: familyOf(doc), label: input.label, source, actorId: vault.actor.actorId, note: input.note.slice(0, 200) });
+  const version = await appendFeedback(vault, { kind: 'feedback', discoveryId: doc.id, family: familyOf(doc), label: input.label, source, ...(input.origin ? { origin: input.origin } : {}), actorId: vault.actor.actorId, note: input.note.slice(0, 200) });
   return { document, version };
 }
 /** Owner-only: ranking parameters restart from the prior. History stays in the log (and can be re-evaluated with asOfVersion). */

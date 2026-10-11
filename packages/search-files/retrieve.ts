@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { profileAsync, profileBytes, profileSample } from '../bench/instrumentation.js';
 import type { ActorContext, Document, SearchInput, SearchResult } from '../core/types.js';
 import { MDBError } from '../core/types.js';
-import { compareSearchHits, finishSearch, keywordGroups, mapBodyLines, prepareSearch, scopeMatches, type SearchVault } from './index.js';
+import { compareIds, compareSearchHits, finishSearch, idRank, keywordGroups, mapBodyLines, prepareSearch, scopeMatches, type SearchVault } from './index.js';
 import { manifestFor, type Manifest, type ManifestEntry } from './manifest.js';
 import { fsIndexLookup, fsIndexServes } from './postings.js';
 
@@ -13,7 +13,8 @@ export interface IndexInfo { /** reading stopped before all candidates were read
 export interface PrefilterContext { vault: SearchVault; manifest: Manifest; entries: ManifestEntry[]; input: SearchInput; actor: ActorContext }
 /** A prefilter returns a SUPERSET of the entries that can match (undefined = no narrowing). Final matching is always the shared scorer on authorized documents. */
 export type Prefilter = (ctx: PrefilterContext) => Promise<{ ids?: Set<string>; fallback?: string; backend?: string; info?: Partial<IndexInfo>;
-  /** keyword relevance for EVERY id in `ids` (higher is better), e.g. SQLite FTS5 BM25; absent means the built-in lexical scorer ranks */ ranks?: Map<string, number> }>;
+  /** keyword relevance for EVERY id in `ids` (higher is better), e.g. SQLite FTS5 BM25; absent means the built-in lexical scorer ranks */ ranks?: Map<string, number>;
+  /** term -> id -> proven upper bound on that term's occurrences in the object's raw text (capped at 3); an id absent from the map has no proven bound */ countBounds?: Map<string, Map<string, number>> }>;
 
 export function assertSearchIdentity(vault: SearchVault, input: SearchInput, actor: ActorContext): void {
   if (input.includeHistory && !actor.permissions.includes('*') && !actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'History search requires history:read permission');
@@ -77,7 +78,9 @@ export function combine(spec: TextSpec, byTerm: Map<string, Set<string>>): Set<s
   }
   return result;
 }
-export const titleMatches = (entries: ManifestEntry[], term: string, caseSensitive: boolean): Set<string> => new Set(entries.filter(e => (caseSensitive ? e.title : e.title.toLocaleLowerCase()).includes(term)).map(e => e.id));
+const loweredTitles = new WeakMap<ManifestEntry, string>();
+const lowerTitle = (e: ManifestEntry): string => { let t = loweredTitles.get(e); if (t === undefined) { t = e.title.toLocaleLowerCase(); loweredTitles.set(e, t); } return t; };
+export const titleMatches = (entries: ManifestEntry[], term: string, caseSensitive: boolean): Set<string> => new Set(entries.filter(e => (caseSensitive ? e.title : lowerTitle(e)).includes(term)).map(e => e.id));
 
 const revisionFile = (e: { id: string; rev: string }) => `.mdb/objects/${e.id}/revs/${e.rev}.md`;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -162,17 +165,38 @@ export async function ripgrepFiles(root: string, entries: ManifestEntry[], spec:
   return { byTerm, filesExamined, filesMatched, processCount: batches.length * distinctTerms(spec).length };
 }
 
-async function* documentBatches(vault: SearchVault, entries: ManifestEntry[], batchSize = 48): AsyncGenerator<Document[]> {
-  for (let start = 0; start < entries.length; start += batchSize) {
-    const docs = await Promise.all(entries.slice(start, start + batchSize).map(async entry => {
-      try {
-        const doc = await vault.get(entry.id);
-        // An index candidate may have changed since discovery. Search the Vault's current, authorized revision.
-        return doc;
-      } catch { return undefined; /* purged, or no longer readable: never returned */ }
-    }));
-    yield docs.filter((doc): doc is Document => !!doc);
+async function loadBatch(vault: SearchVault, entries: ManifestEntry[]): Promise<Document[]> {
+  const docs = await Promise.all(entries.map(async entry => {
+    try {
+      const doc = await vault.get(entry.id);
+      // An index candidate may have changed since discovery. Search the Vault's current, authorized revision.
+      return doc;
+    } catch { return undefined; /* purged, or no longer readable: never returned */ }
+  }));
+  return docs.filter((doc): doc is Document => !!doc);
+}
+
+/**
+ * Candidates in evaluation order (highest score bound first, then object id) WITHOUT sorting them all: a binary heap is built in O(n) and only as many entries as the
+ * early-stop rule needs are popped. Ids compare through a precomputed numeric prefix key (exactly the compareIds order); ties and unusual ids fall back to compareIds.
+ */
+export function lazyOrder(entries: ManifestEntry[], boundOf: (entry: ManifestEntry) => number): { take(count: number): ManifestEntry[]; peek(): ManifestEntry | undefined } {
+  const n = entries.length, b = new Float64Array(n), k = new Float64Array(n), offset = entries.every(e => e.id.startsWith('obj_')) ? 4 : 0;
+  for (let i = 0; i < n; i++) {
+    b[i] = boundOf(entries[i]!); const id = entries[i]!.id; let key = 0;
+    for (let c = 0; c < 10; c++) { const code = id.charCodeAt(offset + c); if (Number.isNaN(code)) { key = key * 38; continue; } const r = idRank(code); if (r < 0) { key = NaN; break; } key = key * 38 + r + 1; }
+    k[i] = key;
   }
+  const before = (x: number, y: number): boolean => {
+    if (b[x] !== b[y]) return b[x]! > b[y]!;
+    const kx = k[x]!, ky = k[y]!; if (kx !== ky && !Number.isNaN(kx) && !Number.isNaN(ky)) return kx < ky;
+    return compareIds(entries[x]!.id, entries[y]!.id) < 0;
+  };
+  const heap = new Int32Array(n); for (let i = 0; i < n; i++) heap[i] = i; let size = n;
+  const down = (start: number): void => { let i = start; const item = heap[i]!; for (;;) { let child = 2 * i + 1; if (child >= size) break; if (child + 1 < size && before(heap[child + 1]!, heap[child]!)) child++; if (!before(heap[child]!, item)) break; heap[i] = heap[child]!; i = child; } heap[i] = item; };
+  for (let i = (n >> 1) - 1; i >= 0; i--) down(i);
+  const pop = (): number => { const top = heap[0]!; size--; if (size > 0) { heap[0] = heap[size]!; down(0); } return top; };
+  return { take: count => { const out: ManifestEntry[] = []; while (out.length < count && size > 0) out.push(entries[pop()]!); return out; }, peek: () => size > 0 ? entries[heap[0]!] : undefined };
 }
 
 /**
@@ -200,11 +224,13 @@ export async function retrieve(vault: SearchVault, input: SearchInput, actor: Ac
     // Bounded evaluation: read candidates best-bound-first and stop as soon as no unread candidate can enter the retained set. The bound is exact for the
     // title part of the score (from the manifest) and the maximum for the body part, so the answer is identical to scoring everything; it only avoids reads.
     const ranked = scorer.mode === 'keyword' && narrowed.ranks && candidates.every(e => narrowed.ranks!.has(e.id)) ? narrowed.ranks : undefined; // complete index ranks replace the lexical score
-    const bound = new Map<string, number>(); for (const e of candidates) bound.set(e.id, ranked ? ranked.get(e.id)! : scorer.upperBound(e.title));
-    const ordered = [...candidates].sort((a, b) => bound.get(b.id)! - bound.get(a.id)! || a.id.localeCompare(b.id));
-    const batchSize = ordered.length > 4 * retain ? 16 : 48; let consumed = 0, violated = false;
-    for await (const batch of documentBatches(vault, ordered, batchSize)) {
-      consumed += batch.length;
+    const occurrences = (haystack: string, needle: string): number => { let count = 0, from = 0; for (;;) { const at = haystack.indexOf(needle, from); if (at < 0) return count; count++; from = at + needle.length; } };
+    const bound = new Map<string, number>();
+    for (const e of candidates) bound.set(e.id, ranked ? ranked.get(e.id)! : scorer.upperBound(e.title, { lowerTitle: lowerTitle(e), ...(e.hd !== undefined ? { hd: e.hd } : {}), count: term => { const tf = narrowed.countBounds?.get(term)?.get(e.id); return tf === undefined ? undefined : Math.min(3, tf + occurrences(lowerTitle(e), term)); } }));
+    const order = lazyOrder(candidates, e => bound.get(e.id)!);
+    const batchSize = candidates.length > 4 * retain ? 16 : 48; let violated = false;
+    for (;;) {
+      const picked = order.take(batchSize); if (!picked.length) break; const batch = await loadBatch(vault, picked);
       const documents = batch.filter(doc => doc.status !== 'deleted' && doc.status !== 'tombstone'
         && (!filters || filters.some(scope => scopeMatches(doc.scope, scope)))
         && (!input.kinds?.length || input.kinds.includes(doc.kind)) && (!input.tags?.length || input.tags.every(tag => doc.tags.includes(tag)))
@@ -222,10 +248,10 @@ export async function retrieve(vault: SearchVault, input: SearchInput, actor: Ac
           top.splice(low, 0, hit); if (top.length > retain) top.pop();
         }
       });
-      const next = ordered[consumed];
+      const next = order.peek();
       if (next && !violated && top.length >= retain) {
         const kth = top[retain - 1]!, nb = bound.get(next.id)!;
-        if (nb < kth.score || (nb === kth.score && next.id.localeCompare(kth.objectId) > 0)) { stoppedEarly = true; break; }
+        if (nb < kth.score || (nb === kth.score && compareIds(next.id, kth.objectId) > 0)) { stoppedEarly = true; break; }
       }
     }
   }
@@ -235,7 +261,7 @@ export async function retrieve(vault: SearchVault, input: SearchInput, actor: Ac
 }
 
 /** Filesystem-only prefilter: manifest titles plus ripgrep (owner, plain ASCII terms) or a raw-file scan restricted to authorized head revisions. */
-export const filesPrefilter: Prefilter = async ({ vault, entries, input, actor }) => {
+export const filesPrefilter: Prefilter = async ({ vault, manifest, entries, input, actor }) => {
   const spec = textSpec(input);
   if (!spec) return { info: { textPrefilter: 'none' } };
   const owner = actor.permissions.includes('*');
@@ -244,9 +270,9 @@ export const filesPrefilter: Prefilter = async ({ vault, entries, input, actor }
   let indexNote: string | undefined;
   if (fsIndexServes(terms)) {
     try {
-      const found = await profileAsync('candidate.discovery.fs_trigram', () => fsIndexLookup(vault.root, entries, terms, spec.caseSensitive));
+      const found = await profileAsync('candidate.discovery.fs_trigram', () => fsIndexLookup(vault.root, manifest, terms, spec.caseSensitive, input.mode !== 'grep'));
       for (const term of terms) { const titles = titleMatches(entries, term, spec.caseSensitive); const set = found.byTerm.get(term) ?? new Set<string>(); for (const id of titles) set.add(id); found.byTerm.set(term, set); }
-      return { ids: combine(spec, found.byTerm), info: { textPrefilter: 'fs-trigram', lagObjects: found.stale } };
+      return { ids: combine(spec, found.byTerm), countBounds: found.bounds, info: { textPrefilter: 'fs-trigram', lagObjects: found.stale } };
     } catch (error) { if (!(error instanceof MDBError && error.code === 'CAPABILITY_UNAVAILABLE')) indexNote = `filesystem trigram index unusable (${error instanceof Error ? error.message : String(error)}); scanned files instead`; }
   }
   let useRg = owner && ripgrepAvailable() && terms.every(rgSafe);
