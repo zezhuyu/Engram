@@ -7,6 +7,7 @@ import { runCaptured, UNIX_COMMANDS } from '../unix/index.js';
 import { MDBError, type ActorContext, type Scope, type PutInput, type PatchInput, type SearchInput } from '../core/types.js';
 import { hasHttpCredentials, recordHttpAuthorizationFailure, resolveHttpActor } from './credentials.js';
 import { oauthResourceMetadata, resolveOAuthActor } from './oauth.js';
+import { bindAllowedWithoutTls, peerAllowed } from '../core/private-network.js';
 import { createRegistration, drainSpool, enqueueEvent, eventFromHostPayload, readRegistration } from '../memory/capture.js';
 
 type Schema = { type?: string; properties?: Record<string, Schema>; required?: string[]; additionalProperties?: boolean; items?: Schema; enum?: unknown[]; anyOf?: Schema[]; minimum?: number; maximum?: number };
@@ -198,8 +199,9 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   if (!token && !(await hasHttpCredentials(root))) throw new Error('HTTP transport requires a scoped credential (mdb credential create) or MDB_MCP_HTTP_TOKEN with at least 32 bytes');
   const host = env.MDB_MCP_HTTP_HOST ?? '127.0.0.1';
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
+    // Opt-in (MDB_TRANSPORT_TRUST=tailscale): plain HTTP on 0.0.0.0 or a tailnet address, but every connection is then limited to loopback and tailnet peers.
     let secureUrl = false; try { secureUrl = new URL(env.MDB_MCP_PUBLIC_URL ?? '').protocol === 'https:'; } catch { /* rejected below */ }
-    if (!env.MDB_MCP_HTTP_ALLOWED_HOSTS || !secureUrl) throw new Error('A non-loopback HTTP bind requires MDB_MCP_HTTP_ALLOWED_HOSTS and an HTTPS MDB_MCP_PUBLIC_URL');
+    if (!env.MDB_MCP_HTTP_ALLOWED_HOSTS || !(secureUrl || bindAllowedWithoutTls(host, env))) throw new Error('A non-loopback HTTP bind requires MDB_MCP_HTTP_ALLOWED_HOSTS and an HTTPS MDB_MCP_PUBLIC_URL (or MDB_TRANSPORT_TRUST=tailscale)');
   }
   const port = env.MDB_MCP_HTTP_PORT === undefined ? 3333 : Number(env.MDB_MCP_HTTP_PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('MDB_MCP_HTTP_PORT must be an integer from 0 to 65535');
@@ -210,7 +212,9 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   const requestsByPrincipal = new Map<string, { window: number; count: number }>();
   const requestsPerMinute = Number(env.MDB_MCP_HTTP_REQUESTS_PER_MINUTE ?? 120);
   if (!Number.isInteger(requestsPerMinute) || requestsPerMinute < 1 || requestsPerMinute > 10_000) throw new Error('MDB_MCP_HTTP_REQUESTS_PER_MINUTE must be an integer from 1 to 10000');
+  const peerFiltered = !['127.0.0.1', '::1', 'localhost'].includes(host) && bindAllowedWithoutTls(host, env);
   const server = createServer(async (request, response) => {
+    if (peerFiltered && !peerAllowed(request.socket.remoteAddress)) { request.socket.destroy(); return; } // only tailnet and loopback peers are served in the no-TLS mode
     const endpoint = new URL(request.url ?? '/', 'http://localhost');
     if (oauthMetadata && (endpoint.pathname === '/.well-known/oauth-protected-resource' || endpoint.pathname === protectedResourcePath)) { jsonResponse(response, 200, oauthMetadata); return; }
     const allowedHosts = (env.MDB_MCP_HTTP_ALLOWED_HOSTS ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);

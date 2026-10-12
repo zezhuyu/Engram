@@ -27,3 +27,18 @@ test('the physical-host acceptance rule passes only genuine multi-machine eviden
   const unknown = await merge(t, [client('unknown', m), server('bbb', m)]); assert.equal(unknown.verified, false);
   recordCase({ suite: 'memory', name: 'physical-host-acceptance-rule', status: 'PASS' });
 });
+
+test('tailnet mode: TLS is accepted as NOT_APPLICABLE only with the tailscale label and a tailnet client address, and the report says TLS was not tested', async t => {
+  const m = ['PHYS-r1-online-1'];
+  const tailnet = (id: string, detail: Record<string, unknown>) => { const c = client(id, m); c.steps = c.steps.map(s => s.id === 'tls-certificate-verified' ? { ...s, status: 'NOT_APPLICABLE', detail } : s); return c; };
+  const labelled = { transport: 'tailscale-wireguard', tlsTested: false, clientHasTailnetAddress: true };
+  const dir = await tempDir(t, 'physical-merge-tailnet'); const files = [tailnet('aaa', labelled), server('bbb', m)];
+  const paths: string[] = []; for (const [i, r] of files.entries()) { const f = path.join(dir, `r${i}.json`); await fs.writeFile(f, JSON.stringify(r)); paths.push(f); }
+  const out = path.join(dir, 'out.json'); const run = spawnSync(process.execPath, ['scripts/xhost/physical.mjs', 'merge', ...paths, '--out', out], { encoding: 'utf8' });
+  const report = JSON.parse(await fs.readFile(out, 'utf8')) as { physicalHostVerified: boolean; transport: string; tlsVerified: boolean; problems: string[] };
+  assert.equal(run.status, 0, report.problems.join(';')); assert.equal(report.transport, 'tailscale-wireguard'); assert.equal(report.tlsVerified, false);
+  for (const bad of [{ transport: 'lan', tlsTested: false, clientHasTailnetAddress: true }, { transport: 'tailscale-wireguard', tlsTested: false, clientHasTailnetAddress: false }, {}]) {
+    const r = await merge(t, [tailnet('aaa', bad), server('bbb', m)]); assert.equal(r.verified, false, JSON.stringify(bad)); assert.ok(r.problems.some(p => /tls-certificate-verified is NOT_APPLICABLE/.test(p)));
+  }
+  recordCase({ suite: 'memory', name: 'physical-host-tailnet-transport-label', status: 'PASS' });
+});
