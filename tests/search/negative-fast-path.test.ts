@@ -61,6 +61,15 @@ test('negative fast path: results are identical to the unindexed file scan for e
   recordCase({ suite: 'search', name: 'negative-fast-path-parity', status: 'PASS', detail: { queries: queries.length, fastPathRuns: fast } });
 });
 
+test('negative fast path: a title whose YAML form is escaped is still found; the manifest title scan is what covers it', async t => {
+  const { root, vault } = await disposableVault(t); await vault.createWorkspace('a', '', {});
+  const title = `a: "b" it's #x`; const doc = await vault.put({ scope: wsA, kind: 'note', title, body: 'nothing relevant here' }); // YAML writes this title double-quoted with \" escapes, so the indexed file text does not contain "b" it's
+  const phrases = [`"b" it's #x`, `"b" it's`, `a: "b" it`]; const engine = new SearchEngine(vault);
+  const scan = new Map<string, string>(); for (const q of phrases) scan.set(q, JSON.stringify(ids(await engine.query({ query: q, mode: 'grep' }))));
+  await engine.rebuild(); resetFsIndexCache(); const indexed = new SearchEngine(new Vault(root));
+  for (const q of phrases) { const r = await indexed.query({ query: q, mode: 'grep' }); assert.deepEqual(ids(r), [doc.id], q); assert.equal(JSON.stringify(ids(r)), scan.get(q)); assert.notEqual(info(r).fastPath, 'no-candidates', `${q}: the trigram text holds the escaped form, the title scan must keep this a candidate`); }
+});
+
 test('negative fast path: filters, regex and unservable terms never use it; the reported entry count equals the regular pipeline', async t => {
   const { root, vault } = await corpus(t); const engine = new SearchEngine(vault); await engine.rebuild();
   assert.notEqual(info(await engine.query({ query: 'zz-no-such-token', mode: 'grep', regex: true })).fastPath, 'no-candidates');
@@ -128,6 +137,10 @@ test('negative fast path: authorization is unchanged; a forbidden term and a mis
   const forbidden = await agent().query({ query: 'PRIVATE-B-ONLY', mode: 'grep' }); const missing = await agent().query({ query: 'zz-nothing-here-at-all', mode: 'grep' });
   assert.equal(forbidden.hits.length, 0); assert.equal(missing.hits.length, 0);
   assert.equal((forbidden as { total?: number }).total, (missing as { total?: number }).total);
+  // Same code path, so the same latency class: a term that exists only in a workspace this actor cannot read is answered exactly like a term that exists nowhere.
+  assert.equal(info(forbidden).fastPath, 'no-candidates'); assert.equal(info(missing).fastPath, 'no-candidates'); assert.deepEqual({ ...info(forbidden) }, { ...info(missing) });
+  assert.notEqual(info(await new SearchEngine(vault).query({ query: 'PRIVATE-B-ONLY', mode: 'grep' })).fastPath, 'no-candidates', 'the owner can read it, so it is a real candidate');
+  const titleOnly = await agent().query({ query: 'Private B', mode: 'grep' }); assert.equal(info(titleOnly).fastPath, 'no-candidates', 'a title in an unreadable workspace is not a candidate either'); assert.equal(titleOnly.hits.length, 0);
   assert.equal(ids(await agent().query({ query: 'team-a-only', mode: 'grep' })).length, 1);
   await vault.revoke('a', 'agent');
   assert.deepEqual(ids(await agent().query({ query: 'team-a-only', mode: 'grep' })), [], 'revocation applies to the very next query');
