@@ -14,7 +14,7 @@ export interface InstallOptions { consent: boolean; dryRun?: boolean; principalI
   /** Install the SessionStart context hook (default: on for project-scoped and user-level installs). */ sessionContext?: boolean;
   /** Hooks fire for every session of the host; with a project root the hook records nothing unless the session's cwd is inside it. */ projectRoot?: string;
   /** User-level hook: routes by the session's project binding instead of one fixed registration. */ userLevel?: boolean }
-export interface AdapterStatus { fileSync: boolean; sessionContext: boolean; installed: boolean; capture: MemoryEventType[]; recall: boolean; coverage: 'full' | 'partial' | 'none'; notes: string[]; registrations: string[]; settingsPath: string }
+export interface AdapterStatus { handoff: boolean; fileSync: boolean; sessionContext: boolean; installed: boolean; capture: MemoryEventType[]; recall: boolean; coverage: 'full' | 'partial' | 'none'; notes: string[]; registrations: string[]; settingsPath: string }
 export interface HarnessAdapter {
   id: string;
   detect(): Promise<{ supported: boolean; capabilities: string[]; notes: string[] }>;
@@ -23,6 +23,7 @@ export interface HarnessAdapter {
   uninstall(): Promise<{ removed: number }>;
   removeUserHooks(): Promise<number>;
   installContext(options: { projectRoot?: string; userLevel?: boolean; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
+  installHandoff(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
   installFileSync(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
   removeFileSync(projectRoot: string): Promise<number>;
 }
@@ -30,6 +31,7 @@ const MARKER = '# engram-mdb:';
 const REMOTE_MARKER = '# engram-mdb-remote:';
 const CONTEXT_MARKER = '# engram-mdb-context:';
 const FILESYNC_MARKER = '# engram-mdb-filesync:';
+const HANDOFF_MARKER = '# engram-mdb-handoff:';
 type HookEntry = { matcher?: string; hooks: Array<{ type: string; command: string; timeout?: number }> };
 type Settings = Record<string, unknown> & { hooks?: Record<string, HookEntry[]> };
 
@@ -57,6 +59,13 @@ export function remoteHookCommand(host: string, url: string, tokenEnv: string, r
 /** SessionStart context hook: prints bounded project context for the host to inject. Project-scoped, user-level (`--user`), or local-vault (`--root`). */
 /** Stable id of a context hook: one per project root (so it never depends on a capture registration) or one for the user level. */
 export const contextHookId = (scope: { userLevel?: boolean; projectRoot?: string }, fallback: string): string => scope.userLevel ? 'user' : scope.projectRoot ? `p${createHash('sha256').update(scope.projectRoot).digest('hex').slice(0, 12)}` : fallback;
+/** The exact command lines Engram installs for a project; also what Codex trust is checked against, so a hook that merely carries our marker is never trusted. */
+export function handoffHookCommand(host: string, id: string, scope: { projectRoot: string; root?: string }, node = process.execPath): string {
+  return `${quote(node)} ${quote(mdbBinary())} memory handoff-check --host ${host} ${scope.root ? `--root ${quote(scope.root)} ` : ''}--project-root ${quote(scope.projectRoot)} ${HANDOFF_MARKER}${id}`;
+}
+export function fileSyncHookCommand(id: string, scope: { projectRoot: string; root?: string }, node = process.execPath): string {
+  return `${quote(node)} ${quote(mdbBinary())} notes sync --hook ${scope.root ? `--root ${quote(scope.root)} ` : ''}--project-root ${quote(scope.projectRoot)} ${FILESYNC_MARKER}${id}`;
+}
 export function contextHookCommand(host: string, id: string, scope: { userLevel?: boolean; projectRoot?: string; root?: string }, node = process.execPath): string {
   const where = scope.userLevel ? '--user' : `${scope.root ? `--root ${quote(scope.root)} ` : ''}${scope.projectRoot ? `--project-root ${quote(scope.projectRoot)}` : ''}`.trim();
   return `${quote(node)} ${quote(mdbBinary())} memory context --host ${host} ${where} ${CONTEXT_MARKER}${id}`.replace(/\s+/g, ' ');
@@ -131,25 +140,35 @@ export class HookFileAdapter implements HarnessAdapter {
     const wanted = new Set(regs.flatMap(r => r.capture).filter(t => Object.values(this.spec.events).includes(t)));
     const complete = [...wanted].every(t => installedEvents.includes(t)) && wanted.size > 0;
     let sessionContext = false; try { sessionContext = (await this.read()).settings.hooks?.SessionStart?.some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(CONTEXT_MARKER))) ?? false; } catch { /* reported in notes above */ }
+    let handoff = false; try { handoff = (await this.read()).settings.hooks?.Stop?.some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(HANDOFF_MARKER))) ?? false; } catch { /* reported above */ }
     let fileSync = false; try { const h = (await this.read()).settings.hooks; fileSync = !!h?.PostToolUse?.some(e => e.hooks?.some(x => typeof x.command === 'string' && x.command.includes(FILESYNC_MARKER))) && !!h?.SessionEnd?.some(e => e.hooks?.some(x => typeof x.command === 'string' && x.command.includes(FILESYNC_MARKER))); } catch { /* reported above */ }
-    return { fileSync, sessionContext, installed: installedEvents.length > 0, capture: installedEvents, recall: true, coverage: !installedEvents.length ? 'none' : complete ? 'full' : 'partial', notes, registrations: [...ids], settingsPath: this.settingsPath };
+    return { handoff, fileSync, sessionContext, installed: installedEvents.length > 0, capture: installedEvents, recall: true, coverage: !installedEvents.length ? 'none' : complete ? 'full' : 'partial', notes, registrations: [...ids], settingsPath: this.settingsPath };
   }
 
   /** Installs only the read-only SessionStart context hook (no capture, no registration). Idempotent; the settings file is backed up before it is first changed. */
   async installContext(options: { projectRoot?: string; userLevel?: boolean; localRoot?: string }): Promise<{ changed: boolean; backup?: string }> {
     const id = contextHookId(options, 'local'); const { settings, existed } = await this.read();
     if ((settings.hooks?.SessionStart ?? []).some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${CONTEXT_MARKER}${id}`)))) return { changed: false };
-    let backup: string | undefined; if (existed) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); }
+    let backup: string | undefined; if (existed && !JSON.stringify(settings).includes('engram-mdb')) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); } // only a file with content Engram did not write is worth a backup
     const next: Settings = structuredClone(settings); next.hooks ??= {}; (next.hooks.SessionStart ??= []).push({ hooks: [{ type: 'command', command: contextHookCommand(this.id, id, { ...(options.userLevel ? { userLevel: true } : {}), ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}), ...(options.localRoot ? { root: options.localRoot } : {}) }), timeout: 5 }] });
+    await this.write(next); return { changed: true, ...(backup ? { backup } : {}) };
+  }
+  /** Stop hook that asks the agent to write the session handoff once (never loops, never writes one itself). */
+  async installHandoff(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }> {
+    const id = contextHookId({ projectRoot: options.projectRoot }, 'local'); const { settings, existed } = await this.read();
+    if ((settings.hooks?.Stop ?? []).some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${HANDOFF_MARKER}${id}`)))) return { changed: false };
+    let backup: string | undefined; if (existed && !JSON.stringify(settings).includes('engram-mdb')) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); } // only a file with content Engram did not write is worth a backup
+    const command = handoffHookCommand(this.id, id, { projectRoot: options.projectRoot, ...(options.localRoot ? { root: options.localRoot } : {}) });
+    const next: Settings = structuredClone(settings); next.hooks ??= {}; (next.hooks.Stop ??= []).push({ hooks: [{ type: 'command', command, timeout: 8 }] });
     await this.write(next); return { changed: true, ...(backup ? { backup } : {}) };
   }
   /** Hooks for the opt-in Markdown sync: after a file-writing tool call, and at session end. Installed only after separate file-sync consent. */
   async installFileSync(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }> {
     const id = contextHookId({ projectRoot: options.projectRoot }, 'local'); const { settings, existed } = await this.read();
-    const command = `${quote(process.execPath)} ${quote(mdbBinary())} notes sync --hook ${options.localRoot ? `--root ${quote(options.localRoot)} ` : ''}--project-root ${quote(options.projectRoot)} ${FILESYNC_MARKER}${id}`;
+    const command = fileSyncHookCommand(id, { projectRoot: options.projectRoot, ...(options.localRoot ? { root: options.localRoot } : {}) });
     const has = (name: string) => (settings.hooks?.[name] ?? []).some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${FILESYNC_MARKER}${id}`)));
     if (has('PostToolUse') && has('SessionEnd')) return { changed: false };
-    let backup: string | undefined; if (existed) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); }
+    let backup: string | undefined; if (existed && !JSON.stringify(settings).includes('engram-mdb')) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); } // only a file with content Engram did not write is worth a backup
     const next: Settings = structuredClone(settings); next.hooks ??= {};
     if (!has('PostToolUse')) (next.hooks.PostToolUse ??= []).push({ matcher: 'Write|Edit|MultiEdit|apply_patch', hooks: [{ type: 'command', command, timeout: 10 }] });
     if (!has('SessionEnd')) (next.hooks.SessionEnd ??= []).push({ hooks: [{ type: 'command', command, timeout: 15 }] });
@@ -176,7 +195,7 @@ export class HookFileAdapter implements HarnessAdapter {
     if (parsed.existed) {
       const next: Settings = structuredClone(parsed.settings);
       for (const [name, list] of Object.entries(next.hooks ?? {})) {
-        const kept = list.filter(e => { const own = ownedBy(e, ids) || anyOwned(e, this.options.root) || e.hooks?.some(h => h.command.includes(REMOTE_MARKER) || h.command.includes(CONTEXT_MARKER) && !h.command.includes(' --user ') || h.command.includes(FILESYNC_MARKER)); if (own) removed++; return !own; });
+        const kept = list.filter(e => { const own = ownedBy(e, ids) || anyOwned(e, this.options.root) || e.hooks?.some(h => h.command.includes(REMOTE_MARKER) || h.command.includes(CONTEXT_MARKER) && !h.command.includes(' --user ') || h.command.includes(FILESYNC_MARKER) || h.command.includes(HANDOFF_MARKER)); if (own) removed++; return !own; });
         if (kept.length) next.hooks![name] = kept; else delete next.hooks![name];
       }
       if (next.hooks && !Object.keys(next.hooks).length && !('hooks' in parsed.settings && (parsed.settings.hooks && Object.keys(parsed.settings.hooks).length === 0))) delete next.hooks;

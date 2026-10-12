@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findBinding } from '../core/project-binding.js';
+import { findTrustedBinding } from '../core/project-trust.js';
 import { Engram } from '../sdk/index.js';
 import { buildSessionContext } from './session-context.js';
 import { openRemoteSession, RemoteError } from './remote-client.js';
@@ -35,12 +35,16 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     if (options.projectRoot && !(await insideProject(options.stdin, options.projectRoot))) return { outcome: 'disabled', output: '', reason: 'session is outside this project' };
     let payload: { cwd?: unknown }; try { payload = JSON.parse(options.stdin) as { cwd?: unknown }; } catch { return { outcome: 'disabled', output: '', reason: 'unreadable hook payload' }; }
     const cwd = typeof payload.cwd === 'string' ? payload.cwd : ''; if (!cwd) return { outcome: 'disabled', output: '', reason: 'no working directory' };
-    const bound = await findBinding(cwd).catch(() => undefined);
+    const found = await findTrustedBinding(cwd, env).catch(() => undefined);
+    // A binding this machine did not create is never obeyed: it could name any server and any environment variable as the credential.
+    if (found && !found.trusted && !options.user) return { outcome: 'disabled', output: '', reason: 'this project binding is not trusted on this machine (run mdb init here)' };
+    const bound = found?.trusted ? found : undefined;
     let workspaceId: string, serverUrl: string | undefined, tokenEnv: string | undefined, maxTokens = 2500;
     if (bound) { if (options.user) return { outcome: 'disabled', output: '', reason: 'project hook handles this project' }; workspaceId = bound.binding.workspaceId; serverUrl = bound.binding.serverUrl; tokenEnv = bound.binding.credentialRef; maxTokens = bound.binding.sessionContextMaxTokens; }
     else if (options.user) {
       const config = await readUserConfig(env); if (!config || config.paused) return { outcome: 'disabled', output: '', reason: 'user-level capture is not active' };
       if (config.excludeProjects.some(pattern => new RegExp(pattern, 'i').test(cwd))) return { outcome: 'disabled', output: '', reason: 'project is excluded' };
+      if (config.includeProjects?.length && !config.includeProjects.some(pattern => new RegExp(pattern, 'i').test(cwd))) return { outcome: 'disabled', output: '', reason: 'project is not on the recording allowlist' };
       workspaceId = config.workspaceId; serverUrl = config.serverUrl; tokenEnv = config.tokenEnv;
     } else return { outcome: 'disabled', output: '', reason: 'project is not initialized' };
     if (!serverUrl) { // local mode: read the local vault directly, no network
@@ -49,20 +53,21 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
       return finish({ outcome: 'fresh', output: render(options.host, context.text, format), workspaceId });
     }
     const token = tokenEnv ? env[tokenEnv] : undefined; if (!token) return finish({ outcome: 'none', output: '', workspaceId, reason: `$${tokenEnv} is not set; no context without authentication` });
-    const file = cacheFile(env, serverUrl, workspaceId);
+    const file = cacheFile(env, serverUrl, workspaceId); const credential = createHash('sha256').update(`engram-credential\0${token}`).digest('hex').slice(0, 24); // identity of the credential, never the credential
     try {
       const session = await openRemoteSession({ url: serverUrl, token, workspaceId, timeoutMs: options.timeoutMs ?? 1500 });
       const reply = await session.call('engram_session_context', { maxTokens });
       const value = reply.value as { text?: string; revision?: string } | undefined;
       if (reply.isError || !value?.text) { if (/NOT_FOUND_OR_FORBIDDEN/.test(JSON.stringify(reply.value))) throw new RemoteError('workspace', 'access refused'); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the server returned no context' }); }
-      await writePrivate(file, JSON.stringify({ workspaceId, serverUrl, fetchedAt: now.toISOString(), revision: value.revision, text: value.text }));
+      await writePrivate(file, JSON.stringify({ workspaceId, serverUrl, credential, fetchedAt: now.toISOString(), revision: value.revision, text: value.text }));
       return finish({ outcome: 'fresh', output: render(options.host, value.text, format), workspaceId });
     } catch (error) {
       if (error instanceof RemoteError && (error.kind === 'auth' || error.kind === 'workspace')) { await fs.rm(file, { force: true }); return finish({ outcome: 'revoked', output: '', workspaceId, reason: error.message }); }
       if (error instanceof RemoteError && error.kind === 'transport-refused') return finish({ outcome: 'none', output: '', workspaceId, reason: error.message });
       // unreachable or unreadable: a recent cached copy of what this credential was allowed to see, clearly marked
       try {
-        const cached = JSON.parse(await fs.readFile(file, 'utf8')) as { workspaceId: string; serverUrl: string; fetchedAt: string; text: string };
+        const cached = JSON.parse(await fs.readFile(file, 'utf8')) as { workspaceId: string; serverUrl: string; credential?: string; fetchedAt: string; text: string };
+        if (cached.credential !== credential) { await fs.rm(file, { force: true }); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the cached context belongs to a different credential' }); } // another identity must never be served what the previous one was allowed to see
         const age = now.getTime() - Date.parse(cached.fetchedAt); const ttl = options.cacheTtlMs ?? 24 * 3600_000;
         if (cached.workspaceId === workspaceId && cached.serverUrl === serverUrl && Number.isFinite(age) && age >= 0 && age <= ttl) {
           const text = cached.text.replace(/status: FRESH/, `status: STALE (cached ${cached.fetchedAt}; the server could not be reached)`);

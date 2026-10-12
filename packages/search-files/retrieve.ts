@@ -9,12 +9,15 @@ import { compareIds, compareSearchHits, finishSearch, idRank, keywordGroups, map
 import { manifestFor, type Manifest, type ManifestEntry } from './manifest.js';
 import { fsIndexLookup, fsIndexServes } from './postings.js';
 
-export interface IndexInfo { /** reading stopped before all candidates were read because none could change the page */ stoppedEarly?: boolean; entries: number; candidates: number; loaded: number; candidateFilesExamined?: number; candidateFilesMatched?: number; ripgrepProcesses?: number; lagObjects?: number; fallbackScopes?: number; textPrefilter: 'none' | 'ripgrep' | 'file-scan' | 'fts5+trigram' | 'fs-trigram' | 'mixed'; autoSynced?: boolean }
+export interface IndexInfo { /** reading stopped before all candidates were read because none could change the page */ stoppedEarly?: boolean; entries: number; candidates: number; loaded: number; candidateFilesExamined?: number; candidateFilesMatched?: number; ripgrepProcesses?: number; lagObjects?: number; fallbackScopes?: number; textPrefilter: 'none' | 'ripgrep' | 'file-scan' | 'fts5+trigram' | 'fs-trigram' | 'mixed'; autoSynced?: boolean; /** the index proved before any per-entry work that no entry can match */ fastPath?: 'no-candidates' }
 export interface PrefilterContext { vault: SearchVault; manifest: Manifest; entries: ManifestEntry[]; input: SearchInput; actor: ActorContext }
 /** A prefilter returns a SUPERSET of the entries that can match (undefined = no narrowing). Final matching is always the shared scorer on authorized documents. */
-export type Prefilter = (ctx: PrefilterContext) => Promise<{ ids?: Set<string>; fallback?: string; backend?: string; info?: Partial<IndexInfo>;
+export interface ProbeContext { vault: SearchVault; manifest: Manifest; input: SearchInput; mode: string }
+export type Prefilter = ((ctx: PrefilterContext) => Promise<{ ids?: Set<string>; fallback?: string; backend?: string; info?: Partial<IndexInfo>;
   /** keyword relevance for EVERY id in `ids` (higher is better), e.g. SQLite FTS5 BM25; absent means the built-in lexical scorer ranks */ ranks?: Map<string, number>;
-  /** term -> id -> proven upper bound on that term's occurrences in the object's raw text (capped at 3); an id absent from the map has no proven bound */ countBounds?: Map<string, Map<string, number>> }>;
+  /** term -> id -> proven upper bound on that term's occurrences in the object's raw text (capped at 3); an id absent from the map has no proven bound */ countBounds?: Map<string, Map<string, number>> }>) & {
+  /** Optional whole-manifest check run before any per-entry work: true ONLY when the index proves that no entry (readable or not) can be a candidate; any doubt returns false. */
+  probe?: (ctx: ProbeContext) => Promise<boolean> };
 
 export function assertSearchIdentity(vault: SearchVault, input: SearchInput, actor: ActorContext): void {
   if (input.includeHistory && !actor.permissions.includes('*') && !actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'History search requires history:read permission');
@@ -212,6 +215,10 @@ export async function retrieve(vault: SearchVault, input: SearchInput, actor: Ac
   await manifest.sync();
   const allowed = await manifest.readableScopes();
   const filters = input.scopes?.length ? input.scopes : undefined;
+  if (!filters && prefilter.probe && !input.kinds?.length && !input.tags?.length && !input.since && !input.until && (scorer.mode === 'grep' || scorer.mode === 'keyword') && await profileAsync('search.negative_probe', () => prefilter.probe!({ vault, manifest, input, mode: scorer.mode }))) {
+    // The index proves no entry can match, so nothing is loaded and the answer is identical to the full pipeline over an empty candidate set.
+    return { ...finishSearch([], input, backend, scorer.mode, 0), ranking: 'lexical', index: { entries: manifest.activeCount(allowed), candidates: 0, loaded: 0, textPrefilter: 'fs-trigram', fastPath: 'no-candidates', lagObjects: 0 } };
+  }
   const entries: ManifestEntry[] = [];
   for (const sk of allowed) for (const id of manifest.byScope.get(sk) ?? []) { const e = manifest.entries.get(id)!; if ((!filters || filters.some(scope => scopeMatches(e.scope, scope))) && metadataMatches(input, e)) entries.push(e); }
   const narrowed = await profileAsync('search.candidate_discovery', () => prefilter({ vault, manifest, entries, input, actor }));
@@ -284,4 +291,16 @@ export const filesPrefilter: Prefilter = async ({ vault, manifest, entries, inpu
   } else byTerm = await scanFiles(vault.root, entries, spec);
   for (const term of terms) { const titles = titleMatches(entries, term, spec.caseSensitive); const set = byTerm.get(term) ?? new Set<string>(); for (const id of titles) set.add(id); byTerm.set(term, set); }
   return { ids: combine(spec, byTerm), ...(indexNote ? { fallback: indexNote } : {}), info: { textPrefilter: useRg ? 'ripgrep' : 'file-scan', ...rgInfo } };
+};
+
+/** True only when the trigram index serves every term, is readable and current for every entry it lists, and no term can match an indexed text or a title anywhere in the manifest. */
+filesPrefilter.probe = async ({ vault, manifest, input }) => {
+  if (input.regex || !['auto', 'grep', 'keyword', undefined].includes(input.mode)) return false;
+  const spec = textSpec(input); if (!spec) return false;
+  const terms = distinctTerms(spec); if (!fsIndexServes(terms)) return false;
+  try {
+    const found = await fsIndexLookup(vault.root, manifest, terms, spec.caseSensitive, false);
+    for (const term of terms) { const set = found.byTerm.get(term) ?? new Set<string>(); for (const id of manifest.titleIds(term, spec.caseSensitive)) set.add(id); found.byTerm.set(term, set); }
+    return combine(spec, found.byTerm).size === 0;
+  } catch { return false; /* absent, damaged or unreadable index: the regular pipeline decides */ }
 };

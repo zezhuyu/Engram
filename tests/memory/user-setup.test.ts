@@ -1,3 +1,4 @@
+import '../helpers/isolate-user-state.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,6 +12,7 @@ import { createRegistration } from '../../packages/memory/capture.js';
 import { drainRemoteCaptureSpool } from '../../packages/memory/remote-spool.js';
 import { captureForUser, insideProject, setUserPaused, setupUser, uninstallUser, userStatus } from '../../packages/memory/user-setup.js';
 import { defaultBinding, writeBinding } from '../../packages/core/project-binding.js';
+import { trustProject } from '../../packages/core/project-trust.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
 
@@ -81,7 +83,7 @@ test('every conversation reaches the user workspace with its project, whether or
   process.env.ENGRAM_USER_TOKEN = srv.token;
   await setupUser({ hosts: ['claude-code'], mcpUrl: srv.url, tokenEnv: 'ENGRAM_USER_TOKEN', registrationId: srv.registrationId, principalId: 'me', exclude: ['/private-client'], consent: true, ...paths });
   const plain = path.join(base, 'projects', 'never-initialized'); await mkdir(plain, { recursive: true });
-  const bound = path.join(base, 'projects', 'bound-project'); await mkdir(bound, { recursive: true }); await writeBinding(bound, { ...defaultBinding({ workspaceId: 'bound-project', serverUrl: srv.url, hosts: ['claude-code'], credentialRef: 'ENGRAM_USER_TOKEN', captureConsent: true }) });
+  const bound = path.join(base, 'projects', 'bound-project'); await mkdir(bound, { recursive: true }); const boundBinding = defaultBinding({ workspaceId: 'bound-project', serverUrl: srv.url, hosts: ['claude-code'], credentialRef: 'ENGRAM_USER_TOKEN', captureConsent: true }); await writeBinding(bound, boundBinding); await trustProject(bound, boundBinding);
   const boundSub = path.join(bound, 'src'); await mkdir(boundSub);
   const excluded = path.join(base, 'projects', 'private-client'); await mkdir(excluded, { recursive: true });
   assert.equal(await captureForUser('claude-code', payload(plain, 'I prefer concise commit messages')), 'queued');

@@ -5,8 +5,11 @@ import { resolve } from 'node:path';
 import { initializeProject, refreshContext, type Host } from '../project-init.js';
 import { projectDoctor } from '../memory/project-doctor.js';
 import { runContextHook } from '../memory/context-hook.js';
+import { trustEngramCodexHooks } from '../memory/codex-trust.js';
+import { recordHandoffState, runHandoffHook } from '../memory/handoff-hook.js';
 import { localSink, pathsFromHookPayload, reconcile, remoteSink, syncFile, syncReport } from '../memory/file-sync.js';
 import { readBinding } from '../core/project-binding.js';
+import { isTrusted } from '../core/project-trust.js';
 import { captureForUser, insideProject, setUserPaused, setupUser, uninstallUser, userStatus } from '../memory/user-setup.js';
 import { touchActivity } from '../adaptive/activity.js';
 import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
@@ -30,10 +33,11 @@ init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
 init --project --host claude-code|codex [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
-                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID]: writes .engram/project.json (gitignored), managed blocks, MCP config
-setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...]
+                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools]: writes .engram/project.json (gitignored), managed blocks, MCP config
+setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...] [--include PATTERN,...]
                                One-time user-level capture for EVERY project (also --show --pause --resume --uninstall)
 notes sync [--project-dir PATH] [--report]          Synchronize approved Markdown files (needs init --file-sync-consent)
+project trust-codex-hooks [--yes] [--project-dir PATH]   Codex runs project hooks only once trusted: show, then (with --yes) trust, this project's Engram hooks
 project refresh-context [--project-dir PATH] [--remote]   Rewrite the managed blocks from the current accepted profile
 doctor --project [--project-dir PATH] [--no-probe]        Per-feature PASS/INCOMPLETE/DISABLED/FAIL/NOT_RUN report for this project
 doctor | verify | recover | reconcile
@@ -81,7 +85,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -117,6 +121,10 @@ async function memoryCommand(client: Engram, root: string, sub: string | undefin
     try { const result = await runContextHook({ host: required(text(flags, 'host'), '--host'), stdin: await readStdin(), ...(text(flags, 'project-root') ? { projectRoot: text(flags, 'project-root')! } : {}), ...(flags.user ? { user: true } : {}), ...(text(flags, 'root') ? { root: text(flags, 'root')! } : {}), ...(text(flags, 'format') ? { format: text(flags, 'format') as 'claude' | 'text' } : {}) }); return result.output; }
     catch { return ''; }
   }
+  if (sub === 'handoff-check') { // Stop hook: asks the agent (once) to write the handoff; silent otherwise
+    try { const result = await runHandoffHook({ host: required(text(flags, 'host'), '--host'), stdin: await readStdin(), ...(text(flags, 'project-root') ? { projectRoot: text(flags, 'project-root')! } : {}), ...(text(flags, 'root') ? { root: text(flags, 'root')! } : {}) }); if (result.outcome !== 'skipped' || !/outside this project/.test(result.reason)) await recordHandoffState(text(flags, 'host')!, result); return result.output; }
+    catch { return ''; }
+  }
   if (sub === 'drain') { const r = await drainSpool(root, { limit: number(flags, 'limit') }); return flags.quiet ? '' : r; }
   if (sub === 'record') return recordExplicit(root, required(text(flags, 'registration'), '--registration'), { type: required(text(flags, 'type'), '--type') as 'decision', sessionId: required(text(flags, 'session'), '--session'), text: required(text(flags, 'text'), '--text'), ...(text(flags, 'title') ? { title: text(flags, 'title')! } : {}), ...(text(flags, 'speaker') ? { speaker: text(flags, 'speaker') as 'user' } : {}) });
   if (sub === 'register') return createRegistration(client.vault, { host: required(text(flags, 'host'), '--host'), principalId: required(text(flags, 'principal'), '--principal'), workspaceId: required(text(flags, 'workspace'), '--workspace'), ...(text(flags, 'collection') ? { collectionId: text(flags, 'collection')! } : {}), ...(list(flags, 'capture') ? { capture: list(flags, 'capture') as MemoryEventType[] } : {}), ...(list(flags, 'exclude') ? { excludePatterns: list(flags, 'exclude')! } : {}), consent: flags.consent === true });
@@ -129,7 +137,7 @@ async function memoryCommand(client: Engram, root: string, sub: string | undefin
     const host = required(text(flags, 'host'), '--host'); const adapter = createAdapter(host, { root, ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}) });
     const action = required(third, 'adapter action (detect|install|status|uninstall)');
     if (action === 'detect') return adapter.detect(); if (action === 'status') return adapter.status(); if (action === 'uninstall') return adapter.uninstall();
-    if (action === 'install') return adapter.install({ consent: flags.consent === true, dryRun: flags['dry-run'] === true, principalId: required(text(flags, 'principal'), '--principal'), workspaceId: required(text(flags, 'workspace'), '--workspace'), ...(text(flags, 'collection') ? { collectionId: text(flags, 'collection')! } : {}), ...(list(flags, 'capture') ? { capture: list(flags, 'capture') as MemoryEventType[] } : {}), ...(list(flags, 'exclude') ? { excludePatterns: list(flags, 'exclude')! } : {}), ...(text(flags, 'mcp-url') ? { mcpUrl: text(flags, 'mcp-url')! } : {}), ...(text(flags, 'token-env') ? { tokenEnv: text(flags, 'token-env')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}) });
+    if (action === 'install') { const projectRoot = text(flags, 'project-root'); const installed = await adapter.install({ ...(projectRoot ? { projectRoot: resolve(projectRoot) } : {}), consent: flags.consent === true, dryRun: flags['dry-run'] === true, principalId: required(text(flags, 'principal'), '--principal'), workspaceId: required(text(flags, 'workspace'), '--workspace'), ...(text(flags, 'collection') ? { collectionId: text(flags, 'collection')! } : {}), ...(list(flags, 'capture') ? { capture: list(flags, 'capture') as MemoryEventType[] } : {}), ...(list(flags, 'exclude') ? { excludePatterns: list(flags, 'exclude')! } : {}), ...(text(flags, 'mcp-url') ? { mcpUrl: text(flags, 'mcp-url')! } : {}), ...(text(flags, 'token-env') ? { tokenEnv: text(flags, 'token-env')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}) }); return projectRoot ? installed : { ...installed, warnings: ['These hooks live in the host\'s user-level settings file and fire for EVERY project on this machine, not only this workspace\'s project. Add --project-root PATH to limit them to one project, or use `mdb init --project`, which does that for you.'] }; }
     throw new MDBError('INVALID_ARGUMENT', 'Unknown adapter action');
   }
   const request = (mode: MemorySearchRequest['mode'], query?: string): MemorySearchRequest => ({
@@ -188,7 +196,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (hostsFlag && singleHost) throw new MDBError('INVALID_ARGUMENT', 'use --host or --hosts, not both');
       const hostList = hostsFlag === 'auto' ? 'auto' as const : (hostsFlag ?? required(singleHost, '--host or --hosts')).split(',').map(item => item.trim()).filter(Boolean) as Host[];
       if (hostList !== 'auto') for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host/--hosts must name claude-code and/or codex (or --hosts auto)');
-      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
+      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
       return { initialized, project: setup };
     }
     case 'notes': {
@@ -197,6 +205,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       const quiet = !!flags.hook; // a hook is silent and fail-open
       try {
         const binding = await readBinding(dir); if (flags.report) return syncReport(dir, binding);
+        if (!(await isTrusted(dir, binding))) { if (quiet) return ''; throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'This project binding is not trusted on this machine; run `mdb init --project` here first'); }
         const input = quiet ? await readStdin() : ''; if (quiet && text(flags, 'project-root') && !(await insideProject(input, dir))) return '';
         const sink = binding.serverUrl ? remoteSink(binding) : localSink(new Engram(required(text(flags, 'root'), '--root (local mode)')), binding.workspaceId);
         const ctx = { projectDir: dir, binding, sink }; const paths = quiet ? pathsFromHookPayload(input) : undefined;
@@ -212,11 +221,12 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (flags.uninstall) return uninstallUser();
       const hostList = required(text(flags, 'hosts'), '--hosts').split(',').map(item => item.trim()).filter(Boolean) as Host[];
       for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--hosts must name claude-code and/or codex');
-      return setupUser({ hosts: hostList, mcpUrl: required(text(flags, 'mcp-url'), '--mcp-url'), tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')!, registrationId: required(text(flags, 'registration'), '--registration'), principalId: required(text(flags, 'principal'), '--principal'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(list(flags, 'exclude') ? { exclude: list(flags, 'exclude')! } : {}), consent: !!flags.consent });
+      return setupUser({ hosts: hostList, mcpUrl: required(text(flags, 'mcp-url'), '--mcp-url'), tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')!, registrationId: required(text(flags, 'registration'), '--registration'), principalId: required(text(flags, 'principal'), '--principal'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(list(flags, 'exclude') ? { exclude: list(flags, 'exclude')! } : {}), ...(list(flags, 'include') ? { include: list(flags, 'include')! } : {}), consent: !!flags.consent });
     }
     case 'doctor': if (flags.project) return projectDoctor(resolve(text(flags, 'project-dir', process.cwd())!), { ...(flags['no-probe'] ? { probeRemote: false } : {}) }); return v.doctor();
     case 'project': {
-      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project refresh-context [--project-dir PATH]');
+      if (sub === 'trust-codex-hooks') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const result = await trustEngramCodexHooks(dir, { confirm: !!flags.yes }); return flags.yes ? result : { ...result, note: 'Nothing was changed. These are the exact hook commands Codex would then run in this project; rerun with --yes to record trust for them (only these) in your Codex config.' }; }
+      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project refresh-context | trust-codex-hooks [--yes] [--project-dir PATH]');
       return refreshContext(resolve(text(flags, 'project-dir', process.cwd())!), flags.remote ? {} : { client });
     }
     case 'verify': return v.verify();

@@ -2,6 +2,7 @@ import { promises as fs, watch as fsWatch } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import YAML from 'yaml';
+import { parseFrontmatterFast } from './frontmatter-fast.js';
 import { atomicWrite, atomicWriteVolatile, flushKeys, LocalObjectStore, mkdirDurable, safePath, syncDirectory, withVaultLock } from '../storage-local/index.js';
 import { createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 import { describeModel } from '../models/factory.js';
@@ -44,7 +45,7 @@ export function serializeDocument(doc: Document): string {
 export function parseDocument(text: string): Document {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text);
   if (!match) throw new MDBError('INVALID_INPUT', 'Document requires YAML frontmatter');
-  let m: Record<string, unknown>; try { m = YAML.parse(match[1]!) as Record<string, unknown>; } catch { throw new MDBError('INVALID_INPUT', 'Invalid YAML frontmatter'); }
+  let m: Record<string, unknown>; try { m = parseFrontmatterFast(match[1]!) ?? YAML.parse(match[1]!) as Record<string, unknown>; } catch { throw new MDBError('INVALID_INPUT', 'Invalid YAML frontmatter'); }
   if (!m || m.schema_version !== 1 || typeof m.id !== 'string' || typeof m.revision_id !== 'string' || typeof m.title !== 'string' || typeof m.kind !== 'string') throw new MDBError('INVALID_INPUT', 'Invalid document schema');
   validId(m.id); validId(m.revision_id);
   const scope: Scope = m.scope === 'global' ? { type: 'global', area: m.area as 'wiki' } : { type: 'workspace', workspaceId: String(m.workspace_id), ...(m.collection_id ? { collectionId: String(m.collection_id) } : {}) };

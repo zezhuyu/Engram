@@ -29,7 +29,14 @@ const wsScope = (workspaceId: string): Scope => ({ type: 'workspace', workspaceI
 export async function checkpoint(ctx: StageContext): Promise<void> {
   const p = ctx.pressure(); if (ctx.signal.aborted || p) { const pr = p ?? { ok: false as const, reason: 'FOREGROUND_ACTIVITY' as const, detail: 'cancelled' }; throw new PauseSignal((pr as Extract<Pressure, { ok: false }>).reason, (pr as Extract<Pressure, { ok: false }>).detail); }
 }
-const lowRisk = (p: Proposal) => p.status === 'pending' && p.critic?.verdict === 'accept' && !(p.flags?.length) && p.input.metadata?.evidenceClass === 'explicit' && p.input.metadata?.sensitivity !== 'sensitive';
+/**
+ * Low risk = the user said it explicitly, the critic accepts it, it is not sensitive, and nothing needs a human: no flags, OR the one flag `supersedes_earlier` on a proposal where the validator itself found
+ * a correction marker in the user's own words (`correctionDetected`, a deterministic rule on the cited user text, not a model claim). Without that, a stated correction would leave the old preference in force
+ * until someone approved by hand. A supersession without a detected correction (a model merely asserting "explicit") still waits for review.
+ */
+const lowRisk = (p: Proposal) => p.status === 'pending' && p.critic?.verdict === 'accept'
+  && (!(p.flags?.length) || (p.flags!.length === 1 && p.flags![0] === 'supersedes_earlier' && p.input.metadata?.correctionDetected === true))
+  && p.input.metadata?.evidenceClass === 'explicit' && p.input.metadata?.sensitivity !== 'sensitive';
 
 /** Runs one model-backed engine job against the sealed snapshot and returns the proposals it created. */
 async function runEngineJob(ctx: StageContext, kind: 'profile' | 'dream', input: Record<string, unknown>): Promise<{ status: string; error?: string; proposals: Proposal[]; trace?: unknown }> {

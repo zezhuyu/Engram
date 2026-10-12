@@ -40,13 +40,14 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
   const entries = [...manifest.entries.values()].filter(e => SAFE_ID.test(e.id) && SAFE_ID.test(e.rev)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const base = await safePath(vault.root, '.mdb/indexes'); await fs.mkdir(base, { recursive: true });
   const work = path.join(base, `fs-trigram.${randomUUID()}.tmp`); await fs.mkdir(path.join(work, 'parts'), { recursive: true });
+  const unreadable = new Set<number>(); // ordinals whose revision could not be read: listed with a revision that never matches, so they stay permanent candidates
   try {
     const blocks = Math.ceil(entries.length / BLOCK);
     for (let block = 0; block < blocks; block++) {
       const slice = entries.slice(block * BLOCK, (block + 1) * BLOCK);
       const texts: string[] = new Array(slice.length); let next = 0;
       await Promise.all(Array.from({ length: Math.min(32, slice.length) }, async () => {
-        for (let i = next++; i < slice.length; i = next++) { try { texts[i] = (await fs.readFile(await safePath(vault.root, `.mdb/objects/${slice[i]!.id}/revs/${slice[i]!.rev}.md`), 'utf8')).toLowerCase(); } catch { texts[i] = ''; } }
+        for (let i = next++; i < slice.length; i = next++) { try { texts[i] = (await fs.readFile(await safePath(vault.root, `.mdb/objects/${slice[i]!.id}/revs/${slice[i]!.rev}.md`), 'utf8')).toLowerCase(); } catch { texts[i] = ''; unreadable.add(block * BLOCK + i); } }
       }));
       const buckets: Array<Map<number, number[]>> = Array.from({ length: SHARDS }, () => new Map());
       for (let i = 0; i < slice.length; i++) { // ascending ordinal order keeps every posting list sorted
@@ -80,7 +81,7 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
       await fs.writeFile(path.join(work, `s${s}.bin`), file);
     }
     await fs.rm(path.join(work, 'parts'), { recursive: true, force: true });
-    await fs.writeFile(path.join(work, 'docs.tsv'), entries.map(e => `${e.id}\t${e.rev}`).join('\n') + '\n');
+    await fs.writeFile(path.join(work, 'docs.tsv'), entries.map((e, ordinal) => `${e.id}\t${unreadable.has(ordinal) ? '-' : e.rev}`).join('\n') + '\n');
     await fs.writeFile(path.join(work, 'meta.json'), JSON.stringify({ schema: SCHEMA, shards: SHARDS, documents: entries.length, builtAt: new Date().toISOString(), manifestSequence: manifest.sequence }));
     const target = await safePath(vault.root, DIR); const old = `${target}.old.${randomUUID()}`;
     await fs.rename(target, old).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });

@@ -172,7 +172,7 @@ export class MemoryRecall {
   }
 
   /** Searches user insights with their evidence. Superseded and rejected items are hidden unless asked for by status. Respects the same access rules as every other read. */
-  async insights(input: { query?: string; category?: string; status?: string; evidenceClass?: string; scopeLabel?: string; limit?: number }): Promise<MemoryPage & { insights: Array<{ id: string; claim: string; category?: string; status: string; evidenceClass?: string; confidence?: string; scope: string; sources: unknown[]; supersededBy?: string }> }> {
+  async insights(input: { query?: string; category?: string; status?: string; evidenceClass?: string; scopeLabel?: string; limit?: number }): Promise<MemoryPage & { insights: Array<{ id: string; claim: string; category?: string; status: string; evidenceClass?: string; confidence?: string; sensitivity?: string; scope: string; sources: unknown[]; supersededBy?: string }> }> {
     const manifest = await manifestFor(this.vault); await manifest.sync();
     const limit = input.limit ?? 20; if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('INVALID_INPUT', 'limit must be 1..100');
     let entries: ManifestEntry[];
@@ -186,7 +186,7 @@ export class MemoryRecall {
       if (input.evidenceClass && doc.metadata.evidenceClass !== input.evidenceClass) continue;
       if (input.scopeLabel && (typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : 'global') !== input.scopeLabel) continue;
       items.push({ id: doc.id, uri: doc.uri, revisionId: doc.revisionId, kind: doc.kind, at: doc.updatedAt, title: doc.title, scope: doc.scope, snippet: doc.body.replace(/\s+/g, ' ').slice(0, 300) });
-      insights.push({ id: doc.id, claim: doc.body, ...(typeof doc.metadata.category === 'string' ? { category: doc.metadata.category } : {}), status: doc.status, ...(typeof doc.metadata.evidenceClass === 'string' ? { evidenceClass: doc.metadata.evidenceClass } : {}), ...(typeof doc.metadata.confidenceLabel === 'string' ? { confidence: doc.metadata.confidenceLabel } : {}), scope: typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : doc.scope.type === 'global' ? 'global' : doc.scope.workspaceId, sources: Array.isArray(doc.metadata.sources) ? doc.metadata.sources : [], ...(typeof doc.metadata.supersededBy === 'string' ? { supersededBy: doc.metadata.supersededBy } : {}) });
+      insights.push({ id: doc.id, claim: doc.body, ...(typeof doc.metadata.category === 'string' ? { category: doc.metadata.category } : {}), status: doc.status, ...(typeof doc.metadata.evidenceClass === 'string' ? { evidenceClass: doc.metadata.evidenceClass } : {}), ...(typeof doc.metadata.confidenceLabel === 'string' ? { confidence: doc.metadata.confidenceLabel } : {}), ...(typeof doc.metadata.sensitivity === 'string' ? { sensitivity: doc.metadata.sensitivity } : {}), scope: typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : doc.scope.type === 'global' ? 'global' : doc.scope.workspaceId, sources: Array.isArray(doc.metadata.sources) ? doc.metadata.sources : [], ...(typeof doc.metadata.supersededBy === 'string' ? { supersededBy: doc.metadata.supersededBy } : {}) });
       if (items.length >= limit) break;
     }
     return { items, insights, truncated: false, mode: 'insight', estimatedTokens: estimateTokens(JSON.stringify(items)) };

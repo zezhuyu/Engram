@@ -4,15 +4,17 @@ import { BINDING_FILE, readBinding, type BindingHost, type ProjectBinding } from
 import { createAdapter } from './adapters.js';
 import { defaultRemoteSpoolDirectory } from './remote-spool.js';
 import { openRemoteSession, RemoteError } from './remote-client.js';
-import { locateBlock, projectSettingsPath, type Capability, type FeatureStatus } from '../project-init.js';
+import { gitTracking, locateBlock, projectSettingsPath, type Capability, type FeatureStatus } from '../project-init.js';
 import { contextStateFile, type ContextState } from './context-hook.js';
 import { syncReport } from './file-sync.js';
+import { codexHookState } from './codex-trust.js';
+import { isTrusted } from '../core/project-trust.js';
 
 const INSTRUCTION_FILE: Record<BindingHost, string> = { 'claude-code': 'CLAUDE.md', codex: 'AGENTS.md' };
 const cap = (status: FeatureStatus, detail: string): Capability => ({ status, detail });
 export interface HostReport { instructions: Capability; mcpConfig: Capability; capture: Capability; sessionContext: Capability }
 export interface ProjectDoctorReport {
-  projectDir: string; binding: { present: boolean; workspaceId?: string; hosts?: string[]; serverUrl?: string; credentialRef?: string; tokenAvailable?: boolean; registrationId?: string; error?: string };
+  projectDir: string; binding: { present: boolean; trusted?: boolean; workspaceId?: string; hosts?: string[]; serverUrl?: string; credentialRef?: string; tokenAvailable?: boolean; registrationId?: string; error?: string };
   hosts: Record<string, HostReport>; features: { capture: Capability; context: Capability; notes: Capability; remote: Capability; offline: Capability; sessionContext: Capability; fileSync: Capability };
   summary: Record<FeatureStatus, number>;
 }
@@ -28,7 +30,13 @@ async function hostReport(dir: string, host: BindingHost, binding: ProjectBindin
       if (!marker) instructions = cap('INCOMPLETE', 'managed block is from an older Engram version; run `mdb project refresh-context`');
       else if (marker[1] !== binding.workspaceId) instructions = cap('FAIL', `block names workspace ${marker[1]} but the binding says ${binding.workspaceId}`);
       else if (marker[4] !== (binding.managed.projectionRevision ?? 'none')) instructions = cap('INCOMPLETE', `block projection ${marker[4]} differs from the binding (${binding.managed.projectionRevision ?? 'none'}); run \`mdb project refresh-context\``);
-      else instructions = cap('PASS', `markers intact, workspace ${marker[1]}, projection ${marker[4]}`);
+      else {
+        const personal = block.split('\n').filter(l => /^- /.test(l) && !/^- (Before substantial work|None accepted|No accepted|Accepted preferences are delivered)/.test(l)).length;
+        const tracking = gitTracking(dir, INSTRUCTION_FILE[host]);
+        instructions = personal && (tracking === 'tracked' || tracking === 'unignored')
+          ? cap('INCOMPLETE', `markers intact, but ${INSTRUCTION_FILE[host]} is ${tracking === 'tracked' ? 'tracked by git' : 'not git-ignored'} and holds ${personal} accepted personal preference/insight line(s): ignore the file or rerun init with --no-profile-in-files`)
+          : cap('PASS', `markers intact, workspace ${marker[1]}, projection ${marker[4]}${personal ? ` (${personal} profile line(s); file is ${tracking})` : ''}`);
+      }
     }
   } catch (error) { instructions = cap('FAIL', error instanceof Error ? error.message : String(error)); }
   let mcpConfig: Capability;
@@ -46,7 +54,11 @@ async function hostReport(dir: string, host: BindingHost, binding: ProjectBindin
   if (!binding.captureConsent) capture = cap('DISABLED', 'no capture consent recorded');
   else try {
     const status = await createAdapter(host, { root: dir, ...(settingsPath ? { settingsPath } : {}) }).status();
-    capture = !status.installed ? cap('FAIL', 'consent recorded but no hooks are installed') : binding.registrationId && !status.registrations.includes(binding.registrationId) && binding.serverUrl ? cap('INCOMPLETE', `hooks installed, none for registration ${binding.registrationId}`) : cap(status.coverage === 'full' ? 'PASS' : 'INCOMPLETE', `hooks installed, coverage ${status.coverage}${status.notes.length ? `; ${status.notes[0]}` : ''}`);
+    // A remote registration lives on the server, so the local registration list says nothing about it: judge by which lifecycle hooks are actually installed.
+    const missing = (['session.start', 'user.message', 'tool.result'] as const).filter(event => !status.capture.includes(event));
+    capture = !status.installed ? cap('FAIL', 'consent recorded but no hooks are installed')
+      : binding.serverUrl ? (missing.length ? cap('INCOMPLETE', `hooks installed for ${status.capture.join(', ')} but missing ${missing.join(', ')}`) : cap('PASS', `hooks installed for ${status.capture.join(', ')} (registration ${binding.registrationId ?? 'unknown'} is checked by the server, not here)`))
+      : cap(status.coverage === 'full' ? 'PASS' : 'INCOMPLETE', `hooks installed, coverage ${status.coverage}${status.notes.length ? `; ${status.notes[0]}` : ''}`);
   } catch (error) { capture = cap('FAIL', error instanceof Error ? error.message : String(error)); }
   // Installed is not working: the hook records each attempt, and only a recorded fresh result counts as PASS.
   let sessionContext: Capability;
@@ -56,13 +68,22 @@ async function hostReport(dir: string, host: BindingHost, binding: ProjectBindin
     else {
       let states: Record<string, ContextState> = {}; try { states = JSON.parse(await fs.readFile(contextStateFile(), 'utf8')); } catch { /* never ran */ }
       const last = states[`${host}:${binding.workspaceId}`]; const ageDays = last ? (Date.now() - Date.parse(last.at)) / 86_400_000 : Infinity;
-      if (!last) sessionContext = cap('INCOMPLETE', 'hook installed but it has not run yet (start a session in this project)');
-      else if (last.outcome === 'fresh' && ageDays <= 7) sessionContext = host === 'codex' ? cap('INCOMPLETE', `hook produced fresh context at ${last.at}; Codex's use of SessionStart output is not verified on a real session`) : cap('PASS', `last session start produced fresh context at ${last.at} (model-side use is not observable)`);
+      let blocked: Capability | undefined;
+      if (host === 'codex' && process.env.ENGRAM_CODEX_PROBE !== '0') try { const state = await codexHookState(dir); if (state.untrusted.length) blocked = cap('FAIL', `Codex has not trusted ${state.untrusted.length} Engram hook(s) for this project, so it never runs them. Review them in Codex (/hooks) or run \`mdb project trust-codex-hooks --yes\`.`); else if (!state.engram.length) blocked = cap('FAIL', 'Codex does not list the Engram hooks for this project (is the project trusted in Codex, and hooks enabled?)'); } catch (error) { blocked = cap('INCOMPLETE', `Codex trust could not be checked: ${error instanceof Error ? error.message : String(error)}`); }
+      if (blocked) sessionContext = blocked;
+      else if (!last) sessionContext = cap('INCOMPLETE', 'hook installed but it has not run yet (start a session in this project)');
+      else if (last.outcome === 'fresh' && ageDays <= 7) sessionContext = cap('PASS', `last session start produced fresh context at ${last.at}${host === 'codex' ? ' and Codex trusts the hook' : ''} (model-side use is not observable from here)`);
       else if (last.outcome === 'fresh') sessionContext = cap('INCOMPLETE', `last fresh context was at ${last.at}, more than 7 days ago`);
       else if (last.outcome === 'stale') sessionContext = cap('INCOMPLETE', `last run used a STALE cached context (${last.reason ?? 'server unreachable'})`);
       else sessionContext = cap(last.outcome === 'revoked' ? 'FAIL' : 'INCOMPLETE', `last run produced nothing: ${last.outcome}${last.reason ? ` (${last.reason})` : ''}`);
     }
   } catch (error) { sessionContext = cap('FAIL', error instanceof Error ? error.message : String(error)); }
+  // The hooks carry the absolute project path they were installed for; a moved or renamed directory leaves them recording nothing, silently.
+  if (capture.status === 'PASS' || capture.status === 'INCOMPLETE') try {
+    const text = await fs.readFile(settingsPath ?? projectSettingsPath(dir, host), 'utf8'); const roots = [...text.matchAll(/--project-root \\"([^"\\]+)\\"/g)].map(m => m[1]!);
+    const real = await fs.realpath(dir); const known = await Promise.all(roots.map(r => fs.realpath(r).catch(() => r)));
+    if (roots.length && !known.includes(real)) capture = cap('INCOMPLETE', `hooks were installed for ${roots[0]}, not ${dir}: the project was moved or renamed, so sessions here record nothing. Rerun \`mdb init --project\`.`);
+  } catch { /* settings unreadable: reported by the capture check */ }
   return { instructions, mcpConfig, capture, sessionContext };
 }
 
@@ -84,10 +105,12 @@ export async function projectDoctor(projectDir: string, options: { settingsPaths
   const dir = path.resolve(projectDir); let binding: ProjectBinding;
   const none = (error: string): ProjectDoctorReport => { const features = { capture: cap('NOT_RUN', error), context: cap('NOT_RUN', error), notes: cap('NOT_RUN', error), remote: cap('NOT_RUN', error), offline: cap('NOT_RUN', error), sessionContext: cap('NOT_RUN', error), fileSync: cap('NOT_RUN', error) }; return { projectDir: dir, binding: { present: false, error }, hosts: {}, features, summary: summarize(features) }; };
   try { binding = await readBinding(dir); } catch (error) { return none((error as NodeJS.ErrnoException).code === 'ENOENT' ? `no ${BINDING_FILE}: this project is not initialized` : error instanceof Error ? error.message : String(error)); }
+  const trusted = await isTrusted(dir, binding);
   const hosts: Record<string, HostReport> = {}; for (const host of binding.hosts) hosts[host] = await hostReport(dir, host, binding, options.settingsPaths?.[host] ?? projectSettingsPath(dir, host));
   const token = binding.credentialRef ? process.env[binding.credentialRef] : undefined;
   let remote: Capability, notes: Capability;
-  if (!binding.serverUrl) { remote = cap('DISABLED', 'local mode'); notes = cap('PASS', 'local vault'); }
+  if (!trusted) { remote = cap('FAIL', 'this binding is not trusted on this machine (it was not created by `mdb init` here, or it changed): hooks ignore it and no server is contacted. Run `mdb init --project` here.'); notes = cap('INCOMPLETE', 'not verified: untrusted binding'); }
+  else if (!binding.serverUrl) { remote = cap('DISABLED', 'local mode'); notes = cap('PASS', 'local vault'); }
   else if (options.probeRemote === false) { remote = cap('NOT_RUN', 'remote probe skipped'); notes = cap('NOT_RUN', 'remote probe skipped'); }
   else if (!token) { remote = cap('INCOMPLETE', `$${binding.credentialRef} is not set in this shell`); notes = cap('INCOMPLETE', 'not verified without a token'); }
   else try {
@@ -108,6 +131,6 @@ export async function projectDoctor(projectDir: string, options: { settingsPaths
     sessionContext: worst(hostValues.map(h => h.sessionContext), cap('NOT_RUN', 'no hosts bound')),
     fileSync: await fileSyncFeature(dir, binding, options.settingsPaths),
   };
-  return { projectDir: dir, binding: { present: true, workspaceId: binding.workspaceId, hosts: binding.hosts, ...(binding.serverUrl ? { serverUrl: binding.serverUrl } : {}), ...(binding.credentialRef ? { credentialRef: binding.credentialRef, tokenAvailable: !!token } : {}), ...(binding.registrationId ? { registrationId: binding.registrationId } : {}) }, hosts, features, summary: summarize(features) };
+  return { projectDir: dir, binding: { present: true, trusted, workspaceId: binding.workspaceId, hosts: binding.hosts, ...(binding.serverUrl ? { serverUrl: binding.serverUrl } : {}), ...(binding.credentialRef ? { credentialRef: binding.credentialRef, tokenAvailable: !!token } : {}), ...(binding.registrationId ? { registrationId: binding.registrationId } : {}) }, hosts, features, summary: summarize(features) };
 }
 function summarize(features: Record<string, Capability>): Record<FeatureStatus, number> { const out: Record<FeatureStatus, number> = { PASS: 0, INCOMPLETE: 0, DISABLED: 0, FAIL: 0, NOT_RUN: 0 }; for (const f of Object.values(features)) out[f.status]++; return out; }

@@ -48,7 +48,9 @@ function pct(values: number[], p: number): number { const sorted = [...values].s
 function stats(values: number[]): Record<string, number> { return { p50Ms: +pct(values, .5).toFixed(2), p95Ms: +pct(values, .95).toFixed(2), p99Ms: +pct(values, .99).toFixed(2), samples: values.length }; }
 function machine(): Record<string, unknown> { return { platform: os.platform(), release: os.release(), arch: os.arch(), cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, memoryBytes: os.totalmem() }; }
 function runtime(): Record<string, unknown> { return { node: process.version, versions: process.versions, execArgv: process.execArgv }; }
-function allocatedBytes(): number { return (v8.getHeapStatistics() as ReturnType<typeof v8.getHeapStatistics> & { total_allocated_bytes: number }).total_allocated_bytes; }
+/** V8's cumulative allocation counter is not exposed by every Node line (for example the Node 22 CI runner): there it is reported as unavailable (0) with allocationCounter set, never invented. */
+const allocationCounterAvailable = typeof (v8.getHeapStatistics() as { total_allocated_bytes?: unknown }).total_allocated_bytes === 'number';
+function allocatedBytes(): number { return allocationCounterAvailable ? (v8.getHeapStatistics() as unknown as { total_allocated_bytes: number }).total_allocated_bytes : 0; }
 async function codeRevision(): Promise<string> {
   try { return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
   catch {
@@ -307,7 +309,7 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
       timestamp: new Date().toISOString(), runs, warmups, cache: { mode: 'first-pass-plus-warm-interleaved', firstPass: 'measured after hash verification; reflects a fresh query pass, not a cold OS page cache', osPageCachePurged: false, note: 'Hash verification can warm OS page cache; no cold-cache claim is made.' },
       codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
       instrumentation: profileReport(), queryPlans: plans, cpu: { userMs: processCpu.user / 1000, systemMs: processCpu.system / 1000 },
-      memory: { startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocatedBytes() - allocStart,
+      memory: { allocationCounter: allocationCounterAvailable ? 'v8.total_allocated_bytes' : 'unavailable', startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocatedBytes() - allocStart,
         peakRssBytes: memorySamples.map(sample => sample.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: memorySamples.map(sample => sample.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: memorySamples.map(sample => sample.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), samples: memorySamples.length, samplingIntervalMs: 50 }
     };
     const outputDir = path.resolve(String(opts['output-dir'] ?? `verification/benchmarks/runs/${manifest.corpusId}`));

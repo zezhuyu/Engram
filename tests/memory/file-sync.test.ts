@@ -1,3 +1,4 @@
+import '../helpers/isolate-user-state.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -8,6 +9,7 @@ import { Engram } from '../../packages/sdk/index.js';
 import { createHttpCredential } from '../../packages/mcp/credentials.js';
 import { MAX_SYNC_FILE_BYTES, evaluatePath, globToRegExp, localSink, pathsFromHookPayload, reconcile, remoteSink, syncFile, syncReport, type SyncContext } from '../../packages/memory/file-sync.js';
 import { defaultBinding, writeBinding, type ProjectBinding } from '../../packages/core/project-binding.js';
+import { trustProject } from '../../packages/core/project-trust.js';
 import { initializeProject } from '../../packages/project-init.js';
 import { projectDoctor } from '../../packages/memory/project-doctor.js';
 import { createAdapter } from '../../packages/memory/adapters.js';
@@ -35,7 +37,7 @@ async function liveServer(t: Cleanup) {
 async function project(t: Cleanup, server: { url: string }, overrides: Partial<ProjectBinding> = {}) {
   const dir = await temp(t, 'engram-sync-'); await mkdir(path.join(dir, 'notes'), { recursive: true });
   const binding: ProjectBinding = { ...defaultBinding({ workspaceId: 'proj', serverUrl: server.url, hosts: ['claude-code'], credentialRef: 'ENGRAM_SYNC_TOKEN', captureConsent: false }), fileSyncConsent: true, ...overrides };
-  await writeBinding(dir, binding); const ctx: SyncContext = { projectDir: dir, binding, sink: remoteSink(binding, process.env, 1500) }; return { dir, binding, ctx };
+  await writeBinding(dir, binding); await trustProject(dir, binding); const ctx: SyncContext = { projectDir: dir, binding, sink: remoteSink(binding, process.env, 1500) }; return { dir, binding, ctx };
 }
 const notesOnServer = async (owner: Engram) => (await owner.listDocuments()).filter(d => d.kind === 'note');
 
