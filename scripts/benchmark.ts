@@ -48,9 +48,10 @@ function pct(values: number[], p: number): number { const sorted = [...values].s
 function stats(values: number[]): Record<string, number> { return { p50Ms: +pct(values, .5).toFixed(2), p95Ms: +pct(values, .95).toFixed(2), p99Ms: +pct(values, .99).toFixed(2), samples: values.length }; }
 function machine(): Record<string, unknown> { return { platform: os.platform(), release: os.release(), arch: os.arch(), cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, memoryBytes: os.totalmem() }; }
 function runtime(): Record<string, unknown> { return { node: process.version, versions: process.versions, execArgv: process.execArgv }; }
-/** V8's cumulative allocation counter is not exposed by every Node line (for example the Node 22 CI runner): there it is reported as unavailable (0) with allocationCounter set, never invented. */
+/** V8's cumulative allocation counter is absent on some Node lines (verified: Node 22.23.3): there every allocation figure is null and allocationCounter says 'unavailable'; nothing is estimated or defaulted to a number. */
 const allocationCounterAvailable = typeof (v8.getHeapStatistics() as { total_allocated_bytes?: unknown }).total_allocated_bytes === 'number';
-function allocatedBytes(): number { return allocationCounterAvailable ? (v8.getHeapStatistics() as unknown as { total_allocated_bytes: number }).total_allocated_bytes : 0; }
+function allocatedBytes(): number | null { return allocationCounterAvailable ? (v8.getHeapStatistics() as unknown as { total_allocated_bytes: number }).total_allocated_bytes : null; }
+const allocationDelta = (after: number | null, before: number | null): number | null => after === null || before === null ? null : after - before;
 async function codeRevision(): Promise<string> {
   try { return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
   catch {
@@ -197,7 +198,7 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
       console.log(JSON.stringify({ mode: 'build-partial', root, retained: true, documents: stopAfter, targetDocuments: size, seed, buildMs: +partialMs.toFixed(2), cpu: { userMs: partialCpu.user / 1000, systemMs: partialCpu.system / 1000 }, resumeCommand: `npm run benchmark -- build --size ${size} --seed ${seed} --root ${root} --resume` }, null, 2));
       return;
     }
-    const buildMs = performance.now() - started, buildCpu = process.cpuUsage(cpuStart), buildAllocationBytes = allocatedBytes() - allocationStart;
+    const buildMs = performance.now() - started, buildCpu = process.cpuUsage(cpuStart), buildAllocationBytes = allocationDelta(allocatedBytes(), allocationStart);
     const config = await vault.config(); config.sqlite.enabled = true; await fs.writeFile(path.join(root, 'mdb.yaml'), YAML.stringify(config));
     const indexStart = performance.now(); await new SQLiteSearch(vault).rebuild(); const sqliteBuildMs = performance.now() - indexStart; const fsIndexBuild = await buildFsIndex(vault);
     clearInterval(memoryTimer); memoryTimer = undefined; sampleBuildMemory();
@@ -248,7 +249,7 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
   const parity: Record<string, boolean | null> = {}; const outputs: Record<string, Record<string, string[]>> = { filesystem: {}, sqlite: {} };
   const truncatedOutputs: Record<string, Record<string, boolean>> = { filesystem: {}, sqlite: {} };
   const firstPass: Record<string, Record<string, number>> = { filesystem: {}, sqlite: {} };
-  const memorySamples: Array<{ at: number; rssBytes: number; heapUsedBytes: number; externalBytes: number; allocatedBytes: number }> = [];
+  const memorySamples: Array<{ at: number; rssBytes: number; heapUsedBytes: number; externalBytes: number; allocatedBytes: number | null }> = [];
   const sampleMemory = () => { const usage = process.memoryUsage(); memorySamples.push({ at: +performance.now().toFixed(2), rssBytes: usage.rss, heapUsedBytes: usage.heapUsed, externalBytes: usage.external, allocatedBytes: allocatedBytes() }); };
   const interval = setInterval(sampleMemory, 50); interval.unref(); sampleMemory();
   const processStart = process.cpuUsage(); const allocStart = allocatedBytes();
@@ -262,7 +263,7 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
     resetProfile();
     for (let wi = 0; wi < workloads.length; wi++) {
       const workload = workloads[wi]!;
-      const createBucket = () => ({ elapsed: [] as number[], cpuUser: [] as number[], cpuSystem: [] as number[], last: [] as string[], truncated: false, indexInfo: null as unknown, allocatedBytes: 0, heapDeltas: [] as number[] });
+      const createBucket = () => ({ elapsed: [] as number[], cpuUser: [] as number[], cpuSystem: [] as number[], last: [] as string[], truncated: false, indexInfo: null as unknown, allocatedBytes: null as number | null, heapDeltas: [] as number[] });
       const buckets = { filesystem: createBucket(), sqlite: createBucket() };
       for (let run = 0; run < runs; run++) {
         const order = (run + wi) % 2 ? ['sqlite', 'filesystem'] as const : ['filesystem', 'sqlite'] as const;
@@ -272,7 +273,7 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
           if (result === TIMED_OUT) { timedOutSamples[backend]![workload.name] = (timedOutSamples[backend]![workload.name] ?? 0) + 1; bucket.elapsed.push(queryTimeoutMs); bucket.cpuUser.push(0); bucket.cpuSystem.push(0); bucket.heapDeltas.push(0); continue; }
           bucket.truncated ||= result.cursor !== undefined;
           bucket.elapsed.push(performance.now() - start); const used = process.cpuUsage(cpu); bucket.cpuUser.push(used.user / 1000); bucket.cpuSystem.push(used.system / 1000);
-          bucket.allocatedBytes += allocatedBytes() - allocBefore; bucket.heapDeltas.push(process.memoryUsage().heapUsed - heapBefore);
+          { const used = allocationDelta(allocatedBytes(), allocBefore); bucket.allocatedBytes = used === null ? null : (bucket.allocatedBytes ?? 0) + used; }; bucket.heapDeltas.push(process.memoryUsage().heapUsed - heapBefore);
           bucket.last = result.hits.map(hit => hit.objectId).sort(); bucket.indexInfo = (result as typeof result & { index?: unknown }).index ?? null;
         }
       }
@@ -309,7 +310,7 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
       timestamp: new Date().toISOString(), runs, warmups, cache: { mode: 'first-pass-plus-warm-interleaved', firstPass: 'measured after hash verification; reflects a fresh query pass, not a cold OS page cache', osPageCachePurged: false, note: 'Hash verification can warm OS page cache; no cold-cache claim is made.' },
       codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
       instrumentation: profileReport(), queryPlans: plans, cpu: { userMs: processCpu.user / 1000, systemMs: processCpu.system / 1000 },
-      memory: { allocationCounter: allocationCounterAvailable ? 'v8.total_allocated_bytes' : 'unavailable', startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocatedBytes() - allocStart,
+      memory: { allocationCounter: allocationCounterAvailable ? 'v8.total_allocated_bytes' : 'unavailable', startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocationDelta(allocatedBytes(), allocStart),
         peakRssBytes: memorySamples.map(sample => sample.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: memorySamples.map(sample => sample.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: memorySamples.map(sample => sample.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), samples: memorySamples.length, samplingIntervalMs: 50 }
     };
     const outputDir = path.resolve(String(opts['output-dir'] ?? `verification/benchmarks/runs/${manifest.corpusId}`));

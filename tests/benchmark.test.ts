@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import v8 from 'node:v8';
 
 const runner = path.resolve('dist/scripts/benchmark.js');
 const run = (...args: string[]) => execFileSync(process.execPath, [runner, ...args], { encoding: 'utf8', timeout: 120_000 });
@@ -28,11 +29,12 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   const replayOutput = JSON.parse(run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir)) as { parityAll: boolean; parityComplete: boolean; corpusId: string };
   assert.equal(replayOutput.parityAll, true); assert.equal(replayOutput.parityComplete, true);
   assert.equal(replayOutput.corpusId, a.corpusId);
-  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number; allocationCounter: string }; parity: Record<string, boolean | null>; parityComplete: boolean };
+  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number | null; startAllocatedBytes: number | null; endAllocatedBytes: number | null; allocationCounter: string }; parity: Record<string, boolean | null>; parityComplete: boolean };
   assert.ok(Object.keys(report.instrumentation).some(key => key.includes('candidate.discovery')));
   assert.ok(report.queryPlans.length > 0);
-  if (report.memory.allocationCounter === 'v8.total_allocated_bytes') assert.ok(report.memory.allocatedBytes > 0); // not every Node line exposes the counter; then it must say so
-  else assert.equal(report.memory.allocationCounter, 'unavailable');
+  // V8's allocation counter does not exist on every Node line (it is absent on Node 22): the report must then say so and carry no allocation numbers at all.
+  if (report.memory.allocationCounter === 'v8.total_allocated_bytes') { assert.ok(Number.isFinite(report.memory.allocatedBytes) && report.memory.allocatedBytes! > 0); assert.ok(report.memory.endAllocatedBytes! > report.memory.startAllocatedBytes!); }
+  else { assert.equal(report.memory.allocationCounter, 'unavailable'); assert.equal(report.memory.allocatedBytes, null); assert.equal(report.memory.startAllocatedBytes, null); assert.equal(report.memory.endAllocatedBytes, null); assert.equal('v8' in process.versions && 'total_allocated_bytes' in v8.getHeapStatistics(), false, 'unavailable is only valid when this Node really lacks the counter'); }
   assert.ok(Object.values(report.parity).every(value => value === true)); assert.equal(report.parityComplete, true);
   assert.throws(() => run('cleanup', '--root', first, '--confirm-id', 'wrong'), /Refusing cleanup/);
   run('cleanup', '--root', first, '--confirm-id', a.corpusId);
