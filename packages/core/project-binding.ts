@@ -13,10 +13,10 @@ export const BINDING_HOSTS = ['claude-code', 'codex'] as const;
 export type BindingHost = (typeof BINDING_HOSTS)[number];
 export interface ProjectBinding {
   schemaVersion: 1; projectRoot: '.'; workspaceId: string; serverUrl?: string; hosts: BindingHost[]; credentialRef?: string; registrationId?: string;
-  captureConsent: boolean; fileSyncConsent: boolean; notesInclude: string[]; notesExclude: string[]; profileMaxTokens: number; sessionContextMaxTokens: number;
+  captureConsent: boolean; fileSyncConsent: boolean; /** false keeps accepted-profile text out of AGENTS.md/CLAUDE.md (it is still delivered at session start) */ profileInFiles?: boolean; notesInclude: string[]; notesExclude: string[]; profileMaxTokens: number; sessionContextMaxTokens: number;
   managed: { version: number; projectionRevision?: string; generatedAt?: string };
 }
-const KEYS = new Set(['schemaVersion', 'projectRoot', 'workspaceId', 'serverUrl', 'hosts', 'credentialRef', 'registrationId', 'captureConsent', 'fileSyncConsent', 'notesInclude', 'notesExclude', 'profileMaxTokens', 'sessionContextMaxTokens', 'managed']);
+const KEYS = new Set(['schemaVersion', 'projectRoot', 'workspaceId', 'serverUrl', 'hosts', 'credentialRef', 'registrationId', 'captureConsent', 'fileSyncConsent', 'profileInFiles', 'notesInclude', 'notesExclude', 'profileMaxTokens', 'sessionContextMaxTokens', 'managed']);
 const invalid = (message: string): never => { throw new MDBError('INVALID_INPUT', `Invalid project binding: ${message}`); };
 const WORKSPACE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/, ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -42,6 +42,7 @@ export function parseBinding(raw: unknown): ProjectBinding {
   if (v.credentialRef !== undefined && (typeof v.credentialRef !== 'string' || !ENV_NAME.test(v.credentialRef) || v.credentialRef.length > 80)) invalid('credentialRef must be an environment variable name');
   if (v.registrationId !== undefined && (typeof v.registrationId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(v.registrationId))) invalid('registrationId');
   for (const flag of ['captureConsent', 'fileSyncConsent'] as const) if (typeof v[flag] !== 'boolean') invalid(flag);
+  if (v.profileInFiles !== undefined && typeof v.profileInFiles !== 'boolean') invalid('profileInFiles');
   for (const list of ['notesInclude', 'notesExclude'] as const) { if (!Array.isArray(v[list]) || (v[list] as unknown[]).length > 50) invalid(list); (v[list] as unknown[]).forEach(item => glob(item, list)); }
   for (const item of v.notesInclude as string[]) if (!item.endsWith('.md')) invalid('notesInclude patterns must end in .md');
   const inRange = (value: unknown, lo: number, hi: number, label: string) => { if (!Number.isInteger(value) || (value as number) < lo || (value as number) > hi) invalid(`${label} must be ${lo}-${hi}`); };
@@ -58,12 +59,17 @@ export async function readBinding(projectDir: string): Promise<ProjectBinding> {
   let parsed: unknown; try { parsed = JSON.parse(await fs.readFile(file, 'utf8')); } catch { return invalid('file is not valid JSON'); }
   return parseBinding(parsed);
 }
-/** Nearest binding at or above `startDir`, or undefined (local mode). A malformed or symlinked binding is an error, never silently skipped. */
+/**
+ * Nearest binding at or above `startDir`, or undefined (local mode). The search never leaves the repository the directory belongs to: the first directory that holds a `.git`
+ * (a folder, or the file a worktree has) is the last one examined, so a separate repository or worktree nested inside a bound project does not inherit that project's workspace.
+ * A malformed or symlinked binding is an error, never silently skipped.
+ */
 export async function findBinding(startDir: string): Promise<{ root: string; binding: ProjectBinding } | undefined> {
   let dir = await fs.realpath(path.resolve(startDir));
   for (;;) {
     try { await fs.lstat(path.join(dir, BINDING_FILE)); return { root: dir, binding: await readBinding(dir) }; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (await fs.lstat(path.join(dir, '.git')).then(() => true, () => false)) return undefined; // repository boundary
     const parent = path.dirname(dir); if (parent === dir) return undefined; dir = parent;
   }
 }

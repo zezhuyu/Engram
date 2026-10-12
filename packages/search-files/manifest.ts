@@ -58,14 +58,39 @@ export class Manifest {
   private isOwner(): boolean { return this.source.actor.permissions.includes('*'); }
   private exclusive<T>(work: () => Promise<T>): Promise<T> { const run = this.chain.then(work, work); this.chain = run.catch(() => undefined); return run; }
 
+  /** Per scope: entries whose status is deleted/tombstone (never search candidates), so the active count of a scope is O(1). */
+  private readonly inactive = new Map<string, number>();
+  private static readonly isInactive = (e: ManifestEntry): boolean => e.status === 'deleted' || e.status === 'tombstone';
+  /** Entries a search without metadata filters would examine in the given scopes. Exact, O(scopes). */
+  activeCount(scopes: Iterable<string>): number { let n = 0; for (const sk of scopes) n += (this.byScope.get(sk)?.size ?? 0) - (this.inactive.get(sk) ?? 0); return n; }
+  private titleBlob?: { generation: number; ids: string[]; lower?: { text: string; starts: Float64Array }; raw?: { text: string; starts: Float64Array } };
+  private static joinTitles(titles: string[]): { text: string; starts: Float64Array } { const starts = new Float64Array(titles.length); let at = 0; for (let i = 0; i < titles.length; i++) { starts[i] = at; at += titles[i]!.length + 1; } return { text: titles.join('\u0000'), starts }; }
+  /**
+   * Ids of entries whose title contains `term` (already lower-cased unless caseSensitive), identical to filtering every entry with its own lower-cased
+   * title, but as one substring scan over a joined blob that is rebuilt only when the manifest changed. A term containing NUL cannot be searched in the blob.
+   */
+  titleIds(term: string, caseSensitive: boolean): Set<string> {
+    const found = new Set<string>();
+    if (!term || term.includes('\u0000')) { for (const e of this.entries.values()) if ((caseSensitive ? e.title : e.title.toLocaleLowerCase()).includes(term)) found.add(e.id); return found; }
+    let blob = this.titleBlob; if (!blob || blob.generation !== this.orderGeneration) blob = this.titleBlob = { generation: this.orderGeneration, ids: [...this.entries.keys()] };
+    const joined = caseSensitive ? (blob.raw ??= Manifest.joinTitles([...this.entries.values()].map(e => e.title))) : (blob.lower ??= Manifest.joinTitles([...this.entries.values()].map(e => e.title.toLocaleLowerCase())));
+    const { text, starts } = joined;
+    for (let from = text.indexOf(term); from >= 0;) {
+      let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >>> 1; if (starts[mid]! <= from) lo = mid; else hi = mid - 1; }
+      found.add(blob.ids[lo]!); if (lo + 1 >= starts.length) break; from = text.indexOf(term, starts[lo + 1]!);
+    }
+    return found;
+  }
+
   private remove(id: string): void {
     const old = this.entries.get(id); if (!old) return;
     this.orderGeneration++;
+    if (Manifest.isInactive(old)) this.inactive.set(old.sk, (this.inactive.get(old.sk) ?? 1) - 1);
     this.entries.delete(id); this.byScope.get(old.sk)?.delete(id);
     for (const [, target] of old.refs) { const set = this.referencedBy.get(target); set?.delete(id); if (set && !set.size) this.referencedBy.delete(target); }
   }
   private put(entry: ManifestEntry): void {
-    this.remove(entry.id); this.orderGeneration++; this.entries.set(entry.id, entry);
+    this.remove(entry.id); this.orderGeneration++; this.entries.set(entry.id, entry); if (Manifest.isInactive(entry)) this.inactive.set(entry.sk, (this.inactive.get(entry.sk) ?? 0) + 1);
     let scoped = this.byScope.get(entry.sk); if (!scoped) { scoped = new Set(); this.byScope.set(entry.sk, scoped); } scoped.add(entry.id);
     for (const [, target] of entry.refs) { let set = this.referencedBy.get(target); if (!set) { set = new Set(); this.referencedBy.set(target, set); } set.add(entry.id); }
   }
@@ -145,7 +170,7 @@ export class Manifest {
         if (loaded.some(e => typeof e.id !== 'string' || typeof e.rev !== 'string' || !e.scope || typeof e.sk !== 'string')) return false;
         for (const entry of loaded) this.put(entry);
         this.sequence = header.sequence; this.lastTx = header.lastTx; this.loadedFromDisk = true; this.persisted = true; return true;
-      } catch { this.entries.clear(); this.byScope.clear(); this.referencedBy.clear(); this.sequence = 0; this.lastTx = ''; return false; }
+      } catch { this.entries.clear(); this.byScope.clear(); this.referencedBy.clear(); this.inactive.clear(); this.sequence = 0; this.lastTx = ''; return false; }
     });
   }
   async drop(): Promise<void> { await fs.rm(path.join(this.source.root, FILE), { force: true }); this.persisted = false; }

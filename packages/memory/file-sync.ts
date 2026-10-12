@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import type { Engram } from '../sdk/index.js';
 import { MDBError } from '../core/types.js';
@@ -56,6 +56,12 @@ export async function evaluatePath(projectDir: string, binding: ProjectBinding, 
   } catch (error) { return { ok: false, reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable' }; }
 }
 
+/** Reads one regular file without following a link in the final position and never more than the cap (+1 byte to notice growth): a path that is swapped for a symlink between the check and the read cannot leak the link's target. */
+async function readCapped(abs: string): Promise<{ bytes: Buffer; truncated: boolean } | 'symlink'> {
+  let handle; try { handle = await fs.open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ELOOP') return 'symlink'; throw error; }
+  try { const info = await handle.stat(); if (!info.isFile()) return 'symlink'; const buffer = Buffer.alloc(MAX_SYNC_FILE_BYTES + 1); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0); return { bytes: buffer.subarray(0, Math.min(bytesRead, MAX_SYNC_FILE_BYTES)), truncated: bytesRead > MAX_SYNC_FILE_BYTES }; } finally { await handle.close(); }
+}
+
 // ---- transports ---------------------------------------------------------------------------------------------------------------------------
 export type SinkResult = { kind: 'committed'; revisionId: string; unchanged: boolean } | { kind: 'offline' } | { kind: 'refused'; detail: string } | { kind: 'conflict'; detail: string } | { kind: 'failed'; detail: string };
 export interface NoteWrite { noteId: string; title: string; body: string; sourcePath: string; expectedRevisionId: string; status?: 'active' | 'tombstone'; tags?: string[] }
@@ -98,7 +104,10 @@ export async function syncFile(ctx: SyncContext, candidate: string): Promise<Syn
     if (eligible.reason !== 'missing') return { path: candidate, status: 'SKIPPED', detail: eligible.reason };
     return tombstoneIfKnown(ctx, path.relative(path.resolve(projectDir), path.resolve(projectDir, candidate)).split(path.sep).join('/'));
   }
-  const { rel, abs } = eligible; const bytes = await fs.readFile(abs); if (bytes.includes(0)) return { path: rel, status: 'SKIPPED', detail: 'binary content' };
+  const { rel, abs } = eligible; const read = await readCapped(abs).catch(() => 'symlink' as const);
+  if (read === 'symlink') return { path: rel, status: 'SKIPPED', detail: 'symlink or not a regular file' };
+  if (read.truncated) return { path: rel, status: 'SKIPPED', detail: `larger than ${MAX_SYNC_FILE_BYTES} bytes` };
+  const bytes = read.bytes; if (bytes.includes(0)) return { path: rel, status: 'SKIPPED', detail: 'binary content' };
   const body = bytes.toString('utf8'); const hash = sha(body); const state = await readState(projectDir); const known = state.files[rel];
   if (looksSecret(body)) { state.files[rel] = { noteId: `file:${rel}`, hash, status: 'QUARANTINED', at: now, detail: 'the file contains what looks like a secret; it was not uploaded' }; await writeState(projectDir, state); return { path: rel, status: 'QUARANTINED', detail: 'looks like it contains a secret; nothing was uploaded. Remove the secret and save again.' }; }
   if (known && known.hash === hash && (known.status === 'COMMITTED' || known.status === 'CONFLICT')) return { path: rel, status: known.status === 'COMMITTED' ? 'SKIPPED' : 'CONFLICT', detail: known.status === 'COMMITTED' ? 'unchanged since the last committed sync' : known.detail ?? 'unresolved conflict', unchanged: true };

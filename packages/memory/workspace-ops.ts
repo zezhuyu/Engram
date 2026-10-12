@@ -40,10 +40,12 @@ export async function upsertTyped(client: Engram, input: Upsert): Promise<TypedR
   }
   const head = await client.vault.get(existing.id);
   // 'none' means: create it, and if somebody else already has, never overwrite (identical content is simply already there).
-  if (input.expectedRevisionId === 'none') { if (head.metadata.contentHash === contentHash && head.title === input.title && head.status === (input.status ?? head.status)) return done(head, false, true); throw new MDBError('CONFLICT', 'A record with this id already exists with different content'); }
+  if (input.expectedRevisionId === 'none') { if (head.metadata.contentHash === contentHash && head.title === input.title && head.status === (input.status ?? 'active')) return done(head, false, true); throw new MDBError('CONFLICT', 'A record with this id already exists with different content'); }
   if (input.expectedRevisionId && input.expectedRevisionId !== head.revisionId) throw new MDBError('CONFLICT', 'Expected revision is no longer current');
-  if (head.metadata.contentHash === contentHash && head.title === input.title && head.status === (input.status ?? head.status)) return done(head, false, true);
-  const patched = await client.patch({ objectId: head.id, expectedRevisionId: head.revisionId, title: input.title, body, tags, ...(input.status ? { status: input.status } : {}), metadataPatch: metadata, ...(input.evidence ? { evidence: input.evidence } : {}), idempotencyKey: `${createKey}@${contentHash}` });
+  // An update always states the status: a record that was tombstoned (its file deleted) and is written again is active again, never left hidden.
+  const status = input.status ?? 'active';
+  if (head.metadata.contentHash === contentHash && head.title === input.title && head.status === status) return done(head, false, true);
+  const patched = await client.patch({ objectId: head.id, expectedRevisionId: head.revisionId, title: input.title, body, tags, status, metadataPatch: metadata, ...(input.evidence ? { evidence: input.evidence } : {}), idempotencyKey: `${createKey}@${contentHash}` });
   return done(patched, false, false);
 }
 

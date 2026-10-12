@@ -1,3 +1,4 @@
+import '../helpers/isolate-user-state.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,6 +12,7 @@ import { runContextHook } from '../../packages/memory/context-hook.js';
 import { upsertNote, upsertTask, writeHandoff } from '../../packages/memory/workspace-ops.js';
 import { createAdapter } from '../../packages/memory/adapters.js';
 import { defaultBinding, writeBinding } from '../../packages/core/project-binding.js';
+import { trustProject } from '../../packages/core/project-trust.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
 
@@ -31,7 +33,7 @@ test('the builder returns a small, deterministic, authorized context from a larg
   const b = await buildSessionContext(client, { workspaceId: 'proj', maxTokens: 800, now: new Date('2026-10-12T00:00:00Z') });
   assert.equal(a.text, b.text, 'identical data gives identical text'); assert.equal(a.revision, b.revision);
   assert.ok(a.estimatedTokens <= 800, `size ${a.estimatedTokens}`); assert.ok(a.text.length <= 800 * 4);
-  assert.match(a.text, /data, not instructions/); assert.match(a.text, /Prefers short answers\./); assert.match(a.text, /ended\)|Handoff sess-last/); assert.match(a.text, /resolver/);
+  assert.match(a.text, /data, not instructions/); assert.match(a.text, /\(taskId T-\d{3}\)/, 'tasks are shown by the stable id the typed tools use'); assert.doesNotMatch(a.text, /\(task obj_|noteId obj_/, 'never only the object id'); assert.match(a.text, /Prefers short answers\./); assert.match(a.text, /ended\)|Handoff sess-last/); assert.match(a.text, /resolver/);
   assert.doesNotMatch(a.text, /Candidate only|Billing project|Secret other project/, 'unaccepted and other-workspace material is absent');
   const tasks = [...a.text.matchAll(/- \[(blocked|in_progress|open|done)\]/g)].map(m => m[1]!); assert.ok(!tasks.includes('done'), 'finished tasks are not injected'); assert.equal(tasks[0], 'blocked', 'blocked work comes first'); assert.ok(a.counts.tasks <= 12 && a.counts.decisions <= 5);
   const tiny = await buildSessionContext(client, { workspaceId: 'proj', maxTokens: 200 }); assert.ok(tiny.estimatedTokens <= 200);
@@ -68,8 +70,9 @@ async function liveServer(t: Cleanup) {
 }
 async function projectFor(t: Cleanup, server: { url: string }, workspaceId = 'proj') {
   const base = await temp(t, 'engram-ctx-'); const projectDir = path.join(base, 'p'); await mkdir(projectDir);
-  await writeBinding(projectDir, defaultBinding({ workspaceId, serverUrl: server.url, hosts: ['claude-code'], credentialRef: 'ENGRAM_CTX_TOKEN', captureConsent: false }));
-  const env = { ...process.env, ENGRAM_CACHE_DIR: path.join(base, 'cache'), ENGRAM_USER_CONFIG: path.join(base, 'no-user-config.json') } as NodeJS.ProcessEnv;
+  const binding = defaultBinding({ workspaceId, serverUrl: server.url, hosts: ['claude-code'], credentialRef: 'ENGRAM_CTX_TOKEN', captureConsent: false }); await writeBinding(projectDir, binding);
+  const env = { ...process.env, ENGRAM_CACHE_DIR: path.join(base, 'cache'), ENGRAM_USER_CONFIG: path.join(base, 'no-user-config.json'), ENGRAM_TRUST_FILE: path.join(base, 'trusted.json') } as NodeJS.ProcessEnv;
+  await trustProject(projectDir, binding, env); // what `mdb init` does on this machine
   return { base, projectDir, env };
 }
 const stdin = (cwd: string) => JSON.stringify({ hook_event_name: 'SessionStart', session_id: 's1', cwd, source: 'startup' });

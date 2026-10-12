@@ -10,10 +10,10 @@ import { BINDING_HOSTS, type BindingHost } from '../core/project-binding.js';
  * User-level capture settings, written once after the user's explicit consent. They name a server, the environment variable that holds the token, the user's own
  * workspace and registration, and what to leave out. No token or secret is ever stored. The file is machine-local and owner-only.
  */
-export interface UserConfig { schemaVersion: 1; serverUrl: string; tokenEnv: string; workspaceId: string; registrationId: string; principalId: string; hosts: BindingHost[]; captureConsent: true; paused: boolean; excludeProjects: string[] }
+export interface UserConfig { schemaVersion: 1; serverUrl: string; tokenEnv: string; workspaceId: string; registrationId: string; principalId: string; hosts: BindingHost[]; captureConsent: true; paused: boolean; excludeProjects: string[]; /** when non-empty, ONLY working directories matching one of these patterns are recorded; exclusions still win */ includeProjects?: string[] }
 export const userConfigPath = (env: NodeJS.ProcessEnv = process.env): string => env.ENGRAM_USER_CONFIG ?? path.join(env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'), 'engram', 'user.json');
 const invalid = (message: string): never => { throw new MDBError('INVALID_INPUT', `Invalid user config: ${message}`); };
-const KEYS = new Set(['schemaVersion', 'serverUrl', 'tokenEnv', 'workspaceId', 'registrationId', 'principalId', 'hosts', 'captureConsent', 'paused', 'excludeProjects']);
+const KEYS = new Set(['schemaVersion', 'serverUrl', 'tokenEnv', 'workspaceId', 'registrationId', 'principalId', 'hosts', 'captureConsent', 'paused', 'excludeProjects', 'includeProjects']);
 export function parseUserConfig(raw: unknown): UserConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return invalid('not an object');
   const v = raw as Record<string, unknown>;
@@ -24,7 +24,8 @@ export function parseUserConfig(raw: unknown): UserConfig {
   for (const key of ['workspaceId', 'registrationId', 'principalId']) if (typeof v[key] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(v[key] as string)) invalid(key);
   if (!Array.isArray(v.hosts) || !v.hosts.length || v.hosts.some(h => !(BINDING_HOSTS as readonly string[]).includes(h as string))) invalid('hosts');
   if (!Array.isArray(v.excludeProjects) || v.excludeProjects.length > 50) invalid('excludeProjects');
-  for (const pattern of v.excludeProjects as unknown[]) { if (typeof pattern !== 'string' || !pattern || pattern.length > 200) invalid('excludeProjects entries'); try { new RegExp(pattern as string, 'i'); } catch { invalid('excludeProjects entry is not a valid pattern'); } }
+  if (v.includeProjects !== undefined && (!Array.isArray(v.includeProjects) || v.includeProjects.length > 50)) invalid('includeProjects');
+  for (const pattern of [...(v.excludeProjects as unknown[]), ...((v.includeProjects as unknown[] | undefined) ?? [])]) { if (typeof pattern !== 'string' || !pattern || pattern.length > 200) invalid('excludeProjects entries'); try { new RegExp(pattern as string, 'i'); } catch { invalid('excludeProjects entry is not a valid pattern'); } }
   return v as unknown as UserConfig;
 }
 export async function readUserConfig(env: NodeJS.ProcessEnv = process.env): Promise<UserConfig | undefined> {
