@@ -22,7 +22,11 @@ jobs:
       - run: npm run verify:platform
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: linux-verification, path: 'verification/*/report.*' }
+        with:
+          name: linux-verification
+          path: |
+            verification/*/report.*
+            verification/*/last-output.txt
   linux-reliability:
     name: Linux ACID and isolation
     runs-on: ubuntu-24.04
@@ -34,7 +38,11 @@ jobs:
       - run: npm run verify:acid
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: linux-acid, path: 'verification/acid/report.*' }
+        with:
+          name: linux-acid
+          path: |
+            verification/acid/report.*
+            verification/acid/last-output.txt
   macos:
     runs-on: macos-latest
     steps:
