@@ -9,7 +9,7 @@ export function inputPath(relative: string): string { return existsSync(`fixture
 export type Status = 'PASS' | 'FAIL' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
 export interface Gap { item: string; status: 'NOT_RUN' | 'UNSUPPORTED' | 'FAIL'; reason: string }
 export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; allowedSkips?: string[]; env?: Record<string, string>; concurrency?: number }
-export interface TestResult { name: string; status: Status }
+export interface TestResult { name: string; status: Status; /** for a failed test: the TAP diagnostic block (assertion message, expected/actual, stack head), so a CI log shows why it failed */ detail?: string }
 export interface SuiteReport {
   suite: string; git_commit: string; status: Status; run_at: string; command: string; durationMs: number;
   environment: Record<string, unknown>; counts: { pass: number; fail: number; skipped: number; total: number };
@@ -35,9 +35,12 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   const run = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env } });
   const durationMs = Date.now() - started;
   const tests: TestResult[] = [];
-  for (const line of run.stdout.split('\n')) {
-    const m = /^(not )?ok \d+ - (.*?)(?: # (SKIP|TODO).*)?$/.exec(line); if (!m) continue; // top-level only: subtests are indented
-    const skipped = m[3] === 'SKIP'; tests.push({ name: m[2]!, status: skipped ? (spec.allowedSkips?.some(s => m[2]!.includes(s)) ? 'SKIPPED' : 'SKIPPED') : m[1] ? 'FAIL' : 'PASS' });
+  const outLines = run.stdout.split('\n');
+  for (let i = 0; i < outLines.length; i++) {
+    const m = /^(not )?ok \d+ - (.*?)(?: # (SKIP|TODO).*)?$/.exec(outLines[i]!); if (!m) continue; // top-level only: subtests are indented
+    const skipped = m[3] === 'SKIP'; let detail: string | undefined;
+    if (m[1] && !skipped) { const block: string[] = []; for (let j = i + 1; j < outLines.length && /^\s/.test(outLines[j]!) && block.length < 60; j++) { if (outLines[j]!.trim() === '...') break; block.push(outLines[j]!.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')); } detail = block.join('\n').slice(0, 6000); }
+    tests.push({ name: m[2]!, status: skipped ? 'SKIPPED' : m[1] ? 'FAIL' : 'PASS', ...(detail ? { detail } : {}) });
   }
   const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
   const counts = { pass: tests.filter(t => t.status === 'PASS').length, fail: tests.filter(t => t.status === 'FAIL').length, skipped: tests.filter(t => t.status === 'SKIPPED').length, total: tests.length };
@@ -61,6 +64,6 @@ function markdown(spec: SuiteSpec, r: SuiteReport): string {
 }
 export function summarize(report: SuiteReport): void {
   console.log(`${report.suite}: ${report.status} (${report.counts.pass}/${report.counts.total} tests, ${report.cases} cases, ${(report.durationMs / 1000).toFixed(1)} s)`);
-  for (const t of report.tests.filter(t => t.status !== 'PASS')) console.log(`  ${t.status}: ${t.name}`);
+  for (const t of report.tests.filter(t => t.status !== 'PASS')) { console.log(`  ${t.status}: ${t.name}`); if (t.status === 'FAIL' && t.detail) console.log(t.detail.split('\n').slice(0, 40).map(l => `      ${l}`).join('\n')); }
   if (report.status !== 'PASS') process.exitCode = 1;
 }
