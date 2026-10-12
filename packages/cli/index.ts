@@ -2,7 +2,12 @@ import { readFile } from 'node:fs/promises';
 import { queryCommand, lineGrep, STREAM_COMMANDS, STREAMED } from './query.js';
 import { detectUnix, unixMain } from './unix.js';
 import { resolve } from 'node:path';
-import { initializeProject } from '../project-init.js';
+import { initializeProject, refreshContext, type Host } from '../project-init.js';
+import { projectDoctor } from '../memory/project-doctor.js';
+import { runContextHook } from '../memory/context-hook.js';
+import { localSink, pathsFromHookPayload, reconcile, remoteSink, syncFile, syncReport } from '../memory/file-sync.js';
+import { readBinding } from '../core/project-binding.js';
+import { captureForUser, insideProject, setUserPaused, setupUser, uninstallUser, userStatus } from '../memory/user-setup.js';
 import { touchActivity } from '../adaptive/activity.js';
 import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
 import { createRegistration, revokeRegistration } from '../memory/capture.js';
@@ -25,6 +30,12 @@ init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
 init --project --host claude-code|codex [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
+                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID]: writes .engram/project.json (gitignored), managed blocks, MCP config
+setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...]
+                               One-time user-level capture for EVERY project (also --show --pause --resume --uninstall)
+notes sync [--project-dir PATH] [--report]          Synchronize approved Markdown files (needs init --file-sync-consent)
+project refresh-context [--project-dir PATH] [--remote]   Rewrite the managed blocks from the current accepted profile
+doctor --project [--project-dir PATH] [--no-probe]        Per-feature PASS/INCOMPLETE/DISABLED/FAIL/NOT_RUN report for this project
 doctor | verify | recover | reconcile
 credential create --actor ID --permissions SCOPE:read,SCOPE:write | rotate ID [--permissions ...] | revoke ID | audit
 workspace create ID | list | info ID | grant ID ACTOR --permissions read,write | revoke ID ACTOR
@@ -70,7 +81,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -93,12 +104,18 @@ async function memoryCommand(client: Engram, root: string, sub: string | undefin
   if (sub === 'capture') { // lifecycle hook: silent, fail-open, never touches the vault or a model
     try {
       const input = await readStdin();
+      if (text(flags, 'project-root') && !(await insideProject(input, text(flags, 'project-root')!))) return ''; // a hook is installed once per machine but belongs to one project
+      if (flags.user) { await captureForUser(required(text(flags, 'host'), '--host'), input); return ''; }
       if (text(flags, 'remote-url')) {
         const token = process.env[required(text(flags, 'token-env'), '--token-env')];
         await queueRemoteCapture({ url: required(text(flags, 'remote-url'), '--remote-url'), registrationId: required(text(flags, 'registration'), '--registration'), token, payload: JSON.parse(input) });
       } else await captureFromHook({ root, host: required(text(flags, 'host'), '--host'), registrationId: required(text(flags, 'registration'), '--registration') }, input);
     } catch { /* the host must never be affected */ }
     return '';
+  }
+  if (sub === 'context') { // SessionStart hook: prints host injection output only; silent and fail-open
+    try { const result = await runContextHook({ host: required(text(flags, 'host'), '--host'), stdin: await readStdin(), ...(text(flags, 'project-root') ? { projectRoot: text(flags, 'project-root')! } : {}), ...(flags.user ? { user: true } : {}), ...(text(flags, 'root') ? { root: text(flags, 'root')! } : {}), ...(text(flags, 'format') ? { format: text(flags, 'format') as 'claude' | 'text' } : {}) }); return result.output; }
+    catch { return ''; }
   }
   if (sub === 'drain') { const r = await drainSpool(root, { limit: number(flags, 'limit') }); return flags.quiet ? '' : r; }
   if (sub === 'record') return recordExplicit(root, required(text(flags, 'registration'), '--registration'), { type: required(text(flags, 'type'), '--type') as 'decision', sessionId: required(text(flags, 'session'), '--session'), text: required(text(flags, 'text'), '--text'), ...(text(flags, 'title') ? { title: text(flags, 'title')! } : {}), ...(text(flags, 'speaker') ? { speaker: text(flags, 'speaker') as 'user' } : {}) });
@@ -167,12 +184,41 @@ export async function execute(argv: string[]): Promise<unknown> {
       const mcpUrl = text(flags, 'mcp-url');
       const initialized = flags.project && mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
       if (!flags.project) return initialized;
-      const host = required(text(flags, 'host'), '--host');
-      if (host !== 'claude-code' && host !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host must be claude-code or codex');
-      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), host, ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
+      const hostsFlag = text(flags, 'hosts'); const singleHost = text(flags, 'host');
+      if (hostsFlag && singleHost) throw new MDBError('INVALID_ARGUMENT', 'use --host or --hosts, not both');
+      const hostList = hostsFlag === 'auto' ? 'auto' as const : (hostsFlag ?? required(singleHost, '--host or --hosts')).split(',').map(item => item.trim()).filter(Boolean) as Host[];
+      if (hostList !== 'auto') for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host/--hosts must name claude-code and/or codex (or --hosts auto)');
+      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
       return { initialized, project: setup };
     }
-    case 'doctor': return v.doctor();
+    case 'notes': {
+      if (sub !== 'sync') throw new MDBError('INVALID_ARGUMENT', 'usage: notes sync [--project-dir PATH] [--report] [--hook --project-root PATH]');
+      const dir = resolve(text(flags, 'project-root') ?? text(flags, 'project-dir', process.cwd())!);
+      const quiet = !!flags.hook; // a hook is silent and fail-open
+      try {
+        const binding = await readBinding(dir); if (flags.report) return syncReport(dir, binding);
+        const input = quiet ? await readStdin() : ''; if (quiet && text(flags, 'project-root') && !(await insideProject(input, dir))) return '';
+        const sink = binding.serverUrl ? remoteSink(binding) : localSink(new Engram(required(text(flags, 'root'), '--root (local mode)')), binding.workspaceId);
+        const ctx = { projectDir: dir, binding, sink }; const paths = quiet ? pathsFromHookPayload(input) : undefined;
+        if (paths) { const outcomes = []; for (const p of paths) outcomes.push(await syncFile(ctx, p)); return quiet ? '' : { outcomes }; }
+        const result = await reconcile(ctx); return quiet ? '' : { ...result, report: await syncReport(dir, binding) };
+      } catch (error) { if (quiet) return ''; throw error; }
+    }
+    case 'setup': {
+      if (!flags.user) throw new MDBError('INVALID_ARGUMENT', 'usage: setup --user (--consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...]) | --show | --pause | --resume | --uninstall');
+      if (flags.show) return userStatus();
+      if (flags.pause) return setUserPaused(true);
+      if (flags.resume) return setUserPaused(false);
+      if (flags.uninstall) return uninstallUser();
+      const hostList = required(text(flags, 'hosts'), '--hosts').split(',').map(item => item.trim()).filter(Boolean) as Host[];
+      for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--hosts must name claude-code and/or codex');
+      return setupUser({ hosts: hostList, mcpUrl: required(text(flags, 'mcp-url'), '--mcp-url'), tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')!, registrationId: required(text(flags, 'registration'), '--registration'), principalId: required(text(flags, 'principal'), '--principal'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(list(flags, 'exclude') ? { exclude: list(flags, 'exclude')! } : {}), consent: !!flags.consent });
+    }
+    case 'doctor': if (flags.project) return projectDoctor(resolve(text(flags, 'project-dir', process.cwd())!), { ...(flags['no-probe'] ? { probeRemote: false } : {}) }); return v.doctor();
+    case 'project': {
+      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project refresh-context [--project-dir PATH]');
+      return refreshContext(resolve(text(flags, 'project-dir', process.cwd())!), flags.remote ? {} : { client });
+    }
     case 'verify': return v.verify();
     case 'recover': return v.recover();
     case 'reconcile': return v.reconcile();

@@ -75,7 +75,8 @@ export function eventFromHostPayload(registration: Registration, payload: Record
     eventId: sha([registration.host, sessionId, type, discriminator, sha(redacted)].join('\0')).slice(0, 32), timestamp, host: registration.host, sessionId: sessionId.replace(/[^A-Za-z0-9_.:-]/g, '_'),
     workspaceId: registration.workspaceId, ...(registration.collectionId ? { collectionId: registration.collectionId } : {}), principalId: registration.principalId, type,
     ...(str(payload.transcript_path) ? { sourceRef: String(payload.transcript_path).slice(0, 500) } : {}), contentHash: sha(redacted), classification: type === 'user.message' ? 'user_private' : 'workspace_private',
-    consentPolicyId: registration.consentPolicyId, schemaVersion: 1, content: redacted, title
+    consentPolicyId: registration.consentPolicyId, schemaVersion: 1, content: redacted, title,
+    ...(cwd ? { metadata: { project: path.basename(cwd).replace(/[^A-Za-z0-9._ -]/g, '_').slice(0, 80) || 'root', cwdHash: sha(cwd).slice(0, 12) } } : {})
   };
   return event;
 }
@@ -148,7 +149,7 @@ export async function ingestRecord(root: string, record: SpoolRecord, now = Date
     const doc = await vault.put({
       scope, kind: KIND[event.type], title: event.title ?? event.type, body: redactText(event.content ?? ''), tags: ['memory', event.type],
       evidence: [{ uri: session.uri, revisionId: session.revisionId }], idempotencyKey: key,
-      metadata: { sessionId: session.id, hostSessionId: event.sessionId, eventId: event.eventId, eventType: event.type, speaker, host: event.host, eventTime: event.timestamp, classification: event.classification, consentPolicyId: event.consentPolicyId, source: event.host, evidenceClass: speaker === 'user' ? 'user_authored' : 'agent_observation', ...(event.contentHash ? { contentHash: event.contentHash } : {}), ...(event.sourceRef ? { sourceRef: event.sourceRef } : {}), ...(event.agentId ? { agentId: event.agentId } : {}) }
+      metadata: { sessionId: session.id, hostSessionId: event.sessionId, ...(typeof event.metadata?.project === 'string' ? { project: event.metadata.project } : {}), ...(typeof event.metadata?.cwdHash === 'string' ? { cwdHash: event.metadata.cwdHash } : {}), eventId: event.eventId, eventType: event.type, speaker, host: event.host, eventTime: event.timestamp, classification: event.classification, consentPolicyId: event.consentPolicyId, source: event.host, evidenceClass: speaker === 'user' ? 'user_authored' : 'agent_observation', ...(event.contentHash ? { contentHash: event.contentHash } : {}), ...(event.sourceRef ? { sourceRef: event.sourceRef } : {}), ...(event.agentId ? { agentId: event.agentId } : {}) }
     });
     if (event.type === 'task.completed') await new IntelligenceEngine(owner).enqueue('reflect', { scope: session.scope, objectIds: [session.id, doc.id] });
     return { status: 'ingested', objectId: doc.id };
