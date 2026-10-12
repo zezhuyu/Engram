@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { redactText } from './redact.js';
+import { remoteUrlAllowed } from '../core/private-network.js';
 import { syncDirectory } from '../storage-local/index.js';
 
 type RemoteCapture = { url: string; registrationId: string; payload: Record<string, unknown>; queuedAt: string };
@@ -53,7 +54,7 @@ export async function drainRemoteCaptureSpool(options: { token: string; director
       capture = JSON.parse(await fs.readFile(file, 'utf8')) as RemoteCapture;
       if (!capture || typeof capture.url !== 'string' || typeof capture.registrationId !== 'string' || !capture.payload || typeof capture.payload !== 'object' || Array.isArray(capture.payload) || typeof capture.queuedAt !== 'string' || !Number.isFinite(Date.parse(capture.queuedAt))) throw new Error('invalid queued capture');
       const url = new URL(capture.url);
-      if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname))) throw new Error('invalid queued endpoint');
+      if (!remoteUrlAllowed(url)) throw new Error('invalid queued endpoint');
     } catch { await quarantine('invalid queued capture'); continue; }
     try {
       const response = await fetch(capture.url, { method: 'POST', redirect: 'manual', headers: { Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ registrationId: capture.registrationId, payload: { ...capture.payload, _engramCapturedAt: capture.queuedAt } }), signal: AbortSignal.timeout(2000) });
@@ -71,7 +72,7 @@ export async function drainRemoteCaptureSpool(options: { token: string; director
 /** Persist first, then attempt delivery. Tokens are supplied at send time and never enter the spool. */
 export async function queueRemoteCapture(options: { url: string; registrationId: string; token?: string; payload: Record<string, unknown>; directory?: string }): Promise<{ delivered: number; queued: number; rejected: number }> {
   const url = new URL(options.url);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname))) throw new Error('Remote capture requires HTTPS except on localhost');
+  if (!remoteUrlAllowed(url)) throw new Error('Remote capture requires HTTPS except on localhost (or a tailnet host with MDB_TRANSPORT_TRUST=tailscale)');
   if (url.pathname.endsWith('/mcp')) url.pathname = `${url.pathname.slice(0, -4)}/capture`;
   else if (!url.pathname.endsWith('/capture')) url.pathname = `${url.pathname.replace(/\/$/, '')}/capture`;
   const directory = options.directory ?? defaultRemoteSpoolDirectory();
