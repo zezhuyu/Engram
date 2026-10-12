@@ -47,7 +47,7 @@ test('remote project init connects directly to the shared HTTP MCP server withou
   const result = await execute(['init', '--project', '--host', 'claude-code', '--project-dir', projectDir, '--mcp-url', 'https://memory.example/mcp', '--token-env', 'SHARED_ENGRAM_TOKEN', '--root', path.join(base, 'must-not-exist')]) as { project: Awaited<ReturnType<typeof initializeProject>> };
   assert.equal(result.project.adapter && (result.project.adapter as { mode: string }).mode, 'remote-mcp');
   const config = JSON.parse(await readFile(path.join(projectDir, '.mcp.json'), 'utf8')) as { mcpServers: Record<string, { type: string; url: string; headers: { Authorization: string } }> };
-  assert.deepEqual(config.mcpServers.engram, { type: 'http', url: 'https://memory.example/mcp', headers: { Authorization: 'Bearer ${SHARED_ENGRAM_TOKEN}' } });
+  assert.deepEqual(config.mcpServers.engram, { type: 'http', url: 'https://memory.example/mcp', headers: { Authorization: 'Bearer ${SHARED_ENGRAM_TOKEN}', 'X-Engram-Workspace': 'remote-project' } });
   const instructions = await readFile(result.project.instructionsFile, 'utf8');
   assert.match(instructions, /shared memory source across machines/);
   assert.match(instructions, /mdb_insight_search/);

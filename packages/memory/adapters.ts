@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,18 +8,28 @@ import { Vault } from '../core/vault.js';
 import { findExecutable } from '../models/cli.js';
 import { createRegistration, listRegistrations, revokeRegistration } from './capture.js';
 import { DEFAULT_CAPTURE, type MemoryEventType, type Registration } from './types.js';
+import { remoteUrlAllowed } from '../core/private-network.js';
 
-export interface InstallOptions { consent: boolean; dryRun?: boolean; principalId: string; workspaceId: string; collectionId?: string; capture?: MemoryEventType[]; toolAllowlist?: string[]; excludePatterns?: string[]; mcpUrl?: string; tokenEnv?: string; registrationId?: string }
-export interface AdapterStatus { installed: boolean; capture: MemoryEventType[]; recall: boolean; coverage: 'full' | 'partial' | 'none'; notes: string[]; registrations: string[]; settingsPath: string }
+export interface InstallOptions { consent: boolean; dryRun?: boolean; principalId: string; workspaceId: string; collectionId?: string; capture?: MemoryEventType[]; toolAllowlist?: string[]; excludePatterns?: string[]; mcpUrl?: string; tokenEnv?: string; registrationId?: string;
+  /** Install the SessionStart context hook (default: on for project-scoped and user-level installs). */ sessionContext?: boolean;
+  /** Hooks fire for every session of the host; with a project root the hook records nothing unless the session's cwd is inside it. */ projectRoot?: string;
+  /** User-level hook: routes by the session's project binding instead of one fixed registration. */ userLevel?: boolean }
+export interface AdapterStatus { fileSync: boolean; sessionContext: boolean; installed: boolean; capture: MemoryEventType[]; recall: boolean; coverage: 'full' | 'partial' | 'none'; notes: string[]; registrations: string[]; settingsPath: string }
 export interface HarnessAdapter {
   id: string;
   detect(): Promise<{ supported: boolean; capabilities: string[]; notes: string[] }>;
   install(options: InstallOptions): Promise<{ changed: boolean; planned?: unknown; registrationId?: string; backup?: string }>;
   status(): Promise<AdapterStatus>;
   uninstall(): Promise<{ removed: number }>;
+  removeUserHooks(): Promise<number>;
+  installContext(options: { projectRoot?: string; userLevel?: boolean; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
+  installFileSync(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
+  removeFileSync(projectRoot: string): Promise<number>;
 }
 const MARKER = '# engram-mdb:';
 const REMOTE_MARKER = '# engram-mdb-remote:';
+const CONTEXT_MARKER = '# engram-mdb-context:';
+const FILESYNC_MARKER = '# engram-mdb-filesync:';
 type HookEntry = { matcher?: string; hooks: Array<{ type: string; command: string; timeout?: number }> };
 type Settings = Record<string, unknown> & { hooks?: Record<string, HookEntry[]> };
 
@@ -37,13 +48,25 @@ export const HOSTS: Record<'claude-code' | 'codex', HostSpec> = {
 };
 const quote = (value: string): string => { if (/["`$\\\n\r]/.test(value)) throw new MDBError('INVALID_INPUT', 'Refusing to place a path with shell metacharacters into a hook command'); return `"${value}"`; };
 const mdbBinary = () => fileURLToPath(new URL('../../../bin/mdb.js', import.meta.url));
-export function hookCommand(host: string, root: string, registrationId: string, node = process.execPath): string {
-  return `${quote(node)} ${quote(mdbBinary())} memory capture --root ${quote(root)} --host ${host} --registration ${registrationId} ${MARKER}${registrationId}`;
+export function hookCommand(host: string, root: string, registrationId: string, node = process.execPath, projectRoot?: string): string {
+  return `${quote(node)} ${quote(mdbBinary())} memory capture --root ${quote(root)} --host ${host} --registration ${registrationId}${projectRoot ? ` --project-root ${quote(projectRoot)}` : ''} ${MARKER}${registrationId}`;
 }
-export function remoteHookCommand(host: string, url: string, tokenEnv: string, registrationId: string, node = process.execPath): string {
-  return `${quote(node)} ${quote(mdbBinary())} memory capture --host ${host} --registration ${registrationId} --remote-url ${quote(url)} --token-env ${quote(tokenEnv)} ${REMOTE_MARKER}${registrationId}`;
+export function remoteHookCommand(host: string, url: string, tokenEnv: string, registrationId: string, node = process.execPath, projectRoot?: string): string {
+  return `${quote(node)} ${quote(mdbBinary())} memory capture --host ${host} --registration ${registrationId} --remote-url ${quote(url)} --token-env ${quote(tokenEnv)}${projectRoot ? ` --project-root ${quote(projectRoot)}` : ''} ${REMOTE_MARKER}${registrationId}`;
 }
-const ownedBy = (entry: HookEntry, ids: Set<string>): boolean => entry.hooks?.some(h => typeof h.command === 'string' && [...ids].some(id => h.command.includes(`${MARKER}${id}`)));
+/** SessionStart context hook: prints bounded project context for the host to inject. Project-scoped, user-level (`--user`), or local-vault (`--root`). */
+/** Stable id of a context hook: one per project root (so it never depends on a capture registration) or one for the user level. */
+export const contextHookId = (scope: { userLevel?: boolean; projectRoot?: string }, fallback: string): string => scope.userLevel ? 'user' : scope.projectRoot ? `p${createHash('sha256').update(scope.projectRoot).digest('hex').slice(0, 12)}` : fallback;
+export function contextHookCommand(host: string, id: string, scope: { userLevel?: boolean; projectRoot?: string; root?: string }, node = process.execPath): string {
+  const where = scope.userLevel ? '--user' : `${scope.root ? `--root ${quote(scope.root)} ` : ''}${scope.projectRoot ? `--project-root ${quote(scope.projectRoot)}` : ''}`.trim();
+  return `${quote(node)} ${quote(mdbBinary())} memory context --host ${host} ${where} ${CONTEXT_MARKER}${id}`.replace(/\s+/g, ' ');
+}
+/** User-level hook: the user config (server, token variable, user registration) is read at run time; the command itself holds no workspace and no secret. */
+export function userHookCommand(host: string, registrationId: string, node = process.execPath): string {
+  return `${quote(node)} ${quote(mdbBinary())} memory capture --user --host ${host} ${REMOTE_MARKER}${registrationId}`;
+}
+/** A hook entry carries either the local marker or the remote marker plus its registration id; a rerun must recognize both or it adds the hook again. */
+const ownedBy = (entry: HookEntry, ids: Set<string>): boolean => entry.hooks?.some(h => typeof h.command === 'string' && [...ids].some(id => h.command.includes(`${MARKER}${id}`) || h.command.includes(`${REMOTE_MARKER}${id}`)));
 const anyOwned = (entry: HookEntry, root: string): boolean => entry.hooks?.some(h => typeof h.command === 'string' && h.command.includes(MARKER) && h.command.includes(`--root ${JSON.stringify(root)}`));
 
 export class HookFileAdapter implements HarnessAdapter {
@@ -69,12 +92,15 @@ export class HookFileAdapter implements HarnessAdapter {
     if (options.consent !== true) throw new MDBError('INVALID_INPUT', 'Installing capture hooks requires explicit consent');
     const capture = options.capture ?? DEFAULT_CAPTURE;
     const remote = !!options.mcpUrl;
-    if (remote && (!options.registrationId || !options.tokenEnv || !/^[A-Z_][A-Z0-9_]*$/.test(options.tokenEnv) || !/^https:\/\//i.test(options.mcpUrl!) && !/^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\//i.test(options.mcpUrl!))) throw new MDBError('INVALID_INPUT', 'Remote capture requires a server registration, token environment variable, and HTTPS URL (HTTP is allowed only for localhost)');
+    if (remote && (!options.registrationId || !options.tokenEnv || !/^[A-Z_][A-Z0-9_]*$/.test(options.tokenEnv) || !remoteUrlAllowed(new URL(options.mcpUrl!)))) throw new MDBError('INVALID_INPUT', 'Remote capture requires a server registration, token environment variable, and HTTPS URL (HTTP is allowed only for localhost)');
     const { settings, existed } = await this.read();
     const existing = remote ? undefined : (await this.mine()).find(r => r.principalId === options.principalId && r.workspaceId === options.workspaceId && (r.collectionId ?? '') === (options.collectionId ?? ''));
     const registrationId = remote ? options.registrationId! : existing?.id;
     const events = Object.entries(this.spec.events).filter(([, type]) => capture.includes(type));
-    if (registrationId && events.every(([name]) => (settings.hooks?.[name] ?? []).some(e => ownedBy(e, new Set([registrationId]))))) return { changed: false, registrationId };
+    const wantContext = options.sessionContext ?? (!!options.projectRoot || !!options.userLevel);
+    const contextId = contextHookId(options, registrationId ?? 'local');
+    const hasContext = (hooks: Settings['hooks']) => (hooks?.SessionStart ?? []).some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${CONTEXT_MARKER}${contextId}`)));
+    if (registrationId && events.every(([name]) => (settings.hooks?.[name] ?? []).some(e => ownedBy(e, new Set([registrationId])))) && (!wantContext || hasContext(settings.hooks))) return { changed: false, registrationId };
     const planned = { settingsPath: this.settingsPath, events: events.map(([name, type]) => ({ hook: name, records: type })), createsFile: !existed };
     if (options.dryRun) return { changed: false, planned };
     const owner = new Vault(this.options.root);
@@ -85,8 +111,9 @@ export class HookFileAdapter implements HarnessAdapter {
     for (const [name] of events) {
       const list = (next.hooks[name] ??= []);
       if (list.some(e => ownedBy(e, new Set([registration.id])))) continue;
-      list.push({ hooks: [{ type: 'command', command: remote ? remoteHookCommand(this.id, options.mcpUrl!, options.tokenEnv!, registration.id) : hookCommand(this.id, this.options.root, registration.id), timeout: 5 }] });
+      list.push({ hooks: [{ type: 'command', command: options.userLevel ? userHookCommand(this.id, registration.id) : remote ? remoteHookCommand(this.id, options.mcpUrl!, options.tokenEnv!, registration.id, process.execPath, options.projectRoot) : hookCommand(this.id, this.options.root, registration.id, process.execPath, options.projectRoot), timeout: 5 }] });
     }
+    if (wantContext) { const list = (next.hooks.SessionStart ??= []); const id = contextHookId(options, registration.id); if (!hasContext(next.hooks)) list.push({ hooks: [{ type: 'command', command: contextHookCommand(this.id, id, { ...(options.userLevel ? { userLevel: true } : {}), ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}), ...(!remote && !options.userLevel ? { root: this.options.root } : {}) }), timeout: 5 }] }); }
     await this.write(next);
     if (!remote) {
       await fs.mkdir(path.join(this.options.root, '.mdb/capture/registrations'), { recursive: true, mode: 0o700 });
@@ -103,16 +130,53 @@ export class HookFileAdapter implements HarnessAdapter {
     // 'full' = every event type the owner asked for is hooked AND this host emits a hook for each lifecycle point we rely on (Codex has no SessionEnd and its payloads are unverified).
     const wanted = new Set(regs.flatMap(r => r.capture).filter(t => Object.values(this.spec.events).includes(t)));
     const complete = [...wanted].every(t => installedEvents.includes(t)) && wanted.size > 0;
-    return { installed: installedEvents.length > 0, capture: installedEvents, recall: true, coverage: !installedEvents.length ? 'none' : complete ? 'full' : 'partial', notes, registrations: [...ids], settingsPath: this.settingsPath };
+    let sessionContext = false; try { sessionContext = (await this.read()).settings.hooks?.SessionStart?.some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(CONTEXT_MARKER))) ?? false; } catch { /* reported in notes above */ }
+    let fileSync = false; try { const h = (await this.read()).settings.hooks; fileSync = !!h?.PostToolUse?.some(e => e.hooks?.some(x => typeof x.command === 'string' && x.command.includes(FILESYNC_MARKER))) && !!h?.SessionEnd?.some(e => e.hooks?.some(x => typeof x.command === 'string' && x.command.includes(FILESYNC_MARKER))); } catch { /* reported above */ }
+    return { fileSync, sessionContext, installed: installedEvents.length > 0, capture: installedEvents, recall: true, coverage: !installedEvents.length ? 'none' : complete ? 'full' : 'partial', notes, registrations: [...ids], settingsPath: this.settingsPath };
   }
 
+  /** Installs only the read-only SessionStart context hook (no capture, no registration). Idempotent; the settings file is backed up before it is first changed. */
+  async installContext(options: { projectRoot?: string; userLevel?: boolean; localRoot?: string }): Promise<{ changed: boolean; backup?: string }> {
+    const id = contextHookId(options, 'local'); const { settings, existed } = await this.read();
+    if ((settings.hooks?.SessionStart ?? []).some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${CONTEXT_MARKER}${id}`)))) return { changed: false };
+    let backup: string | undefined; if (existed) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); }
+    const next: Settings = structuredClone(settings); next.hooks ??= {}; (next.hooks.SessionStart ??= []).push({ hooks: [{ type: 'command', command: contextHookCommand(this.id, id, { ...(options.userLevel ? { userLevel: true } : {}), ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}), ...(options.localRoot ? { root: options.localRoot } : {}) }), timeout: 5 }] });
+    await this.write(next); return { changed: true, ...(backup ? { backup } : {}) };
+  }
+  /** Hooks for the opt-in Markdown sync: after a file-writing tool call, and at session end. Installed only after separate file-sync consent. */
+  async installFileSync(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }> {
+    const id = contextHookId({ projectRoot: options.projectRoot }, 'local'); const { settings, existed } = await this.read();
+    const command = `${quote(process.execPath)} ${quote(mdbBinary())} notes sync --hook ${options.localRoot ? `--root ${quote(options.localRoot)} ` : ''}--project-root ${quote(options.projectRoot)} ${FILESYNC_MARKER}${id}`;
+    const has = (name: string) => (settings.hooks?.[name] ?? []).some(e => e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${FILESYNC_MARKER}${id}`)));
+    if (has('PostToolUse') && has('SessionEnd')) return { changed: false };
+    let backup: string | undefined; if (existed) { backup = `${this.settingsPath}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`; await fs.copyFile(this.settingsPath, backup); }
+    const next: Settings = structuredClone(settings); next.hooks ??= {};
+    if (!has('PostToolUse')) (next.hooks.PostToolUse ??= []).push({ matcher: 'Write|Edit|MultiEdit|apply_patch', hooks: [{ type: 'command', command, timeout: 10 }] });
+    if (!has('SessionEnd')) (next.hooks.SessionEnd ??= []).push({ hooks: [{ type: 'command', command, timeout: 15 }] });
+    await this.write(next); return { changed: true, ...(backup ? { backup } : {}) };
+  }
+  /** Removes only the file-sync hooks of one project. */
+  async removeFileSync(projectRoot: string): Promise<number> {
+    const id = contextHookId({ projectRoot }, 'local'); let parsed: { settings: Settings; existed: boolean }; try { parsed = await this.read(); } catch { return 0; } if (!parsed.existed) return 0;
+    const next: Settings = structuredClone(parsed.settings); let removed = 0;
+    for (const [name, list] of Object.entries(next.hooks ?? {})) { const kept = list.filter(e => { const own = e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${FILESYNC_MARKER}${id}`)); if (own) removed++; return !own; }); if (kept.length) next.hooks![name] = kept; else delete next.hooks![name]; }
+    if (removed) await this.write(next); return removed;
+  }
+  /** Removes only user-level hooks (`memory capture --user`), leaving project hooks and everything else in the file. */
+  async removeUserHooks(): Promise<number> {
+    let parsed: { settings: Settings; existed: boolean }; try { parsed = await this.read(); } catch { return 0; }
+    if (!parsed.existed) return 0;
+    const next: Settings = structuredClone(parsed.settings); let removed = 0;
+    for (const [name, list] of Object.entries(next.hooks ?? {})) { const kept = list.filter(e => { const own = e.hooks?.some(h => typeof h.command === 'string' && (h.command.includes(' memory capture --user ') || h.command.includes(' memory context --host ') && h.command.includes(' --user '))); if (own) removed++; return !own; }); if (kept.length) next.hooks![name] = kept; else delete next.hooks![name]; }
+    if (removed) await this.write(next); return removed;
+  }
   async uninstall() {
     const regs = await this.mine(); const ids = new Set(regs.map(r => r.id)); let removed = 0;
     let parsed: { settings: Settings; existed: boolean }; try { parsed = await this.read(); } catch { parsed = { settings: {}, existed: false }; }
     if (parsed.existed) {
       const next: Settings = structuredClone(parsed.settings);
       for (const [name, list] of Object.entries(next.hooks ?? {})) {
-        const kept = list.filter(e => { const own = ownedBy(e, ids) || anyOwned(e, this.options.root) || e.hooks?.some(h => h.command.includes(REMOTE_MARKER)); if (own) removed++; return !own; });
+        const kept = list.filter(e => { const own = ownedBy(e, ids) || anyOwned(e, this.options.root) || e.hooks?.some(h => h.command.includes(REMOTE_MARKER) || h.command.includes(CONTEXT_MARKER) && !h.command.includes(' --user ') || h.command.includes(FILESYNC_MARKER)); if (own) removed++; return !own; });
         if (kept.length) next.hooks![name] = kept; else delete next.hooks![name];
       }
       if (next.hooks && !Object.keys(next.hooks).length && !('hooks' in parsed.settings && (parsed.settings.hooks && Object.keys(parsed.settings.hooks).length === 0))) delete next.hooks;
