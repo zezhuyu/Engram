@@ -23,7 +23,10 @@ async function setup(t: Cleanup, serverUp = true) {
   const cred = await createHttpCredential(owner.vault, 'agent-h', ['workspace:proj:read', 'workspace:proj:write']); await owner.vault.grant('proj', 'agent-h', ['read', 'write']);
   const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: '0' } });
   let err = ''; const url = await new Promise<string>((res, rej) => { child.stderr.setEncoding('utf8'); child.stderr.on('data', (c: string) => { err += c; const m = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(err); if (m) res(m[1]!); }); child.once('exit', c => rej(new Error(`exit ${c} ${err}`))); });
-  const stop = async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(r => child.once('exit', () => r())); } }; t.after(stop); if (!serverUp) await stop();
+  // Idempotent, and aware of a child that died from the signal itself: the server registers its SIGTERM handler just after it prints the readiness line, so on a slow runner the signal can arrive first, the child then ends with
+  // exitCode null and signalCode set, and the later `t.after(stop)` call would wait forever for an 'exit' event that has already fired ("Promise resolution is still pending but the event loop has already resolved").
+  let stopping: Promise<void> | undefined;
+  const stop = (): Promise<void> => stopping ??= (async () => { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise<void>(r => child.once('exit', () => r())); } })(); t.after(stop); if (!serverUp) await stop();
   const base = await temp(t, 'engram-handoff-'); const dir = path.join(base, 'p'); await mkdir(dir);
   const binding = defaultBinding({ workspaceId: 'proj', serverUrl: url, hosts: ['claude-code'], credentialRef: 'ENGRAM_H_TOKEN', captureConsent: false }); await writeBinding(dir, binding);
   const env = { ...process.env, ENGRAM_H_TOKEN: cred.token, ENGRAM_CACHE_DIR: path.join(base, 'cache'), ENGRAM_USER_CONFIG: path.join(base, 'u.json'), ENGRAM_TRUST_FILE: path.join(base, 't.json') } as NodeJS.ProcessEnv; await trustProject(dir, binding, env);
