@@ -1,6 +1,7 @@
 {
   "name": "engram-mdb",
   "version": "0.1.0",
+  "private": true,
   "description": "Markdown-native agent memory and knowledge database",
   "type": "module",
   "engines": {

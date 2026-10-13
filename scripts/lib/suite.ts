@@ -6,6 +6,20 @@ import path from 'node:path';
 
 /** Verification INPUT fixtures (not generated reports) live in the tracked fixtures/inputs/ tree; verification/ itself is generated output and is not tracked. */
 export function inputPath(relative: string): string { return existsSync(`fixtures/inputs/${relative}`) ? `fixtures/inputs/${relative}` : `verification/${relative}`; }
+import { redactText } from '../../packages/memory/redact.js';
+const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH)/i;
+/**
+ * Diagnostic text can leave the machine (a CI log, an uploaded artifact that GitHub does not mask). Before it is printed or stored: values of secret-looking environment variables are
+ * replaced by name, the shared secret scrubber runs (bearer tokens, key=value secrets, provider key formats, URL credentials, private keys), Engram's own credential format is masked,
+ * and the user's home directory becomes ~. A failing assertion still shows its message and the expected/actual shape.
+ */
+export function scrubDiagnostics(text: string, env: NodeJS.ProcessEnv = process.env): string {
+  let out = text;
+  for (const [name, value] of Object.entries(env)) if (value && value.length >= 8 && SECRET_ENV_NAME.test(name)) out = out.split(value).join(`[REDACTED:${name}]`);
+  out = redactText(out).replace(/\bengram_[A-Za-z0-9_-]{16,}/g, 'engram_[REDACTED]');
+  const home = os.homedir(); if (home && home.length > 1) out = out.split(home).join('~');
+  return out;
+}
 export type Status = 'PASS' | 'FAIL' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
 export interface Gap { item: string; status: 'NOT_RUN' | 'UNSUPPORTED' | 'FAIL'; reason: string }
 export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; allowedSkips?: string[]; env?: Record<string, string>; concurrency?: number }
@@ -39,7 +53,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   for (let i = 0; i < outLines.length; i++) {
     const m = /^(not )?ok \d+ - (.*?)(?: # (SKIP|TODO).*)?$/.exec(outLines[i]!); if (!m) continue; // top-level only: subtests are indented
     const skipped = m[3] === 'SKIP'; let detail: string | undefined;
-    if (m[1] && !skipped) { const block: string[] = []; for (let j = i + 1; j < outLines.length && /^\s/.test(outLines[j]!) && block.length < 60; j++) { if (outLines[j]!.trim() === '...') break; block.push(outLines[j]!.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')); } detail = block.join('\n').slice(0, 6000); }
+    if (m[1] && !skipped) { const block: string[] = []; for (let j = i + 1; j < outLines.length && /^\s/.test(outLines[j]!) && block.length < 60; j++) { if (outLines[j]!.trim() === '...') break; block.push(outLines[j]!.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')); } detail = scrubDiagnostics(block.join('\n'), { ...process.env, ...spec.env }).slice(0, 6000); }
     tests.push({ name: m[2]!, status: skipped ? 'SKIPPED' : m[1] ? 'FAIL' : 'PASS', ...(detail ? { detail } : {}) });
   }
   const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
@@ -55,7 +69,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   };
   await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   await fs.writeFile(path.join(outDir, 'report.md'), markdown(spec, report) + '\n');
-  if (status !== 'PASS') await fs.writeFile(path.join(outDir, 'last-output.txt'), run.stdout.slice(-200000) + '\n--- stderr ---\n' + run.stderr.slice(-20000));
+  if (status !== 'PASS') await fs.writeFile(path.join(outDir, 'last-output.txt'), scrubDiagnostics(run.stdout.slice(-100000) + '\n--- stderr ---\n' + run.stderr.slice(-10000), { ...process.env, ...spec.env }));
   return report;
 }
 function markdown(spec: SuiteSpec, r: SuiteReport): string {

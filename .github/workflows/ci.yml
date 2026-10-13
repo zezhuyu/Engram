@@ -27,6 +27,7 @@ jobs:
           path: |
             verification/*/report.*
             verification/*/last-output.txt
+          retention-days: 7
   linux-reliability:
     name: Linux ACID and isolation
     runs-on: ubuntu-24.04
@@ -43,6 +44,7 @@ jobs:
           path: |
             verification/acid/report.*
             verification/acid/last-output.txt
+          retention-days: 7
   macos:
     runs-on: macos-latest
     steps:
