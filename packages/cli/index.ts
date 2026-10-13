@@ -12,11 +12,13 @@ import { readBinding } from '../core/project-binding.js';
 import { isTrusted } from '../core/project-trust.js';
 import { captureForUser, insideProject, setUserPaused, setupUser, uninstallUser, userStatus } from '../memory/user-setup.js';
 import { touchActivity } from '../adaptive/activity.js';
+import { mapCommand, remoteTarget, runRemote, usesServer } from './remote.js';
+import { findTrustedBinding } from '../core/project-trust.js';
 import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
 import { createRegistration, revokeRegistration } from '../memory/capture.js';
 import { drainRemoteCaptureSpool, queueRemoteCapture } from '../memory/remote-spool.js';
 import type { JobKind } from '../intelligence/index.js';
-import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput } from '../sdk/index.js';
+import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, refreshRelevance, readRanking, clearRanking, relevanceStatus, showModel, setModel, testModel, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput } from '../sdk/index.js';
 
 /** Builds the vault-configured built-in provider (openai, ollama, openai-compatible). Returns undefined, with a stderr note, when unavailable. */
 async function configuredProvider(root: string): Promise<ModelProvider | undefined> {
@@ -29,8 +31,17 @@ async function configuredProvider(root: string): Promise<ModelProvider | undefin
 const HELP = `mdb — Markdown-native agent knowledge database
 Usage: mdb COMMAND [arguments] [--root PATH] [--json]
 
+mcp-proxy --url URL --token-env VAR [--workspace ID] [--outbox DIR] [--transport-trust tailscale]   stdio proxy for an agent host; keeps task/note/handoff writes locally while the server is unreachable and sends them when it returns
+remote mode: any client runs these against the server instead of a local vault when --server URL [--token-env VAR] [--workspace ID] is given, ENGRAM_URL is set, or the current project is bound to a server (--root or --local forces a local vault)
+    search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | insight search | capabilities
+    task upsert --id ID --title T --status S [--body B] [--expected-revision R | --as-of TIME]    note upsert --id ID --title T (--body B | --file F)    handoff write --session ID --state ended|interrupted [--completed a,b --next ... --blockers ... --files ... --open-tasks ...]
+    remote tools | remote call TOOL --input JSON      (every server tool; task/note/handoff writes made while the server is unreachable are kept in the local outbox and merged in later)
+outbox [drain --url URL --token-env VAR [--workspace ID] | log [--limit N]]   what is waiting on this machine (queued, conflicts, rejected); drain sends it now; log is the timestamped record
+model show | test | set (--local-agent [claude|codex|auto] | --api URL [--model NAME] [--api-key-env VAR] [--allow-network]) [--allow-private-to-remote] [--no-check]
+    one vault-wide model switch for profile/insight collection, dream and project insight relevance; keys come from the environment only
+
 init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
-init --project --host claude-code|codex [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
+init --project --host claude-code|codex [--no-local-mcp] [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
                                [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools]: writes .engram/project.json (gitignored), managed blocks, MCP config
@@ -67,7 +78,8 @@ cat ID | grep PATTERN --path ID | head|tail -n N | cut -c R | sed SCRIPT | trim 
 embed status | sync [--max-objects N] | clear     (optional semantic index; needs sqlite.enabled and embedding.* in mdb.yaml)
 memory recent|timeline|range|search|grep|get   (secondary recall; use your host's native memory first)
 memory adapter detect|install|status|uninstall --host claude-code|codex [--consent --principal P --workspace W]
-  remote hooks: add --mcp-url https://HOST/mcp --token-env ENV --registration REG_ID
+  remote offline buffer: with --mcp-url add --offline-buffer so task/note/handoff writes made while the server is unreachable are kept on this machine, then merged into the server's version (like git) and deleted locally when it returns
+remote hooks: add --mcp-url https://HOST/mcp --token-env ENV --registration REG_ID
 memory register --host claude-code|codex --principal ACTOR --workspace W --consent
 memory revoke --registration REG_ID | memory drain-remote --token-env ENV
 memory record --registration R --type note.created|decision|finding|task.completed --session S --text T | memory drain|sweep|status|capabilities | insight search QUERY | capabilities
@@ -85,7 +97,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -171,14 +183,34 @@ function summarizeRun(r: { cycle?: { id: string; state: string; watermark: numbe
 }
 /** Commands that never change the vault: they must not record activity either (a read leaves the vault byte-identical). */
 const READ_ONLY_COMMANDS = new Set(['doctor', 'verify', 'get', 'history', 'diff', 'grep', 'search', 'context', 'links', 'backlinks', 'related', 'query', 'capabilities', 'insight']);
-const READ_ONLY_SUBCOMMANDS: Record<string, string[]> = { workspace: ['list', 'info', 'daily', 'changes'], collection: ['list', 'info'], credential: ['audit'], profile: ['show', 'proposals'], jobs: ['status'], index: ['status', 'verify'], memory: ['recent', 'timeline', 'range', 'search', 'grep', 'get', 'status', 'capabilities', 'adapter'], embed: ['status'], skills: ['list', 'show'] };
+const READ_ONLY_SUBCOMMANDS: Record<string, string[]> = { model: ['show', 'test'], workspace: ['list', 'info', 'daily', 'changes'], collection: ['list', 'info'], credential: ['audit'], profile: ['show', 'proposals'], jobs: ['status'], index: ['status', 'verify'], memory: ['recent', 'timeline', 'range', 'search', 'grep', 'get', 'status', 'capabilities', 'adapter'], embed: ['status'], skills: ['list', 'show'] };
 export function isReadOnlyCommand(command: string | undefined, sub: string | undefined): boolean { if (!command) return true; if (command === 'query') return sub !== 'save'; if (command === 'memory' && sub === 'adapter') return true; return READ_ONLY_COMMANDS.has(command) || (READ_ONLY_SUBCOMMANDS[command]?.includes(sub ?? '') ?? false); }
 export async function execute(argv: string[]): Promise<unknown> {
   const { args, flags } = parse(argv);
   const [command, sub, third, fourth] = args;
   if (!command || command === 'help' || flags.help) return HELP;
+  if (command === 'mcp-proxy') {
+    if (text(flags, 'transport-trust')) process.env.MDB_TRANSPORT_TRUST = text(flags, 'transport-trust')!; // stdio proxy for an agent host: forwards to the server and keeps task/note/handoff writes in a local outbox while it is unreachable
+    const tokenEnv = required(text(flags, 'token-env'), '--token-env'), token = process.env[tokenEnv];
+    if (!token) throw new MDBError('INVALID_ARGUMENT', `Environment variable ${tokenEnv} is not set`);
+    const { runMcpProxy } = await import('../memory/mcp-proxy.js');
+    await runMcpProxy({ url: required(text(flags, 'url'), '--url'), token, ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'outbox') ? { outbox: resolve(text(flags, 'outbox')!) } : {}), input: process.stdin, output: process.stdout, log: line => process.stderr.write(`engram-proxy: ${line}\n`) });
+    return STREAMED; // stdout is the protocol channel: never print a result into it
+  }
+  if (command === 'outbox') { // writes kept on this machine while the server was unreachable: status (default), `drain` to send them now, `log` for the timestamped record
+    const { outboxStatus, defaultOutboxDirectory, readLog } = await import('../memory/outbox.js'); const directory = text(flags, 'outbox') ? resolve(text(flags, 'outbox')!) : defaultOutboxDirectory();
+    if (sub === 'log') return readLog(directory, number(flags, 'limit') ?? 50);
+    if (sub === 'drain') {
+      const tokenEnv = required(text(flags, 'token-env'), '--token-env'), token = process.env[tokenEnv]; if (!token) throw new MDBError('INVALID_ARGUMENT', `Environment variable ${tokenEnv} is not set`);
+      const url = required(text(flags, 'url'), '--url'); const { drainOutboxNow } = await import('../memory/mcp-proxy.js');
+      const drained = await drainOutboxNow({ url, token, ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), outbox: directory }); return { ...(await outboxStatus(directory, entry => entry.url === url)), drain: { ...(drained ?? {}), ...(drained?.stopped === 'auth' ? { note: 'The server refused the credential: nothing was lost, every queued write is kept. Set the new token in the environment variable and drain again.' } : drained?.stopped ? { note: 'The server did not answer: every queued write is kept.' } : {}) } };
+    }
+    return outboxStatus(directory);
+  }
+  // Remote mode: a client machine runs the same commands against the server (see cli/remote.ts). --root or --local keeps a command on a local vault.
+  if (usesServer(command, sub)) { const target = await remoteTarget(flags); if (target) return runRemote(target, args, flags); }
   const root = resolveRoot(text(flags, 'root'));
-  const client = new Engram(root, OWNER, ['intelligence', 'dream', 'profile'].includes(command) ? await configuredProvider(root) : undefined);
+  const client = new Engram(root, OWNER, (['intelligence', 'dream', 'profile'].includes(command) || (command === 'model' && sub === 'test') || (command === 'project' && sub === 'relevance' && third === 'refresh')) ? await configuredProvider(root) : undefined);
   if (STREAM_COMMANDS.has(command)) return queryCommand(argv, client, root); // typed query AST and stream aliases (packages/cli/query.ts)
   if (command === 'grep' && (flags.path || flags.stdin)) return lineGrep(argv, client);
   const abort = new AbortController(); const interrupt = () => abort.abort(); process.once('SIGINT', interrupt);
@@ -196,7 +228,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (hostsFlag && singleHost) throw new MDBError('INVALID_ARGUMENT', 'use --host or --hosts, not both');
       const hostList = hostsFlag === 'auto' ? 'auto' as const : (hostsFlag ?? required(singleHost, '--host or --hosts')).split(',').map(item => item.trim()).filter(Boolean) as Host[];
       if (hostList !== 'auto') for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host/--hosts must name claude-code and/or codex (or --hosts auto)');
-      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
+      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['offline-buffer'] ? { offlineBuffer: true } : {}), ...(flags['no-local-mcp'] ? { noLocalMcp: true } : {}), ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
       return { initialized, project: setup };
     }
     case 'notes': {
@@ -226,7 +258,14 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'doctor': if (flags.project) return projectDoctor(resolve(text(flags, 'project-dir', process.cwd())!), { ...(flags['no-probe'] ? { probeRemote: false } : {}) }); return v.doctor();
     case 'project': {
       if (sub === 'trust-codex-hooks') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const result = await trustEngramCodexHooks(dir, { confirm: !!flags.yes }); return flags.yes ? result : { ...result, note: 'Nothing was changed. These are the exact hook commands Codex would then run in this project; rerun with --yes to record trust for them (only these) in your Codex config.' }; }
-      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project refresh-context | trust-codex-hooks [--yes] [--project-dir PATH]');
+      if (sub === 'relevance') {
+        const workspaceId = required(text(flags, 'workspace'), '--workspace');
+        if (third === 'refresh') return refreshRelevance(client, workspaceId, await configuredProvider(root), await v.config());
+        if (third === 'clear') return clearRanking(client, workspaceId);
+        if (third === 'show' || !third) return { workspaceId, status: await relevanceStatus(client, workspaceId), ranking: (await readRanking(client, workspaceId)) ?? null };
+        throw new MDBError('INVALID_ARGUMENT', 'usage: project relevance refresh|show|clear --workspace ID');
+      }
+      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project refresh-context | relevance refresh|show|clear | trust-codex-hooks [--yes] [--project-dir PATH]');
       return refreshContext(resolve(text(flags, 'project-dir', process.cwd())!), flags.remote ? {} : { client });
     }
     case 'verify': return v.verify();
@@ -265,6 +304,14 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'observe') return engine.observe({ sessionId: required(text(flags, 'session'), '--session'), body: await body(flags), source: text(flags, 'source') });
       if (sub === 'end') return engine.sessionEnd({ sessionId: required(text(flags, 'session'), '--session'), ...(flags.body || flags.file ? { body: await body(flags) } : {}) });
       break;
+    case 'model': {
+      if (!sub || sub === 'show') return showModel(await v.config());
+      if (sub === 'test') return testModel(await configuredProvider(root), await v.config());
+      if (sub !== 'set') throw new MDBError('INVALID_INPUT', 'Usage: mdb model show | set | test');
+      const bool = (name: string): boolean | undefined => flags[name] === undefined ? undefined : flags[name] === true || flags[name] === 'true';
+      const localAgent = flags['local-agent'] === undefined ? undefined : flags['local-agent'] === true ? 'auto' : String(flags['local-agent']);
+      return setModel(v, { provider: text(flags, 'provider'), localAgent: localAgent as 'claude' | 'codex' | 'auto' | undefined, api: text(flags, 'api'), modelName: text(flags, 'model'), baseUrl: text(flags, 'base-url'), apiKeyEnv: text(flags, 'api-key-env'), command: text(flags, 'command'), allowNetwork: bool('allow-network'), allowPrivateContentToRemote: bool('allow-private-to-remote'), timeoutMs: number(flags, 'timeout-ms'), maxOutputTokens: number(flags, 'max-output-tokens'), maxInputTokens: number(flags, 'max-input-tokens'), locality: text(flags, 'locality') as 'local' | 'remote' | undefined, check: flags['no-check'] ? false : true });
+    }
     case 'profile':
       if (sub === 'show') return (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] }));
       if (sub === 'propose') return engine.enqueue('profile', { ...jsonInput(flags), scope: parseScope(flags) });
@@ -310,6 +357,14 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'memory': return memoryCommand(client, root, sub, third, flags);
     case 'insight': if (sub === 'search') return client.memory.insights({ ...(third ?? text(flags, 'query') ? { query: third ?? text(flags, 'query')! } : {}), ...(text(flags, 'category') ? { category: text(flags, 'category')! } : {}), ...(text(flags, 'status') ? { status: text(flags, 'status')! } : {}), ...(text(flags, 'evidence-class') ? { evidenceClass: text(flags, 'evidence-class')! } : {}), ...(number(flags, 'limit') ? { limit: number(flags, 'limit')! } : {}) }); break;
     case 'capabilities': return client.capabilities();
+    case 'task': case 'note': case 'handoff': { // typed work records on a local vault (the built-in server's tools, no network); with a server target they were handled above
+      if (!usesServer(command, sub)) throw new MDBError('INVALID_ARGUMENT', `usage: ${command} ${command === 'handoff' ? 'write' : 'upsert'} ...`);
+      const mapped = await mapCommand(command, args, flags); if (mapped === 'list') break;
+      const server = await import('../mcp/index.js').catch(() => undefined); if (!server) throw new MDBError('CAPABILITY_UNAVAILABLE', 'This installation has no built-in server: pass --server URL to use a remote one');
+      const bound = await findTrustedBinding(process.cwd()).catch(() => undefined); const workspace = text(flags, 'workspace') ?? (bound?.trusted && !bound.binding.serverUrl ? bound.binding.workspaceId : undefined);
+      const tool = server.withDefaultWorkspace(server.toolsFor(client), workspace).find(t => t.name === mapped.tool); if (!tool) throw new MDBError('NOT_FOUND', `No tool ${mapped.tool}`);
+      return tool.execute(mapped.input);
+    }
     case 'credential':
       if (sub === 'create') return createHttpCredential(v, required(text(flags, 'actor'), '--actor'), required(text(flags, 'permissions'), '--permissions').split(',').map(value => value.trim()).filter(Boolean));
       if (sub === 'rotate') return rotateHttpCredential(v, required(third, 'credential ID'), text(flags, 'permissions')?.split(',').map(value => value.trim()).filter(Boolean));

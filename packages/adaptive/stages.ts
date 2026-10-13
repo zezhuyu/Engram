@@ -169,6 +169,8 @@ export async function runDreamStage(ctx: StageContext): Promise<void> {
   const { cycle, view, vault } = ctx; const rec = cycle.dream;
   if (rec.status === 'SUCCEEDED') return;
   rec.attempts++; rec.status = 'RUNNING'; delete rec.error; await ctx.checkpoint();
+  // Dream is an explicit opt-in. When it is off the stage is an honest skip: reporting it as MODEL_UNAVAILABLE blocked every daily cycle of a vault that only wants profile extraction, forever.
+  if (!(await vault.config()).dream.enabled) { rec.proposals = []; rec.skipped = 'Dream is not enabled (explicit opt-in); profile and summary stages ran normally'; rec.status = 'SUCCEEDED'; await ctx.checkpoint(); return; }
   try {
     await checkpoint(ctx); await verifyDerived(ctx);
     const permitted = cycle.permittedDerived.map(o => ({ objectId: o.objectId, revisionId: o.revisionId, proposalId: o.proposalId }));

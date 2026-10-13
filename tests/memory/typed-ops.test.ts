@@ -24,11 +24,13 @@ test('a task is one object with revisions: a changed update patches, an identica
   recordCase({ suite: 'memory', name: 'typed-task-upsert-revisions', status: 'PASS' });
 });
 
-test('a stale expected revision is a conflict, never an overwrite; two tasks stay separate', async t => {
+test('a stale expected revision is merged or becomes a conflict note, never an overwrite; two tasks stay separate', async t => {
   const { client } = await owner(t);
   const a = await upsertTask(client, { scope, taskId: 'T-2', title: 'Task two', status: 'open' });
   await upsertTask(client, { scope, taskId: 'T-2', title: 'Task two', status: 'in_progress' });
-  await assert.rejects(upsertTask(client, { scope, taskId: 'T-2', title: 'Task two', status: 'blocked', expectedRevisionId: a.revisionId }), (e: unknown) => e instanceof MDBError && e.code === 'CONFLICT');
+  // Design change: the server no longer refuses a stale expectedRevisionId, it merges (see offline-merge.test.ts). The same field changed differently on both sides is a conflict note, and the record is untouched.
+  const stale = await upsertTask(client, { scope, taskId: 'T-2', title: 'Task two', status: 'blocked', expectedRevisionId: a.revisionId }); assert.equal(stale.merge?.outcome, 'CONFLICT');
+  assert.equal((await client.vault.get(a.objectId)).metadata.taskStatus, 'in_progress', 'the server version was not overwritten');
   const other = await upsertTask(client, { scope, taskId: 'T-3', title: 'Task three', status: 'open' });
   assert.notEqual(other.objectId, a.objectId);
   assert.equal((await client.listDocuments()).filter(d => d.kind === 'task').length, 2);

@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Engram } from '../sdk/index.js';
 import { MDBError } from '../core/types.js';
 import { atomicWrite } from '../storage-local/index.js';
+import type { MergeInfo, OfflineWrite } from './workspace-ops.js';
 import type { ProjectBinding } from '../core/project-binding.js';
 import { upsertNote } from './workspace-ops.js';
 import { openRemoteSession, RemoteError, type RemoteSession } from './remote-client.js';
@@ -14,11 +15,12 @@ import { looksSecret } from './redact.js';
  * and a file with a secret in it is quarantined locally instead of uploaded. Every write carries the revision it was based on, so a concurrent edit becomes a visible conflict note,
  * never an overwrite. A file written while the server is unreachable is queued durably (one entry per path) and the result says QUEUED_OFFLINE until the server acknowledges it.
  */
-export type SyncStatus = 'COMMITTED' | 'QUEUED_OFFLINE' | 'FAILED' | 'CONFLICT' | 'QUARANTINED' | 'SKIPPED' | 'DISABLED' | 'TOMBSTONED';
+export type SyncStatus = 'COMMITTED' | 'MERGED' | 'QUEUED_OFFLINE' | 'FAILED' | 'CONFLICT' | 'QUARANTINED' | 'SKIPPED' | 'DISABLED' | 'TOMBSTONED';
 export interface SyncOutcome { path: string; status: SyncStatus; detail?: string; revisionId?: string; unchanged?: boolean }
 interface FileState { noteId: string; hash: string; baseRevisionId?: string; status: SyncStatus; at: string; detail?: string; conflictNoteId?: string; renamedFrom?: string }
 interface SyncState { schemaVersion: 1; files: Record<string, FileState> }
-interface QueueEntry { path: string; hash: string; queuedAt: string; bytes: number }
+/** `body` is the exact content that was queued: it is what gets delivered, even if the file was edited, moved or deleted while the server was unreachable. */
+interface QueueEntry { path: string; hash: string; queuedAt: string; bytes: number; body?: string }
 export const MAX_SYNC_FILE_BYTES = 256 * 1024;
 export const MAX_RUN_BYTES = 5 * 1024 * 1024;
 export const MAX_QUEUE_ENTRIES = 200;
@@ -63,12 +65,15 @@ async function readCapped(abs: string): Promise<{ bytes: Buffer; truncated: bool
 }
 
 // ---- transports ---------------------------------------------------------------------------------------------------------------------------
-export type SinkResult = { kind: 'committed'; revisionId: string; unchanged: boolean } | { kind: 'offline' } | { kind: 'refused'; detail: string } | { kind: 'conflict'; detail: string } | { kind: 'failed'; detail: string };
-export interface NoteWrite { noteId: string; title: string; body: string; sourcePath: string; expectedRevisionId: string; status?: 'active' | 'tombstone'; tags?: string[] }
+export type SinkResult = { kind: 'committed'; revisionId: string; unchanged: boolean } | { kind: 'merged'; revisionId: string; body: string; baseRevisionId?: string; theirsRevisionId?: string } | { kind: 'merge_conflict'; conflictNoteId: string; fields: string[] } | { kind: 'offline' } | { kind: 'refused'; detail: string } | { kind: 'conflict'; detail: string } | { kind: 'failed'; detail: string };
+/** `merge`: when the server copy changed since `expectedRevisionId`, the SERVER merges this write with it like git (see merge.ts) instead of refusing; entryId makes a replay idempotent. */
+export interface NoteWrite { noteId: string; title: string; body: string; sourcePath: string; expectedRevisionId: string; status?: 'active' | 'tombstone'; tags?: string[]; merge?: { entryId: string; queuedAt?: string } }
+const offlineOf = (w: NoteWrite): OfflineWrite | undefined => w.merge ? { entryId: w.merge.entryId, ...(w.merge.queuedAt ? { queuedAt: w.merge.queuedAt } : {}), ...(w.expectedRevisionId !== 'none' ? { baseRevisionId: w.expectedRevisionId } : {}) } : undefined;
+const fromMerge = (r: { revisionId: string; unchanged: boolean; merge?: MergeInfo }): SinkResult => r.merge?.outcome === 'MERGED' && typeof r.merge.body === 'string' ? { kind: 'merged', revisionId: r.revisionId, body: r.merge.body, ...(r.merge.baseRevisionId ? { baseRevisionId: r.merge.baseRevisionId } : {}), ...(r.merge.theirsRevisionId ? { theirsRevisionId: r.merge.theirsRevisionId } : {}) } : r.merge?.outcome === 'CONFLICT' ? { kind: 'merge_conflict', conflictNoteId: r.merge.conflictNoteId ?? '', fields: r.merge.conflictingFields ?? [] } : { kind: 'committed', revisionId: r.revisionId, unchanged: r.unchanged };
 export interface SyncSink { upsert(write: NoteWrite): Promise<SinkResult> }
 export function localSink(client: Engram, workspaceId: string): SyncSink {
   return { async upsert(w) {
-    try { const r = await upsertNote(client, { scope: { type: 'workspace', workspaceId }, noteId: w.noteId, title: w.title, body: w.body, sourcePath: w.sourcePath, tags: ['file-sync', ...(w.tags ?? [])], expectedRevisionId: w.expectedRevisionId, ...(w.status ? { status: w.status } : {}), metadata: { contentSource: 'file-sync' } }); return { kind: 'committed', revisionId: r.revisionId, unchanged: r.unchanged }; }
+    try { const r = await upsertNote(client, { scope: { type: 'workspace', workspaceId }, noteId: w.noteId, title: w.title, body: w.body, sourcePath: w.sourcePath, tags: ['file-sync', ...(w.tags ?? [])], expectedRevisionId: w.expectedRevisionId, ...(w.status ? { status: w.status } : {}), ...(offlineOf(w) ? { offline: offlineOf(w)! } : {}), metadata: { contentSource: 'file-sync' } }); return fromMerge(r); }
     catch (error) { if (error instanceof MDBError) return error.code === 'CONFLICT' ? { kind: 'conflict', detail: error.message } : error.code === 'NOT_FOUND_OR_FORBIDDEN' ? { kind: 'refused', detail: error.message } : { kind: 'failed', detail: error.message }; return { kind: 'failed', detail: error instanceof Error ? error.message : String(error) }; }
   } };
 }
@@ -79,10 +84,10 @@ export function remoteSink(binding: ProjectBinding, env: NodeJS.ProcessEnv = pro
     if (!binding.serverUrl || !token) return { kind: 'offline' }; // without a credential nothing can be delivered: keep it queued
     try {
       session ??= openRemoteSession({ url: binding.serverUrl, token, workspaceId: binding.workspaceId, timeoutMs }); const s = await session;
-      const reply = await s.call('engram_note_upsert', { noteId: w.noteId, title: w.title, body: w.body, sourcePath: w.sourcePath, tags: ['file-sync', ...(w.tags ?? [])], expectedRevisionId: w.expectedRevisionId, contentSource: 'file-sync', ...(w.status ? { status: w.status } : {}) });
+      const reply = await s.call('engram_note_upsert', { noteId: w.noteId, title: w.title, body: w.body, sourcePath: w.sourcePath, tags: ['file-sync', ...(w.tags ?? [])], expectedRevisionId: w.expectedRevisionId, contentSource: 'file-sync', ...(w.status ? { status: w.status } : {}), ...(offlineOf(w) ? { offline: offlineOf(w) } : {}) });
       if (reply.isError) { const code = (reply.value as { error?: { code?: string; message?: string } } | undefined)?.error; return code?.code === 'CONFLICT' ? { kind: 'conflict', detail: code.message ?? 'conflict' } : code?.code === 'NOT_FOUND_OR_FORBIDDEN' ? { kind: 'refused', detail: 'the server refused this credential for the workspace' } : { kind: 'failed', detail: code?.message ?? 'the server rejected the note' }; }
-      const v = reply.value as { revisionId?: string; unchanged?: boolean; persistence?: string }; if (v.persistence !== 'COMMITTED' || !v.revisionId) return { kind: 'failed', detail: 'the server did not acknowledge a commit' };
-      return { kind: 'committed', revisionId: v.revisionId, unchanged: !!v.unchanged };
+      const v = reply.value as { revisionId?: string; unchanged?: boolean; persistence?: string; merge?: MergeInfo }; if (v.persistence !== 'COMMITTED' || !v.revisionId) return { kind: 'failed', detail: 'the server did not acknowledge a commit' };
+      return fromMerge({ revisionId: v.revisionId, unchanged: !!v.unchanged, ...(v.merge ? { merge: v.merge } : {}) });
     } catch (error) { session = undefined; if (error instanceof RemoteError) return error.kind === 'auth' || error.kind === 'workspace' ? { kind: 'refused', detail: error.message } : error.kind === 'network' ? { kind: 'offline' } : { kind: 'failed', detail: error.message }; return { kind: 'offline' }; }
   } };
 }
@@ -111,8 +116,10 @@ export async function syncFile(ctx: SyncContext, candidate: string): Promise<Syn
   const body = bytes.toString('utf8'); const hash = sha(body); const state = await readState(projectDir); const known = state.files[rel];
   if (looksSecret(body)) { state.files[rel] = { noteId: `file:${rel}`, hash, status: 'QUARANTINED', at: now, detail: 'the file contains what looks like a secret; it was not uploaded' }; await writeState(projectDir, state); return { path: rel, status: 'QUARANTINED', detail: 'looks like it contains a secret; nothing was uploaded. Remove the secret and save again.' }; }
   if (known && known.hash === hash && (known.status === 'COMMITTED' || known.status === 'CONFLICT')) return { path: rel, status: known.status === 'COMMITTED' ? 'SKIPPED' : 'CONFLICT', detail: known.status === 'COMMITTED' ? 'unchanged since the last committed sync' : known.detail ?? 'unresolved conflict', unchanged: true };
-  const noteId = `file:${rel}`; const write: NoteWrite = { noteId, title: title(rel, body), body, sourcePath: rel, expectedRevisionId: known?.baseRevisionId ?? 'none' };
+  const noteId = `file:${rel}`; const write: NoteWrite = { noteId, title: title(rel, body), body, sourcePath: rel, expectedRevisionId: known?.baseRevisionId ?? 'none', merge: { entryId: mergeEntryId(rel, hash, known?.baseRevisionId), queuedAt: now } };
   const result = await sink.upsert(write);
+  if (result.kind === 'merged') return applyMerged(ctx, rel, hash, result, known, noteId, now);
+  if (result.kind === 'merge_conflict') return markServerConflict(ctx, rel, hash, result, known, noteId, now);
   if (result.kind === 'committed') { state.files[rel] = { noteId, hash, baseRevisionId: result.revisionId, status: 'COMMITTED', at: now }; await writeState(projectDir, state); await fs.rm(path.join(projectDir, queueKey(rel)), { force: true }); return { path: rel, status: 'COMMITTED', revisionId: result.revisionId, unchanged: result.unchanged }; }
   if (result.kind === 'conflict') {
     // Keep the other side exactly as it is; store this side as its own note so nothing is lost and a person can merge.
@@ -125,11 +132,54 @@ export async function syncFile(ctx: SyncContext, candidate: string): Promise<Syn
   // offline / refused / failed: durable, coalesced queue entry (one per path), bounded
   const queue = await listQueue(projectDir); const already = queue.some(q => q.path === rel);
   if (!already && queue.length >= MAX_QUEUE_ENTRIES) return { path: rel, status: 'FAILED', detail: `the offline queue is full (${MAX_QUEUE_ENTRIES} files)` };
-  await atomicWrite(projectDir, queueKey(rel), `${JSON.stringify({ path: rel, hash, queuedAt: now, bytes: bytes.length } satisfies QueueEntry)}\n`);
+  await atomicWrite(projectDir, queueKey(rel), `${JSON.stringify({ path: rel, hash, queuedAt: now, bytes: bytes.length, body } satisfies QueueEntry)}\n`);
   const status: SyncStatus = result.kind === 'offline' ? 'QUEUED_OFFLINE' : 'FAILED';
   const detail = result.kind === 'offline' ? 'saved locally and queued; it is not on the server yet' : result.detail;
   state.files[rel] = { noteId, hash, ...(known?.baseRevisionId ? { baseRevisionId: known.baseRevisionId } : {}), status, at: now, detail }; await writeState(projectDir, state);
   return { path: rel, status, detail };
+}
+
+const mergeEntryId = (rel: string, hash: string, base: string | undefined): string => sha(`${rel}\0${hash}\0${base ?? 'none'}`).slice(0, 40);
+/**
+ * The server merged this write with changes made on its side, like `git merge`. Like `git pull`, the local file becomes the merged text if it still holds exactly what was sent;
+ * if it was edited again meanwhile it is left alone and the next sync merges that newer edit against the same ancestor (the server combines identical changes once, so nothing is lost or reverted).
+ */
+async function applyMerged(ctx: SyncContext, rel: string, sentHash: string, result: Extract<SinkResult, { kind: 'merged' }>, known: FileState | undefined, noteId: string, now: string): Promise<SyncOutcome> {
+  const { projectDir } = ctx; const state = await readState(projectDir); const mergedHash = sha(result.body); const eligible = await evaluatePath(projectDir, ctx.binding, rel);
+  const local = eligible.ok ? await fs.readFile(eligible.abs, 'utf8').catch(() => undefined) : undefined; let detail: string;
+  if (eligible.ok && local !== undefined && sha(local) === sentHash) {
+    const mode = (await fs.stat(eligible.abs).catch(() => undefined))?.mode; await atomicWrite(projectDir, rel, result.body); if (mode !== undefined) await fs.chmod(eligible.abs, mode & 0o777).catch(() => undefined);
+    state.files[rel] = { noteId, hash: mergedHash, baseRevisionId: result.revisionId, status: 'COMMITTED', at: now, detail: 'merged with changes made on the server; this file now holds the merged text' }; detail = state.files[rel]!.detail!;
+  } else if (local === undefined) {
+    state.files[rel] = { noteId, hash: mergedHash, baseRevisionId: result.revisionId, status: 'COMMITTED', at: now, detail: 'merged with changes made on the server; the file was deleted locally in the meantime' }; detail = state.files[rel]!.detail!;
+  } else {
+    state.files[rel] = { noteId, hash: sentHash, ...(known?.baseRevisionId ? { baseRevisionId: known.baseRevisionId } : {}), status: 'MERGED', at: now, detail: 'merged on the server; this file has newer local edits and will be merged again on the next sync' }; detail = state.files[rel]!.detail!;
+  }
+  await writeState(projectDir, state); await fs.rm(path.join(projectDir, queueKey(rel)), { force: true });
+  return { path: rel, status: 'MERGED', revisionId: result.revisionId, detail };
+}
+/** Overlapping changes on both sides: the server kept its version and stored both sides, with git-style markers, as a conflict note. The local file is left exactly as it is. */
+async function markServerConflict(ctx: SyncContext, rel: string, hash: string, result: Extract<SinkResult, { kind: 'merge_conflict' }>, known: FileState | undefined, noteId: string, now: string): Promise<SyncOutcome> {
+  const state = await readState(ctx.projectDir); const detail = `the server copy and this file changed in overlapping places (${result.fields.join(', ') || 'body'}); nothing was overwritten. Both versions, with git-style markers, are in the note ${result.conflictNoteId} on the server`;
+  state.files[rel] = { noteId, hash, ...(known?.baseRevisionId ? { baseRevisionId: known.baseRevisionId } : {}), status: 'CONFLICT', at: now, detail, ...(result.conflictNoteId ? { conflictNoteId: result.conflictNoteId } : {}) }; await writeState(ctx.projectDir, state);
+  await fs.rm(path.join(ctx.projectDir, queueKey(rel)), { force: true }); return { path: rel, status: 'CONFLICT', detail };
+}
+
+/** Writes a queued snapshot to the server. Returns undefined when the snapshot is unusable (then the normal path-based sync takes over). On success the local snapshot is deleted. */
+async function deliverSnapshot(ctx: SyncContext, entry: QueueEntry): Promise<SyncOutcome | undefined> {
+  const { projectDir, sink } = ctx; const rel = entry.path, body = entry.body!; if (sha(body) !== entry.hash) return undefined; // a damaged snapshot is never sent
+  const state = await readState(projectDir); const known = state.files[rel]; const noteId = `file:${rel}`; const at = (ctx.now ?? new Date()).toISOString();
+  const result = await sink.upsert({ noteId, title: title(rel, body), body, sourcePath: rel, expectedRevisionId: known?.baseRevisionId ?? 'none', merge: { entryId: mergeEntryId(rel, entry.hash, known?.baseRevisionId), queuedAt: entry.queuedAt } });
+  if (result.kind === 'merged') return applyMerged(ctx, rel, entry.hash, result, known, noteId, at);
+  if (result.kind === 'merge_conflict') return markServerConflict(ctx, rel, entry.hash, result, known, noteId, at);
+  if (result.kind === 'committed') { state.files[rel] = { noteId, hash: entry.hash, baseRevisionId: result.revisionId, status: 'COMMITTED', at }; await writeState(projectDir, state); await fs.rm(path.join(projectDir, queueKey(rel)), { force: true }); return { path: rel, status: 'COMMITTED', revisionId: result.revisionId, ...(result.unchanged ? { unchanged: true } : {}), detail: 'queued copy delivered; the local snapshot was deleted' }; }
+  if (result.kind === 'conflict') {
+    const conflictNoteId = `conflict:${rel}:${entry.hash.slice(0, 8)}`; const saved = await sink.upsert({ noteId: conflictNoteId, title: `Conflict: ${title(rel, body)}`, body, sourcePath: rel, expectedRevisionId: 'none', tags: ['conflict'] });
+    if (saved.kind !== 'committed') return { path: rel, status: 'QUEUED_OFFLINE', detail: 'conflict note not delivered yet' };
+    state.files[rel] = { noteId, hash: entry.hash, ...(known?.baseRevisionId ? { baseRevisionId: known.baseRevisionId } : {}), status: 'CONFLICT', at, detail: `the server copy changed since this machine last synced; the queued version was saved as ${conflictNoteId} and nothing was overwritten`, conflictNoteId }; await writeState(projectDir, state);
+    await fs.rm(path.join(projectDir, queueKey(rel)), { force: true }); return { path: rel, status: 'CONFLICT', detail: state.files[rel]!.detail!, revisionId: saved.revisionId };
+  }
+  return { path: rel, status: result.kind === 'offline' ? 'QUEUED_OFFLINE' : 'FAILED', detail: result.kind === 'offline' ? 'still saved locally; the server is not reachable' : result.detail };
 }
 
 async function tombstoneIfKnown(ctx: SyncContext, rel: string, renamedTo?: string): Promise<SyncOutcome> {
@@ -161,7 +211,18 @@ export async function reconcile(ctx: SyncContext): Promise<{ outcomes: SyncOutco
     if (size !== undefined && bytes + size > MAX_RUN_BYTES) { skippedForBudget++; return; } bytes += size ?? 0;
     outcomes.push(await syncFile(ctx, candidate));
   };
-  for (const entry of await listQueue(ctx.projectDir)) await handle(entry.path);
+  for (const entry of await listQueue(ctx.projectDir)) {
+    // Deliver exactly what was queued first; the current file (if it changed or vanished since) is then synchronized as a normal next revision or tombstone.
+    if (typeof entry.body === 'string') {
+      const outcome = await deliverSnapshot(ctx, entry);
+      if (outcome) {
+        seen.add(entry.path); outcomes.push(outcome); if (outcome.status === 'QUEUED_OFFLINE' || outcome.status === 'FAILED') continue;
+        const next = await syncFile(ctx, entry.path); if (!(next.status === 'SKIPPED' && next.unchanged)) outcomes.push(next); // only a real change (a newer edit, or the file vanished) adds a second outcome
+        continue;
+      }
+    }
+    await handle(entry.path);
+  }
   const roots = [...new Set(ctx.binding.notesInclude.map(staticPrefix))];
   const newHashes = new Map<string, string>();
   for (const root of roots) { const abs = path.join(ctx.projectDir, root); for await (const file of walk(abs)) { const e = await evaluatePath(ctx.projectDir, ctx.binding, file); if (e.ok) { const state = (await readState(ctx.projectDir)).files[e.rel]; const text = await fs.readFile(e.abs, 'utf8').catch(() => ''); if (!state) newHashes.set(sha(text), e.rel); await handle(e.rel, e.size); } } }

@@ -160,3 +160,63 @@ test('local mode syncs into the local vault, and init records consent separately
   await writeFile(path.join(dir, 'notes', 'secret.md'), 'token=abcd1234efgh5678'); await syncFile(ctx, 'notes/secret.md');
   assert.equal((await projectDoctor(dir, { probeRemote: false })).features.fileSync.status, 'INCOMPLETE'); assert.match((await projectDoctor(dir, { probeRemote: false })).features.fileSync.detail, /1 quarantined/);
 });
+
+test('the queued copy is what gets delivered: a file edited, then deleted, while the server was down still reaches it as written, and the local snapshot is deleted afterwards', async t => {
+  const server = await liveServer(t); const { dir, binding, ctx } = await project(t, server); const file = path.join(dir, 'notes', 'queued.md');
+  await writeFile(file, '# Queued\nVersion that was queued while offline.\n'); await server.stop();
+  assert.equal((await syncFile(ctx, 'notes/queued.md')).status, 'QUEUED_OFFLINE');
+  const entries = await readdir(path.join(dir, '.engram', 'sync-queue')); assert.equal(entries.length, 1);
+  assert.match(await readFile(path.join(dir, '.engram', 'sync-queue', entries[0]!), 'utf8'), /Version that was queued while offline/, 'the queue entry holds the content itself');
+  await writeFile(file, '# Queued\nA later local edit.\n'); await rm(file); // the file is changed and then removed before the server comes back
+  await server.restart();
+  const live: SyncContext = { projectDir: dir, binding: { ...binding, serverUrl: server.url }, sink: remoteSink({ ...binding, serverUrl: server.url }, process.env, 1500) };
+  const drained = await reconcile(live); const statuses = drained.outcomes.filter(o => o.path === 'notes/queued.md').map(o => o.status);
+  assert.deepEqual(statuses, ['COMMITTED', 'TOMBSTONED'], 'the queued version first, then the deletion that happened afterwards');
+  const docs = await notesOnServer(server.owner); const note = docs.find(d => d.metadata.stableId === 'file:notes/queued.md')!; const history = await server.owner.vault.history(note.id);
+  assert.equal(history.length, 2); assert.match((await server.owner.vault.get(note.id, history[0]!.revisionId)).body, /Version that was queued while offline/, 'revision 1 is exactly the queued content');
+  assert.equal((await readdir(path.join(dir, '.engram', 'sync-queue'))).length, 0, 'the local snapshot is deleted once the server acknowledged it'); assert.equal((await syncReport(dir, binding)).queued, 0);
+  recordCase({ suite: 'memory', name: 'file-sync-queued-snapshot', status: 'PASS' });
+});
+
+const PLAN_FILE = ['# Plan', 'step 1', 'step 2', 'step 3', 'step 4', 'step 5', ''].join('\n');
+const serverNote = async (owner: Engram, rel: string) => (await notesOnServer(owner)).find(d => d.metadata.stableId === `file:${rel}`)!;
+const serverEdit = async (owner: Engram, rel: string, body: string) => { const head = await serverNote(owner, rel); return owner.patch({ objectId: head.id, expectedRevisionId: head.revisionId, body }); };
+
+test('a file edited offline merges, like git, with changes another machine made on the server meanwhile: the server gets the merged text and this machine\'s file is updated to it', async t => {
+  const server = await liveServer(t); const { dir, binding, ctx } = await project(t, server); const file = path.join(dir, 'notes', 'plan.md');
+  await writeFile(file, PLAN_FILE); assert.equal((await syncFile(ctx, 'notes/plan.md')).status, 'COMMITTED');
+  await server.stop(); await writeFile(file, PLAN_FILE.replace('step 1', 'step 1 (edited offline)')); assert.equal((await syncFile(ctx, 'notes/plan.md')).status, 'QUEUED_OFFLINE');
+  await server.restart(); await serverEdit(server.owner, 'notes/plan.md', PLAN_FILE.replace('step 5', 'step 5 (edited on the server)')); // the other machine wrote while this one was disconnected
+  const live: SyncContext = { projectDir: dir, binding: { ...binding, serverUrl: server.url }, sink: remoteSink({ ...binding, serverUrl: server.url }, process.env, 1500) };
+  const outcome = (await reconcile(live)).outcomes.find(o => o.path === 'notes/plan.md')!; assert.equal(outcome.status, 'MERGED', outcome.detail);
+  const merged = PLAN_FILE.replace('step 1', 'step 1 (edited offline)').replace('step 5', 'step 5 (edited on the server)');
+  assert.equal((await serverNote(server.owner, 'notes/plan.md')).body, merged, 'the server holds the merged text'); assert.equal(await readFile(file, 'utf8'), merged, 'and so does the local file, as after git pull');
+  assert.equal((await readdir(path.join(dir, '.engram', 'sync-queue'))).length, 0, 'the local queued copy is deleted'); assert.equal((await reconcile(live)).outcomes.filter(o => o.status !== 'SKIPPED').length, 0, 'nothing further to send: the next sync is a no-op');
+  recordCase({ suite: 'memory', name: 'file-sync-offline-merge-updates-local-file', status: 'PASS' });
+});
+
+test('if the file was edited again before the merge came back, it is left alone and merged again next time: nothing the server added is reverted', async t => {
+  const server = await liveServer(t); const { dir, binding } = await project(t, server); const file = path.join(dir, 'notes', 'plan.md'); const live = (): SyncContext => ({ projectDir: dir, binding: { ...binding, serverUrl: server.url }, sink: remoteSink({ ...binding, serverUrl: server.url }, process.env, 1500) });
+  await writeFile(file, PLAN_FILE); assert.equal((await syncFile(live(), 'notes/plan.md')).status, 'COMMITTED');
+  await serverEdit(server.owner, 'notes/plan.md', PLAN_FILE.replace('step 5', 'step 5 (server)'));
+  await writeFile(file, PLAN_FILE.replace('step 1', 'step 1 (local A)')); // first local edit, sent against the old base
+  // while the sync is in flight the user keeps typing: model that by editing right after the snapshot is taken (the sink runs after the read)
+  const sink = remoteSink({ ...binding, serverUrl: server.url }, process.env, 1500); const racing: SyncContext = { projectDir: dir, binding, sink: { upsert: async w => { await writeFile(file, PLAN_FILE.replace('step 1', 'step 1 (local A)').replace('step 3', 'step 3 (local B)')); return sink.upsert(w); } } };
+  const first = await syncFile(racing, 'notes/plan.md'); assert.equal(first.status, 'MERGED'); assert.match(first.detail ?? '', /newer local edits/);
+  assert.match(await readFile(file, 'utf8'), /step 3 \(local B\)/, 'the newer local edit was not overwritten'); assert.doesNotMatch(await readFile(file, 'utf8'), /step 5 \(server\)/, 'the file still lacks the server change until the next merge');
+  const second = await syncFile(live(), 'notes/plan.md'); assert.equal(second.status, 'MERGED', second.detail);
+  const final = PLAN_FILE.replace('step 1', 'step 1 (local A)').replace('step 3', 'step 3 (local B)').replace('step 5', 'step 5 (server)');
+  assert.equal((await serverNote(server.owner, 'notes/plan.md')).body, final, 'server: all three changes'); assert.equal(await readFile(file, 'utf8'), final, 'local: all three changes');
+  recordCase({ suite: 'memory', name: 'file-sync-merge-again-after-local-edit', status: 'PASS' });
+});
+
+test('overlapping edits on both sides are not merged by guessing: the server keeps its text, both versions go into a conflict note with git-style markers, and the local file is untouched', async t => {
+  const server = await liveServer(t); const { dir, ctx } = await project(t, server); const file = path.join(dir, 'notes', 'plan.md');
+  await writeFile(file, PLAN_FILE); assert.equal((await syncFile(ctx, 'notes/plan.md')).status, 'COMMITTED');
+  await serverEdit(server.owner, 'notes/plan.md', PLAN_FILE.replace('step 3', 'step 3 (server)'));
+  await writeFile(file, PLAN_FILE.replace('step 3', 'step 3 (local)')); const outcome = await syncFile(ctx, 'notes/plan.md');
+  assert.equal(outcome.status, 'CONFLICT'); assert.match(outcome.detail ?? '', /git-style markers/); assert.equal((await serverNote(server.owner, 'notes/plan.md')).body, PLAN_FILE.replace('step 3', 'step 3 (server)'));
+  const conflict = (await notesOnServer(server.owner)).find(d => d.tags.includes('conflict'))!; for (const piece of ['<<<<<<< local', 'step 3 (local)', 'step 3 (server)', '>>>>>>> server']) assert.ok(conflict.body.includes(piece), piece);
+  assert.equal(await readFile(file, 'utf8'), PLAN_FILE.replace('step 3', 'step 3 (local)'), 'the local file is exactly as the user left it');
+  recordCase({ suite: 'memory', name: 'file-sync-merge-conflict-note', status: 'PASS' });
+});

@@ -32,6 +32,7 @@ export interface DreamRecord {
   status: StageStatus; jobKey?: string; proposals: Array<{ proposalId: string; status: string; evidence: Array<{ uri: string; revisionId: string }> }>;
   corpusVisibility?: { watermark: number; eligibleObjects: number; eligibleScopes: string[]; policyVersion: string; retrievalVersion: string; permittedDerived: OutputRef[] };
   trace?: unknown; attempts: number; error?: CycleError;
+  /** Set when the stage was deliberately not run (for example Dream is an explicit opt-in and is off); the cycle can still complete. */ skipped?: string;
 }
 export interface Cycle {
   id: string; kind: 'scheduled' | 'manual'; localDate: string; timezone: string; state: CycleState; stateHistory: Array<{ state: CycleState; at: string; note?: string }>;

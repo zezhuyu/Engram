@@ -219,14 +219,14 @@ test('passively captured user messages feed profile extraction incrementally, ah
   const provider = fakeProvider(() => ({ body: 'The user wants code split into small modules.', key: 'module-size', evidence: [{ doc: (provider.calls.at(-1)!.documents.find(d => d.metadata.speaker === 'user') as Document), span: 'split the code into small modules' }], explicit: true }));
   const engine = new IntelligenceEngine(vault, provider);
   await engine.run({ limit: 10 });
-  assert.equal(provider.calls.length, 1, 'the user\'s message triggered exactly one incremental extraction');
+  assert.equal((await engine.jobs()).filter(j => j.kind === 'profile' && j.status === 'complete').length, 1, 'the user\'s message triggered exactly one incremental extraction job'); assert.equal(provider.calls.length, 2, 'one call for the insight and one confirming call (the model repeats the claim, so nothing more remains)');
   const order = provider.calls[0]!.documents.map(d => (d.metadata.speaker as string | undefined) ?? d.scope.type + ':' + d.kind);
   assert.ok(order.indexOf('user') < order.indexOf('assistant'), `user words come before agent output: ${order}`); assert.ok(order.indexOf('user') < order.indexOf('global:wiki_page'));
   const proposal = await last(engine); assert.equal(proposal.status, 'pending'); assert.equal(proposal.input.metadata!.scopeLabel, 'proj'); assert.equal(proposal.input.scope.type, 'global');
-  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, 1, 'nothing new since the cursor: no second model call');
+  const afterFirst = provider.calls.length; await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst, 'nothing new since the cursor: no further model call');
   await feed('UserPromptSubmit', { prompt: 'Also keep functions under thirty lines.', prompt_id: 'b' });
-  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, 2, 'a new user message triggers one more extraction'); void wikiNote;
-  const sourcesSeen = provider.calls[1]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(!sourcesSeen.some(b => /giant files/.test(b)), 'already-processed messages are not resent');
+  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 1, 'a new user message triggers one more extraction; the model repeats a claim that is already pending, so it is dropped as a duplicate and the batch is complete'); assert.equal((await engine.proposals()).filter(p => p.input.kind === 'user_insight').length, 1, 'no duplicate proposal across consecutive jobs'); void wikiNote;
+  const sourcesSeen = provider.calls[afterFirst]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(!sourcesSeen.some(b => /giant files/.test(b)), 'already-processed messages are not resent');
   recordCase({ suite: 'profile', name: 'passive-capture-to-profile', status: 'PASS' });
 });
 
@@ -253,7 +253,7 @@ test('a schema-valid no_insight abstention completes the job, stores nothing, an
   const w = await world(t); const message = await w.userSaid('Would you prefer a table or a paragraph for this comparison?');
   const calls: ModelRequest[] = []; const engine = new IntelligenceEngine(w.vault, { id: 'abstainer', async generate(r) { calls.push(r); return abstain(); } });
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
-  assert.equal(job!.status, 'complete'); assert.equal(calls.length, 1); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 1, malformed: 0, repairs: 0, outcome: 'abstained' });
+  assert.equal(job!.status, 'complete'); assert.equal(calls.length, 1); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 1, malformed: 0, repairs: 0, outcome: 'abstained', proposals: 0, complete: true });
   assert.equal((await engine.proposals()).length, 0); assert.equal((await w.vault.listDocuments()).filter(d => d.kind === 'user_insight').length, 0);
   recordCase({ suite: 'profile', name: 'profile-no-insight-abstention', status: 'PASS' });
 });
@@ -262,7 +262,7 @@ test('malformed profile output is repaired within a bounded budget and never inv
   let n = 0; const notes: string[] = [];
   const engine = new IntelligenceEngine(w.vault, { id: 'flaky', async generate(r) { n++; notes.push(r.instruction); if (n === 1) return { kind: 'user_insight', title: 'x', body: 'y', evidence: [] } as ModelProposal; if (n === 2) return { kind: 'preference_note', title: 'x', body: 'y', evidence: [ref(message, 'command first')] } as ModelProposal; return { kind: 'user_insight', title: 'Command first', body: 'The user wants the command first and the explanation after.', evidence: [ref(message, 'give me the command first')], metadata: { category: 'working_style', preferenceKey: 'answer-order', sensitivity: 'none', explicitStatement: true } }; } });
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
-  assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 3, malformed: 2, repairs: 2, outcome: 'proposed' });
+  assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 4, malformed: 2, repairs: 2, outcome: 'proposed', proposals: 1, complete: true, duplicates: 1 } /* 2 repairs + the insight + one confirming call that returned the same claim */);
   assert.match(notes[1]!, /failed schema validation \(Model output invalid at proposal\.evidence/); assert.ok(!notes[1]!.includes('give me the command'), 'repair note never echoes values');
   const proposal = await last(engine); assert.equal(proposal.input.evidence![0]!.span, 'give me the command first');
   recordCase({ suite: 'profile', name: 'profile-bounded-schema-repair', status: 'PASS' });

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "note": "Synthetic, author-written batches (no real conversations). Each batch may contain several independent enduring statements plus noise the extractor must ignore. gold: every term must appear in one proposal's claim. forbid: a proposal containing all these terms is a false positive.",
+  "cases": [
+    { "id": "four-clear", "text": "From now on write commit messages in the imperative mood. Always run the linter before committing. I prefer small pull requests. Use tabs, never spaces, in Go files.", "gold": [["commit", "imperative"], ["lint"], ["pull request", "small"], ["tabs"]] },
+    { "id": "three-plus-noise", "text": "I always write tests before the implementation. Which database would you pick here? If I had unlimited budget I would buy a bigger cluster. Please keep answers short, I prefer bullet lists over prose. Remember that I deploy only on Tuesdays.", "gold": [["tests", "before"], ["bullet"], ["tuesday"]] },
+    { "id": "two-plus-third-party-and-forget", "text": "My manager insists on weekly reports. I prefer dark mode in every editor. Forget that I mentioned my cat, don't store it. I like reading release notes before upgrading.", "gold": [["dark mode"], ["release notes"]], "forbid": [["manager"], ["cat"]] },
+    { "id": "five-exceeds-cap", "text": "I prefer snake_case for Python names. I always pin dependency versions. I like keeping functions under thirty lines. I want TODO comments to carry a ticket id. I prefer squash merges.", "gold": [["snake_case"], ["pin"], ["thirty", "lines"], ["todo", "ticket"], ["squash"]] },
+    { "id": "all-noise", "text": "Which framework is better for this? Say I had a week off, I would learn Rust. My teammate loves Vim. I skimmed a post about GraphQL today. Maybe I will try tabs for a bit, not sure yet.", "gold": [], "forbid": [["tabs"], ["rust"], ["vim"], ["graphql"]] },
+    { "id": "interest-capability-goal", "text": "I am deeply interested in compilers and type systems. I have ten years of experience with PostgreSQL tuning. My goal this year is to ship a database engine in Rust.", "gold": [["compiler"], ["postgres"], ["database engine"]] },
+    { "id": "later-correction-wins", "text": "I prefer tabs for indentation. Actually, scratch that: I want two spaces, never tabs. Also, I prefer concise commit subjects under fifty characters.", "gold": [["spaces"], ["commit", "fifty"]], "forbid": [["prefers", "tabs", "indentation"]] },
+    { "id": "working-style-pair", "text": "Give me the command first and the explanation after. Ask before running anything destructive. This once, skip the tests, we are in a hurry.", "gold": [["command first"], ["destructive"]], "forbid": [["skip", "tests"]] },
+    { "id": "project-scoped", "text": "Just for this repo, always run make check before opening a PR. Also in this repo I prefer rebasing over merge commits.", "gold": [["make check"], ["rebas"]] }
+  ]
+}

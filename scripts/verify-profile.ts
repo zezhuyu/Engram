@@ -5,7 +5,7 @@ const evalSummary = evaluation ? `Real-model labeled evaluation status ${evaluat
 const evaluationGaps = evaluation?.status === 'PASS' ? [] : [{ item: 'Labeled real-model extraction quality (precision, recall, false-positive rate, schema reliability, scope, provenance)', status: evaluation?.status === 'FAIL' ? 'FAIL' as const : 'NOT_RUN' as const, reason: evalSummary }];
 summarize(await runSuite({
   name: 'profile', title: 'User intelligence and the evidence hierarchy (M2)',
-  files: ['dist/tests/profile/insights.test.js', 'dist/tests/pipelines.test.js'],
+  files: ['dist/tests/profile/insights.test.js', 'dist/tests/profile/multi-insight.test.js', 'dist/tests/profile/scope-required.test.js', 'dist/tests/profile/provenance.test.js', 'dist/tests/pipelines.test.js'],
   gaps: [
     ...evaluationGaps,
     { item: 'Sensitive-attribute detection beyond keywords', status: 'UNSUPPORTED', reason: 'A keyword heuristic plus the model\'s own label; it can miss sensitive content. Nothing is committed without review.' },

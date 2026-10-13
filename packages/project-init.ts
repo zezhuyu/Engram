@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Engram } from './sdk/index.js';
 import { createAdapter } from './memory/adapters.js';
 import { MDBError } from './core/types.js';
+import { readRanking, usableRanking, type Ranking } from './memory/relevance.js';
 import { defaultBinding, ensureGitignore, readBinding, writeBinding, BINDING_HOSTS, type BindingHost, type ProjectBinding } from './core/project-binding.js';
+import { mdbBinaryPath } from './memory/adapters.js';
+import { primeProxyCache, proxyCommand } from './memory/mcp-proxy.js';
 import { openRemoteSession, RemoteError, type RemoteSession } from './memory/remote-client.js';
 import { findExecutable } from './models/cli.js';
 import { spawnSync } from 'node:child_process';
@@ -16,7 +19,7 @@ export type FeatureStatus = 'PASS' | 'INCOMPLETE' | 'DISABLED' | 'FAIL' | 'NOT_R
 export interface Capability { status: FeatureStatus; detail: string }
 export interface Readiness { capture: Capability; context: Capability; notes: Capability; remote: Capability; offline: Capability; sessionContext: Capability; fileSync: Capability }
 export interface ProjectionItem { id: string; scope: string; category?: string; claim: string; /** marked sensitive when the insight was accepted: never listed in a file or injected */ sensitive?: boolean }
-export interface Projection { revision: string; preferences: ProjectionItem[]; insights: ProjectionItem[]; source: 'local' | 'remote' | 'none' }
+export interface Projection { revision: string; preferences: ProjectionItem[]; insights: ProjectionItem[]; source: 'local' | 'remote' | 'none'; /** how the order was decided: a fresh model ranking, or the deterministic order (no/stale ranking) */ ranking?: 'model' | 'deterministic' }
 
 const START = '<!-- engram:managed:start -->';
 const END = '<!-- engram:managed:end -->';
@@ -37,26 +40,38 @@ export function neutralize(claim: string): string {
 }
 const tokens = (text: string): number => Math.ceil(text.length / 4) + 2;
 const PREFERENCE_CATEGORIES = new Set(['preference', 'working_style']);
-export function buildProjection(items: ProjectionItem[], workspace: string, maxTokens: number, source: Projection['source']): Projection {
+export function buildProjection(items: ProjectionItem[], workspace: string, maxTokens: number, source: Projection['source'], ranking?: Ranking): Projection {
   const seen = new Set<string>();
+  const live = usableRanking(ranking, items);
+  const rank = new Map((live?.relevant ?? []).map((id, index) => [id, index])), dropped = new Set(live?.irrelevant ?? []);
   const ordered = [...items].filter(item => !item.sensitive).map(item => ({ ...item, claim: neutralize(item.claim) })).filter(item => item.claim && !seen.has(item.claim) && (seen.add(item.claim), true))
-    .sort((a, b) => Number(b.scope === workspace) - Number(a.scope === workspace) || a.claim.localeCompare(b.claim) || a.id.localeCompare(b.id));
+    // A fresh model ranking only reorders and drops global items; project-labelled insights are never dropped and the claim text is always the vault's.
+    .filter(item => !live || item.scope === workspace || !dropped.has(item.id))
+    .sort((a, b) => Number(b.scope === workspace) - Number(a.scope === workspace) || (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity) || a.claim.localeCompare(b.claim) || a.id.localeCompare(b.id));
   let used = 0; const take = (list: ProjectionItem[]): ProjectionItem[] => { const kept: ProjectionItem[] = []; for (const item of list) { const cost = tokens(item.claim); if (used + cost > maxTokens) break; used += cost; kept.push(item); } return kept; };
   const preferences = take(ordered.filter(item => PREFERENCE_CATEGORIES.has(item.category ?? '')));
   const insights = take(ordered.filter(item => !PREFERENCE_CATEGORIES.has(item.category ?? '') && item.scope === workspace));
   const revision = createHash('sha256').update(JSON.stringify([preferences.map(i => [i.id, i.claim]), insights.map(i => [i.id, i.claim])])).digest('hex').slice(0, 12);
-  return { revision, preferences, insights, source };
+  return { revision, preferences, insights, source, ranking: live ? 'model' : 'deterministic' };
 }
 type InsightRow = { id: string; claim: string; category?: string; sensitivity?: string; scope: string };
+/**
+ * Local: computed from the vault in-process (this IS the server side). Remote: the SERVER computes the whole projection (selection, ranking, dedupe, token budget)
+ * through the mdb_project_projection tool and the client only receives and renders it; no insight rows or rankings are fetched or processed on the client.
+ */
 export async function fetchProjection(from: { client?: Engram; remote?: RemoteSession }, workspace: string, maxTokens: number): Promise<Projection> {
-  const rows: ProjectionItem[] = [];
-  for (const scopeLabel of ['global', workspace]) {
-    let list: InsightRow[] = [];
-    if (from.client) list = (await from.client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights as InsightRow[];
-    else if (from.remote) { const result = await from.remote.call('mdb_insight_search', { status: 'accepted', scopeLabel, limit: 100 }); if (!result.isError) list = ((result.value as { insights?: InsightRow[] } | undefined)?.insights ?? []); }
-    for (const item of list) rows.push({ id: item.id, scope: scopeLabel, ...(item.category ? { category: item.category } : {}), ...(item.sensitivity === 'sensitive' ? { sensitive: true } : {}), claim: item.claim });
+  if (from.remote) {
+    const empty: Projection = { revision: 'none', preferences: [], insights: [], source: 'remote', ranking: 'deterministic' };
+    const result = await from.remote.call('mdb_project_projection', { workspaceId: workspace, maxTokens }).catch(() => undefined);
+    const value = result && !result.isError ? result.value as Partial<Projection> | undefined : undefined;
+    if (!value || typeof value.revision !== 'string' || !Array.isArray(value.preferences) || !Array.isArray(value.insights)) return empty;
+    const clean = (list: unknown[]): ProjectionItem[] => list.filter((item): item is ProjectionItem => !!item && typeof (item as ProjectionItem).id === 'string' && typeof (item as ProjectionItem).claim === 'string').map(item => ({ ...item, claim: neutralize(item.claim) })).filter(item => item.claim && !item.sensitive);
+    return { revision: value.revision, preferences: clean(value.preferences), insights: clean(value.insights), source: 'remote', ranking: value.ranking === 'model' ? 'model' : 'deterministic' };
   }
-  return buildProjection(rows, workspace, maxTokens, from.client ? 'local' : from.remote ? 'remote' : 'none');
+  if (!from.client) return buildProjection([], workspace, maxTokens, 'none');
+  const rows: ProjectionItem[] = [];
+  for (const scopeLabel of ['global', workspace]) for (const item of (await from.client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights as InsightRow[]) rows.push({ id: item.id, scope: scopeLabel, ...(item.category ? { category: item.category } : {}), ...(item.sensitivity === 'sensitive' ? { sensitive: true } : {}), claim: item.claim });
+  return buildProjection(rows, workspace, maxTokens, 'local', await readRanking(from.client, workspace).catch(() => undefined));
 }
 
 // ---- managed block ------------------------------------------------------------------------------------------------------------------------
@@ -120,16 +135,18 @@ export function validateMcpTarget(url: string, tokenEnv: string): URL {
   return endpoint;
 }
 /** Adds or updates mcpServers.engram in a Claude Code MCP JSON file (project .mcp.json or the user-level ~/.claude.json). Every other key is kept; a different engram entry is a conflict, never overwritten. */
-export async function upsertClaudeMcp(file: string, url: string, tokenEnv: string, workspace: string): Promise<boolean> {
+export async function upsertClaudeMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { offlineBuffer?: boolean } = {}): Promise<boolean> {
   const endpoint = validateMcpTarget(url, tokenEnv);
   let config: Record<string, unknown> = {}; let current = '';
   try { current = await fs.readFile(file, 'utf8'); config = JSON.parse(current) as Record<string, unknown>; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot parse ${file}`); }
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
   if (!servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error(`${file} mcpServers must be an object`);
   const authHeader = 'Bearer ${' + tokenEnv + '}';
-  const existing = servers.engram as { type?: string; url?: string; headers?: Record<string, string> } | undefined;
-  if (existing && (existing.type !== 'http' || existing.url !== endpoint.toString() || existing.headers?.Authorization !== authHeader)) throw new Error(`${file} already defines a different mcpServers.engram entry; resolve the conflict before Engram init`);
-  servers.engram = { type: 'http', url: endpoint.toString(), headers: { Authorization: authHeader, 'X-Engram-Workspace': workspace } };
+  const existing = servers.engram as { type?: string; url?: string; command?: string; args?: string[]; headers?: Record<string, string> } | undefined;
+  // Either of our two shapes (direct HTTP, or the local offline-buffering proxy for the same server) may be replaced by the other; anything hand-written is a conflict.
+  const ours = !!existing && ((existing.type === 'http' && existing.url === endpoint.toString() && existing.headers?.Authorization === authHeader) || (existing.type === 'stdio' && Array.isArray(existing.args) && existing.args.includes('mcp-proxy') && existing.args.includes(endpoint.toString())));
+  if (existing && !ours) throw new Error(`${file} already defines a different mcpServers.engram entry; resolve the conflict before Engram init`);
+  servers.engram = options.offlineBuffer ? { type: 'stdio', ...proxyCommand(endpoint.toString(), tokenEnv, workspace, mdbBinaryPath()), env: { [tokenEnv]: '${' + tokenEnv + '}' } } : { type: 'http', url: endpoint.toString(), headers: { Authorization: authHeader, 'X-Engram-Workspace': workspace } };
   config.mcpServers = servers;
   const text = `${JSON.stringify(config, null, 2)}\n`;
   if (current === text) return false;
@@ -137,7 +154,7 @@ export async function upsertClaudeMcp(file: string, url: string, tokenEnv: strin
   await atomicWriteText(file, text, 0o600); return true;
 }
 /** Same for Codex TOML: only the marked block is ours; a hand-written [mcp_servers.engram] table is a conflict. */
-export async function upsertCodexMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { approveTools?: boolean } = {}): Promise<boolean> {
+export async function upsertCodexMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { approveTools?: boolean; offlineBuffer?: boolean } = {}): Promise<boolean> {
   const endpoint = validateMcpTarget(url, tokenEnv);
   await fs.mkdir(path.dirname(file), { recursive: true });
   let existing = ''; try { existing = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -146,9 +163,37 @@ export async function upsertCodexMcp(file: string, url: string, tokenEnv: string
   if (/^\s*\[mcp_servers\.engram\]\s*$/m.test(base)) throw new Error(`${file} already defines [mcp_servers.engram]; remove that entry or rename it before Engram init`);
   base = base.trimEnd();
   const tomlString = (value: string) => JSON.stringify(value);
-  const block = `${MCP_START}\n[mcp_servers.engram]\nurl = ${tomlString(endpoint.toString())}\nbearer_token_env_var = ${tomlString(tokenEnv)}\nhttp_headers = { "X-Engram-Workspace" = ${tomlString(workspace)} }\n${options.approveTools ? 'default_tools_approval_mode = "approve"\n' : ''}${MCP_END}`;
+  const proxy = options.offlineBuffer ? proxyCommand(endpoint.toString(), tokenEnv, workspace, mdbBinaryPath()) : undefined;
+  const transport = proxy ? `command = ${tomlString(proxy.command)}\nargs = [${proxy.args.map(tomlString).join(', ')}]\nenv_vars = [${tomlString(tokenEnv)}]\n` : `url = ${tomlString(endpoint.toString())}\nbearer_token_env_var = ${tomlString(tokenEnv)}\nhttp_headers = { "X-Engram-Workspace" = ${tomlString(workspace)} }\n`;
+  const block = `${MCP_START}\n[mcp_servers.engram]\n${transport}${options.approveTools ? 'default_tools_approval_mode = "approve"\n' : ''}${MCP_END}`;
   const text = `${base}${base ? '\n\n' : ''}${block}\n`;
   if (text === existing) return false;
+  if (existing) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+  await atomicWriteText(file, text, 0o600); return true;
+}
+/** What a LOCAL agent runs to reach the built-in server: stdio, no network, no token. The identity and default workspace are plain (non-secret) settings; access is the grant the init registration gave that identity. */
+export interface LocalServerEntry { command: string; args: string[]; env: Record<string, string> }
+export function localServerEntry(root: string, workspace: string, principal: string): LocalServerEntry | undefined {
+  const server = path.join(path.dirname(mdbBinaryPath()), 'mdb-mcp.js'); if (!existsSync(server)) return undefined; // a client-only installation has no built-in server
+  return { command: process.execPath, args: [server, '--root', root], env: { MDB_ACTOR_ID: principal, MDB_PERMISSIONS: `workspace:${workspace}:read,workspace:${workspace}:write`, MDB_DEFAULT_WORKSPACE: workspace } };
+}
+const isEngramEntry = (e: { type?: string; url?: string; command?: string; args?: string[]; headers?: Record<string, string> } | undefined): boolean => !!e && ((e.type === 'http' && !!e.headers?.['X-Engram-Workspace']) || (e.type === 'stdio' && Array.isArray(e.args) && e.args.some(a => /mdb-mcp\.js$|^mcp-proxy$/.test(a))));
+export async function upsertClaudeLocalMcp(file: string, entry: LocalServerEntry): Promise<boolean> {
+  let config: Record<string, unknown> = {}; let current = '';
+  try { current = await fs.readFile(file, 'utf8'); config = JSON.parse(current) as Record<string, unknown>; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot parse ${file}`); }
+  const servers = (config.mcpServers ?? {}) as Record<string, unknown>; if (!servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error(`${file} mcpServers must be an object`);
+  const existing = servers.engram as Parameters<typeof isEngramEntry>[0]; if (existing && !isEngramEntry(existing)) throw new Error(`${file} already defines a different mcpServers.engram entry; resolve the conflict before Engram init`);
+  servers.engram = { type: 'stdio', ...entry }; config.mcpServers = servers; const text = `${JSON.stringify(config, null, 2)}\n`; if (current === text) return false;
+  if (current) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+  await atomicWriteText(file, text, 0o600); return true;
+}
+export async function upsertCodexLocalMcp(file: string, entry: LocalServerEntry, options: { approveTools?: boolean } = {}): Promise<boolean> {
+  await fs.mkdir(path.dirname(file), { recursive: true }); let existing = ''; try { existing = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const start = existing.indexOf(MCP_START), end = existing.indexOf(MCP_END); let base = start >= 0 && end > start ? `${existing.slice(0, start)}${existing.slice(end + MCP_END.length)}` : existing;
+  if (/^\s*\[mcp_servers\.engram\]\s*$/m.test(base)) throw new Error(`${file} already defines [mcp_servers.engram]; remove that entry or rename it before Engram init`);
+  base = base.trimEnd(); const q = (v: string) => JSON.stringify(v);
+  const block = `${MCP_START}\n[mcp_servers.engram]\ncommand = ${q(entry.command)}\nargs = [${entry.args.map(q).join(', ')}]\nenv = { ${Object.entries(entry.env).map(([k, v]) => `${k} = ${q(v)}`).join(', ')} }\n${options.approveTools ? 'default_tools_approval_mode = "approve"\n' : ''}${MCP_END}`;
+  const text = `${base}${base ? '\n\n' : ''}${block}\n`; if (text === existing) return false;
   if (existing) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
   await atomicWriteText(file, text, 0o600); return true;
 }
@@ -163,9 +208,9 @@ export async function removeCodexMcp(file: string): Promise<boolean> {
   const start = existing.indexOf(MCP_START), end = existing.indexOf(MCP_END); if (start < 0 || end < start) return false;
   const next = `${existing.slice(0, start).trimEnd()}${existing.slice(end + MCP_END.length).replace(/^\n+/, '\n')}`.replace(/\n{3,}/g, '\n\n'); await atomicWriteText(file, next.endsWith('\n') || !next ? next : `${next}\n`, 0o600); return true;
 }
-async function configureRemoteMcp(projectDir: string, host: Host, url: string, tokenEnv: string, workspace: string, approveTools = false): Promise<string> {
+async function configureRemoteMcp(projectDir: string, host: Host, url: string, tokenEnv: string, workspace: string, approveTools = false, offlineBuffer = false): Promise<string> {
   const file = host === 'claude-code' ? path.join(projectDir, '.mcp.json') : path.join(projectDir, '.codex', 'config.toml');
-  if (host === 'claude-code') await upsertClaudeMcp(file, url, tokenEnv, workspace); else await upsertCodexMcp(file, url, tokenEnv, workspace, { approveTools });
+  if (host === 'claude-code') await upsertClaudeMcp(file, url, tokenEnv, workspace, { offlineBuffer }); else await upsertCodexMcp(file, url, tokenEnv, workspace, { approveTools, offlineBuffer });
   return file;
 }
 
@@ -192,7 +237,7 @@ export async function detectHosts(projectDir: string): Promise<Host[]> {
   return found;
 }
 const cap = (status: FeatureStatus, detail: string): Capability => ({ status, detail });
-export interface InitOptions { projectDir: string; host?: Host; hosts?: Host[] | 'auto'; workspaceId?: string; settingsPath?: string; settingsPaths?: Partial<Record<Host, string>>; principalId?: string; mcpUrl?: string; tokenEnv?: string; registrationId?: string; consent?: boolean; /** Separate from `consent`: allows approved Markdown files (and only those) to be uploaded in full. */ fileSyncConsent?: boolean; notesInclude?: string[]; /** false: no accepted-profile text in AGENTS.md/CLAUDE.md (still delivered at session start) */ profileInFiles?: boolean; /** explicit consent to record Codex trust for THIS project's Engram hooks (otherwise the user must trust them in Codex) */ trustCodexHooks?: boolean; /** Codex only: pre-approve the Engram MCP tools so headless (`codex exec`) sessions can use them; interactive sessions otherwise prompt */ approveEngramTools?: boolean }
+export interface InitOptions { /** Local projects only: skip writing the stdio connection to the built-in server. */ noLocalMcp?: boolean; /** Remote projects only: the host talks to the server through the local stdio proxy, which keeps task/note/handoff writes on this machine while the server is unreachable and merges them in when it returns. */ offlineBuffer?: boolean; projectDir: string; host?: Host; hosts?: Host[] | 'auto'; workspaceId?: string; settingsPath?: string; settingsPaths?: Partial<Record<Host, string>>; principalId?: string; mcpUrl?: string; tokenEnv?: string; registrationId?: string; consent?: boolean; /** Separate from `consent`: allows approved Markdown files (and only those) to be uploaded in full. */ fileSyncConsent?: boolean; notesInclude?: string[]; /** false: no accepted-profile text in AGENTS.md/CLAUDE.md (still delivered at session start) */ profileInFiles?: boolean; /** explicit consent to record Codex trust for THIS project's Engram hooks (otherwise the user must trust them in Codex) */ trustCodexHooks?: boolean; /** Codex only: pre-approve the Engram MCP tools so headless (`codex exec`) sessions can use them; interactive sessions otherwise prompt */ approveEngramTools?: boolean }
 export interface InitResult { fileSyncScope?: { include: string[]; exclude: string[] }; workspaceId: string; instructionsFile: string; instructionsFiles: Record<string, string>; adapter: unknown; adapters: Record<string, unknown>; mcpConfigFile?: string; mcpConfigFiles?: Record<string, string>; binding: ProjectBinding; projection: { revision: string; source: Projection['source']; preferences: number; insights: number }; readiness: Readiness; warnings: string[] }
 
 /** Initialize a repository's agent memory context without overwriting user-authored instructions. */
@@ -227,6 +272,7 @@ export async function initializeProject(client: Engram | undefined, options: Ini
         remoteSession = await openRemoteSession({ url: options.mcpUrl!, token, workspaceId: workspace });
         remote = cap('PASS', `authenticated; workspace ${workspace} bound; ${remoteSession.tools.length} tools`);
         projection = await fetchProjection({ remote: remoteSession }, workspace, base.profileMaxTokens);
+        if (options.offlineBuffer) await primeProxyCache({ url: options.mcpUrl!, token, workspaceId: workspace }).catch(() => warnings.push('The offline proxy could not cache the tool list now; it will do so on its first online start.'));
       } catch (error) {
         const kind = error instanceof RemoteError ? error.kind : 'network';
         remote = cap(kind === 'network' ? 'INCOMPLETE' : 'FAIL', error instanceof Error ? error.message : String(error));
@@ -248,12 +294,19 @@ export async function initializeProject(client: Engram | undefined, options: Ini
       // The SessionStart context hook is read-only and does not need a capture registration or capture consent: init itself is the user's request for project context.
       const lifecycle = createAdapter(host, { root: options.mcpUrl ? projectDir : client!.vault.root, ...adapterOptions }); await lifecycle.installContext({ projectRoot: projectDir, ...(options.mcpUrl ? {} : { localRoot: client!.vault.root }) }); await lifecycle.installHandoff({ projectRoot: projectDir, ...(options.mcpUrl ? {} : { localRoot: client!.vault.root }) }); contextInstalled = true;
       if (options.mcpUrl) {
-        mcpConfigFiles[host] = await configureRemoteMcp(projectDir, host, options.mcpUrl, tokenEnv, workspace, !!options.approveEngramTools);
+        if (existsSync(path.join(path.dirname(mdbBinaryPath()), 'mdb-mcp.js')) && !/^(localhost|127\.|\[::1\])/.test(new URL(options.mcpUrl).hostname)) warnings.push('This installation includes the server: its built-in client is meant for agents on this machine. Agents on other machines should install the separate client package (npm run package:client) and run init there.');
+        mcpConfigFiles[host] = await configureRemoteMcp(projectDir, host, options.mcpUrl, tokenEnv, workspace, !!options.approveEngramTools, !!options.offlineBuffer);
         if (!options.registrationId) { adapters[host] = { installed: false, mode: 'remote-mcp' }; continue; }
         adapters[host] = await createAdapter(host, { root: projectDir, ...adapterOptions }).install({ consent: true, principalId: options.principalId!, workspaceId: workspace, mcpUrl: options.mcpUrl, tokenEnv, registrationId: options.registrationId, projectRoot: projectDir });
         capturePass = true; captureNote = 'remote capture hooks installed with the server-side registration, limited to sessions inside this project';
       } else {
         adapters[host] = await createAdapter(host, { root: client!.vault.root, ...adapterOptions }).install({ consent: true, principalId: options.principalId ?? 'local-agent', workspaceId: workspace, projectRoot: projectDir });
+        // The local agent reaches the built-in server directly (stdio, no token, no network): nothing else has to be installed on this machine.
+        if (!options.noLocalMcp) {
+          const entry = localServerEntry(client!.vault.root, workspace, options.principalId ?? 'local-agent');
+          if (!entry) warnings.push('This installation has no built-in server (client-only package): the agent was not given a local tool connection. Use --mcp-url to connect to a server.');
+          else { const file = host === 'claude-code' ? path.join(projectDir, '.mcp.json') : path.join(projectDir, '.codex', 'config.toml'); if (host === 'claude-code') await upsertClaudeLocalMcp(file, entry); else await upsertCodexLocalMcp(file, entry, { approveTools: !!options.approveEngramTools }); mcpConfigFiles[host] = file; }
+        }
         capturePass = true; captureNote = 'local capture hooks installed';
       }
     }

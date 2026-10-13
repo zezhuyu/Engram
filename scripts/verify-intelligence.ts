@@ -1,7 +1,7 @@
 import { runSuite, summarize } from './lib/suite.js';
 summarize(await runSuite({
   name: 'intelligence', title: 'Intelligence engine (deterministic, fake and optional real provider)',
-  files: ['dist/tests/intelligence.test.js', 'dist/tests/pipelines.test.js', 'dist/tests/models.test.js', 'dist/tests/agents.test.js', 'dist/tests/skills.test.js', 'dist/tests/real-model.test.js'],
+  files: ['dist/tests/intelligence.test.js', 'dist/tests/pipelines.test.js', 'dist/tests/models.test.js', 'dist/tests/models-switch.test.js','dist/tests/agents.test.js', 'dist/tests/skills.test.js', 'dist/tests/real-model.test.js'],
   allowedSkips: ['real model'],
   gaps: [
     { item: 'Real-model evaluation pack (20+ documents, 4+ domains, scored)', status: 'NOT_RUN', reason: 'Only a structural opt-in integration test exists (run once against local gpt-oss, see verification/phase-8.md). No evaluation pack, precision or groundedness metrics.' },

@@ -7,15 +7,44 @@ import path from 'node:path';
 /** Verification INPUT fixtures (not generated reports) live in the tracked fixtures/inputs/ tree; verification/ itself is generated output and is not tracked. */
 export function inputPath(relative: string): string { return existsSync(`fixtures/inputs/${relative}`) ? `fixtures/inputs/${relative}` : `verification/${relative}`; }
 import { redactText } from '../../packages/memory/redact.js';
-const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH)/i;
+const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE|SESSION)/i;
+const SECRET_KEY_WORD = '(?:token|secret|passw(?:or)?d|passphrase|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)';
+/**
+ * Patterns applied before the shared scrubber (packages/memory/redact.ts, which is deliberately left alone: it protects capture). They close gaps found by probing: the shared one
+ * does not match snake_case keys such as access_token or aws_secret_access_key (its \b fails after an underscore), masks only the scheme word of `Authorization: Basic <b64>`, and
+ * knows only http(s) URL credentials. The key-name prefix is bounded (40) so a long base64 line cannot make the match quadratic; the 8-character value minimum keeps counts such as
+ * `max_tokens: 5` readable.
+ */
+const EXTRA_PATTERNS: Array<[RegExp, string]> = [
+  [/\b(authorization\s*[:=]\s*)(?:Basic|Digest|Negotiate|Token|Bearer)\s+\S+/gi, '$1[REDACTED]'],
+  [/\b((?:set-)?cookie\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]'],
+  [new RegExp(`(?<![A-Za-z0-9])([A-Za-z0-9_.-]{0,40}${SECRET_KEY_WORD}s?["']?\\s*[:=]\\s*["']?)(?!\\[REDACTED)[^\\s"',;&]{8,}`, 'gi'), '$1[REDACTED]'],
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*:[^\s/@]+@/gi, '$1[REDACTED]@'],
+  [/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{12,}/g, '[REDACTED]'],
+  [/\bnpm_[A-Za-z0-9]{30,}/g, '[REDACTED]'], [/\bAIza[0-9A-Za-z_-]{30,}/g, '[REDACTED]'], [/\bglpat-[A-Za-z0-9_-]{16,}/g, '[REDACTED]'], [/\bhf_[A-Za-z0-9]{30,}/g, '[REDACTED]'],
+  [/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, '[REDACTED]'],
+];
 /**
  * Diagnostic text can leave the machine (a CI log, an uploaded artifact that GitHub does not mask). Before it is printed or stored: values of secret-looking environment variables are
- * replaced by name, the shared secret scrubber runs (bearer tokens, key=value secrets, provider key formats, URL credentials, private keys), Engram's own credential format is masked,
- * and the user's home directory becomes ~. A failing assertion still shows its message and the expected/actual shape.
+ * replaced by name, the patterns above and the shared secret scrubber run (bearer tokens, key=value secrets, provider key formats, URL credentials, private keys), Engram's own
+ * credential format is masked, and the user's home directory becomes ~. A failing assertion still shows its message and the expected/actual shape. Residual risk: an unlabeled
+ * high-entropy string under an arbitrary key name cannot be recognized.
  */
+/** Linear scan (a regex with a repeated group and a lookahead is quadratic on long base64 output): the base64 lines directly above an END PRIVATE KEY marker are a key body even when its BEGIN line is not in the text. */
+function redactOrphanKeyBodies(text: string): string {
+  const marker = /-----END [A-Z ]*PRIVATE KEY-----/g; let out = '', last = 0; let m: RegExpExecArray | null;
+  while ((m = marker.exec(text))) {
+    if (m.index > 0 && text[m.index - 1] !== '\n') continue; let start = m.index;
+    for (let steps = 0; steps < 2000 && start > last; steps++) { const prevStart = text.lastIndexOf('\n', start - 2) + 1; if (prevStart < last || !/^[A-Za-z0-9+/=]{40,}[ \t\r]*$/.test(text.slice(prevStart, start - 1))) break; start = prevStart; }
+    if (start < m.index) { out += text.slice(last, start) + '[REDACTED PRIVATE KEY BODY]\n'; last = m.index; }
+  }
+  return last ? out + text.slice(last) : text;
+}
 export function scrubDiagnostics(text: string, env: NodeJS.ProcessEnv = process.env): string {
   let out = text;
   for (const [name, value] of Object.entries(env)) if (value && value.length >= 8 && SECRET_ENV_NAME.test(name)) out = out.split(value).join(`[REDACTED:${name}]`);
+  for (const [pattern, replacement] of EXTRA_PATTERNS) out = out.replace(pattern, replacement);
+  out = redactOrphanKeyBodies(out);
   out = redactText(out).replace(/\bengram_[A-Za-z0-9_-]{16,}/g, 'engram_[REDACTED]');
   const home = os.homedir(); if (home && home.length > 1) out = out.split(home).join('~');
   return out;
@@ -49,11 +78,11 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   const run = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env } });
   const durationMs = Date.now() - started;
   const tests: TestResult[] = [];
-  const outLines = run.stdout.split('\n');
+  const outLines = run.stdout.split('\n'); let detailed = 0; const MAX_DETAILS = 25; // bounded report size: details for the first 25 failures only
   for (let i = 0; i < outLines.length; i++) {
     const m = /^(not )?ok \d+ - (.*?)(?: # (SKIP|TODO).*)?$/.exec(outLines[i]!); if (!m) continue; // top-level only: subtests are indented
     const skipped = m[3] === 'SKIP'; let detail: string | undefined;
-    if (m[1] && !skipped) { const block: string[] = []; for (let j = i + 1; j < outLines.length && /^\s/.test(outLines[j]!) && block.length < 60; j++) { if (outLines[j]!.trim() === '...') break; block.push(outLines[j]!.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')); } detail = scrubDiagnostics(block.join('\n'), { ...process.env, ...spec.env }).slice(0, 6000); }
+    if (m[1] && !skipped && detailed++ < MAX_DETAILS) { const block: string[] = []; for (let j = i + 1; j < outLines.length && /^\s/.test(outLines[j]!) && block.length < 60; j++) { if (outLines[j]!.trim() === '...') break; block.push(outLines[j]!.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')); } detail = scrubDiagnostics(block.join('\n'), { ...process.env, ...spec.env }).slice(0, 6000); }
     tests.push({ name: m[2]!, status: skipped ? 'SKIPPED' : m[1] ? 'FAIL' : 'PASS', ...(detail ? { detail } : {}) });
   }
   const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
@@ -69,7 +98,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   };
   await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   await fs.writeFile(path.join(outDir, 'report.md'), markdown(spec, report) + '\n');
-  if (status !== 'PASS') await fs.writeFile(path.join(outDir, 'last-output.txt'), scrubDiagnostics(run.stdout.slice(-100000) + '\n--- stderr ---\n' + run.stderr.slice(-10000), { ...process.env, ...spec.env }));
+  if (status !== 'PASS') await fs.writeFile(path.join(outDir, 'last-output.txt'), scrubDiagnostics(run.stdout, { ...process.env, ...spec.env }).slice(-100000) + '\n--- stderr ---\n' + scrubDiagnostics(run.stderr, { ...process.env, ...spec.env }).slice(-10000)); // scrub the whole text first: a secret straddling the size cap must not survive as a fragment
   return report;
 }
 function markdown(spec: SuiteSpec, r: SuiteReport): string {

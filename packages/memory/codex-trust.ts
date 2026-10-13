@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { contextHookCommand, contextHookId, fileSyncHookCommand, handoffHookCommand } from './adapters.js';
+import { contextHookCommand, contextHookId, fileSyncHookCommand, handoffHookCommand, remoteHookCommand } from './adapters.js';
+import { findTrustedBinding } from '../core/project-trust.js';
 import { findExecutable } from '../models/cli.js';
 import { MDBError } from '../core/types.js';
 
@@ -23,25 +25,38 @@ async function withCodex<T>(timeoutMs: number, work: (call: Rpc) => Promise<T>):
 export async function listCodexHooks(projectDir: string, timeoutMs = 8000): Promise<CodexHook[]> {
   return withCodex(timeoutMs, async call => { const reply = await call('hooks/list', { cwds: [path.resolve(projectDir)] }); if (reply.error) throw new Error(reply.error.message ?? 'hooks/list failed'); return (reply.result?.data?.[0]?.hooks ?? []) as CodexHook[]; });
 }
-/** The three command lines `mdb init` writes into a Codex project (context, handoff, file sync). Local-mode `--root` variants are accepted by prefix and suffix checks. */
-export function isEngramCommandFor(projectDir: string, command: string): boolean {
+/**
+ * The remote capture command `mdb init` installed for this project, rebuilt from the binding THIS machine recorded when init ran (server URL, credential variable, registration). A hooks.json
+ * that arrived with a cloned repository can name any URL or token variable; only the exact command for the locally trusted binding is ever accepted, never one that merely carries our marker.
+ * Local-vault capture hooks (`--root`) are not covered here.
+ */
+export async function captureCommandsFor(projectDir: string, env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
+  const found = await findTrustedBinding(projectDir, env).catch(() => undefined); const b = found?.binding;
+  if (!found?.trusted || !b?.serverUrl || !b.credentialRef || !b.registrationId) return [];
+  const real = async (dir: string): Promise<string> => realpath(dir).catch(() => path.resolve(dir)); // /var and /private/var name the same folder on macOS
+  if (await real(found.root) !== await real(projectDir)) return [];
+  try { return [remoteHookCommand('codex', b.serverUrl, b.credentialRef, b.registrationId, process.execPath, path.resolve(projectDir))]; } catch { return []; }
+}
+/** The command lines `mdb init` writes into a Codex project (context, handoff, file sync, plus the remote capture commands passed in). Local-mode `--root` variants are accepted by prefix and suffix checks. */
+export function isEngramCommandFor(projectDir: string, command: string, captureCommands: string[] = []): boolean {
   const id = contextHookId({ projectRoot: projectDir }, 'local'); const root = path.resolve(projectDir);
   const exact = [contextHookCommand('codex', id, { projectRoot: root }), handoffHookCommand('codex', id, { projectRoot: root }), fileSyncHookCommand(id, { projectRoot: root })];
+  if (captureCommands.includes(command)) return true;
   if (exact.includes(command)) return true;
   // local-vault installs add `--root "<vault>"` before `--project-root`; accept only that one inserted option
   return exact.some(candidate => { const at = candidate.indexOf(' --project-root '); return at > 0 && command.startsWith(candidate.slice(0, at)) && / --root "[^"]+"$/.test(command.slice(0, command.indexOf(' --project-root '))) && command.endsWith(candidate.slice(at)); });
 }
 export async function codexHookState(projectDir: string, timeoutMs = 8000): Promise<{ engram: CodexHook[]; untrusted: CodexHook[]; other: number }> {
-  const hooks = await listCodexHooks(projectDir, timeoutMs); const mine = hooks.filter(h => h.source === 'project' && isEngramCommandFor(projectDir, h.command));
+  const hooks = await listCodexHooks(projectDir, timeoutMs); const capture = await captureCommandsFor(projectDir); const mine = hooks.filter(h => h.source === 'project' && isEngramCommandFor(projectDir, h.command, capture));
   return { engram: mine, untrusted: mine.filter(h => h.trustStatus === 'untrusted' || h.trustStatus === 'modified'), other: hooks.length - mine.length };
 }
 /** Records trust for this project's Engram hooks through Codex's own config API. Does nothing unless `confirm` is true. Never touches any other hook. */
 export async function trustEngramCodexHooks(projectDir: string, options: { confirm: boolean; timeoutMs?: number }): Promise<{ trusted: string[]; alreadyTrusted: string[]; wouldTrust: Array<{ key: string; command: string }>; ignored: Array<{ key: string; reason: string }> }> {
   return withCodex(options.timeoutMs ?? 10000, async call => {
     const reply = await call('hooks/list', { cwds: [path.resolve(projectDir)] }); if (reply.error) throw new Error(reply.error.message ?? 'hooks/list failed');
-    const hooks = (reply.result?.data?.[0]?.hooks ?? []) as CodexHook[]; const trusted: string[] = [], alreadyTrusted: string[] = [], wouldTrust: Array<{ key: string; command: string }> = [], ignored: Array<{ key: string; reason: string }> = [];
+    const hooks = (reply.result?.data?.[0]?.hooks ?? []) as CodexHook[]; const capture = await captureCommandsFor(projectDir); const trusted: string[] = [], alreadyTrusted: string[] = [], wouldTrust: Array<{ key: string; command: string }> = [], ignored: Array<{ key: string; reason: string }> = [];
     for (const hook of hooks) {
-      if (!isEngramCommandFor(projectDir, hook.command)) { if (/engram-mdb-/.test(hook.command)) ignored.push({ key: hook.key, reason: 'carries an Engram marker but is not a command this installation writes for this project' }); continue; }
+      if (!isEngramCommandFor(projectDir, hook.command, capture)) { if (/engram-mdb-/.test(hook.command)) ignored.push({ key: hook.key, reason: 'carries an Engram marker but is not a command this installation writes for this project' }); continue; }
       if (hook.source !== 'project') { ignored.push({ key: hook.key, reason: `not a project hook (source ${hook.source})` }); continue; }
       if (hook.trustStatus === 'trusted' || hook.trustStatus === 'managed') { alreadyTrusted.push(hook.key); continue; }
       wouldTrust.push({ key: hook.key, command: hook.command });

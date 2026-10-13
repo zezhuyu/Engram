@@ -51,7 +51,7 @@ test('a failed workspace job does not advance its cursor, blocks Dream, and only
   const cursors = await w.ai.store.cursors(); assert.equal(cursors.workspaces.alpha, first.watermark); assert.equal(cursors.workspaces.beta ?? 0, 0, 'no premature cursor advance, no gap');
   failBeta = false; const alphaSummaries = (await summariesOf(w.vault, 'alpha')).length; const profileBefore = w.provider.profileCalls().length;
   const second = (await w.ai.resumeCycle(first.id, { respectActivity: false })).cycle!; assert.equal(second.state, 'COMPLETED', JSON.stringify(second.error));
-  assert.equal(w.provider.profileCalls().length, profileBefore + 1, 'only the failed workspace was re-run'); assert.equal((await summariesOf(w.vault, 'alpha')).length, alphaSummaries); assert.equal((await w.ai.store.cursors()).workspaces.beta, first.watermark);
+  assert.equal(w.provider.profileCalls().length, profileBefore + 2, 'only the failed workspace was re-run (its insight call plus one confirming call; alpha was not re-run)'); assert.equal((await summariesOf(w.vault, 'alpha')).length, alphaSummaries); assert.equal((await w.ai.store.cursors()).workspaces.beta, first.watermark);
   recordCase({ suite: 'adaptive', name: 'per-workspace-recovery', status: 'PASS' });
 });
 

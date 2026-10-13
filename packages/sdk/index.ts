@@ -23,6 +23,8 @@ export { classifySource, SOURCE_PRIORITY, type SourceClass } from '../core/evide
 export { resolveRoot, DATA_DIR_ENV, DEFAULT_DATA_DIR_NAME } from '../core/root.js';
 export { OpenAICompatibleProvider, isLoopbackHost, type HttpProviderOptions } from '../models/openai.js';
 export { createProviderFromConfig, describeModel, isBuiltinProvider, effectiveProvider, PROVIDER_NAMES, MODEL_DEFAULTS } from '../models/factory.js';
+export { refreshRelevance, readRanking, clearRanking, relevanceStatus, type RefreshResult } from '../memory/relevance.js';
+export { showModel, setModel, testModel, applyModelSet, providerKind, type ModelSetInput } from '../models/switch.js';
 export { CliAgentProvider, cliArguments, findExecutable, type CliProviderOptions } from '../models/cli.js';
 export { parseModelProposal, parseVerdict, extractJson } from '../models/schema.js';
 export { ProviderError, CancelledError } from '../models/errors.js';
