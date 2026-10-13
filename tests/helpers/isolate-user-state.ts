@@ -11,5 +11,6 @@ process.env.ENGRAM_TRUST_FILE ??= path.join(dir, 'trusted-projects.json');
 process.env.ENGRAM_USER_CONFIG ??= path.join(dir, 'user.json');
 process.env.ENGRAM_CACHE_DIR ??= path.join(dir, 'cache');
 process.env.ENGRAM_REMOTE_SPOOL ??= path.join(dir, 'spool');
+process.env.ENGRAM_AUTO_RECONNECT ??= '0'; // tests never leave a background watcher behind; the tests of that feature turn it on explicitly
 process.env.ENGRAM_CODEX_PROBE ??= '0'; // ordinary tests never start a real Codex; the Codex trust tests opt in explicitly
 export const isolatedUserStateDir = dir;

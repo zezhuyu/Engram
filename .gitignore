@@ -286,3 +286,7 @@ scratch/
 *.prof
 isolate-*.log
 # (not ignoring core dumps by bare name: it would match packages/core/)
+
+# Native macOS packaging output
+/dist-macos/
+/dist-linux/

@@ -1,3 +1,4 @@
+import { ensureWatcher } from './outbox-watch.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -33,7 +34,8 @@ const render = (host: string, text: string, format: 'claude' | 'text'): string =
 async function drainWaitingWrites(url: string, token: string, workspaceId: string, env: NodeJS.ProcessEnv): Promise<void> {
   try {
     const directory = env.ENGRAM_OUTBOX ?? defaultOutboxDirectory(); if (!(await listOutbox(directory, entry => entry.url === url && (entry.workspaceId ?? '') === workspaceId)).length) return;
-    await drainOutboxNow({ url, token, workspaceId, outbox: directory, timeoutMs: 1200, waitMs: 1800 });
+    const result = await drainOutboxNow({ url, token, workspaceId, outbox: directory, timeoutMs: 1200, waitMs: 1800 });
+    if (result?.stopped === 'offline' || (result?.remaining ?? 0) > 0) await ensureWatcher({ url, token, workspaceId, outbox: directory, env }); // still waiting (after a reboot, say): keep trying in the background
   } catch { /* the outbox is retried by the proxy and by the next session */ }
 }
 export async function runContextHook(options: ContextHookOptions): Promise<ContextHookResult> {

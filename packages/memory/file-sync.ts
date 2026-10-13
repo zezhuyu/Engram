@@ -1,3 +1,5 @@
+import { ensureWatcher } from './outbox-watch.js';
+import { defaultOutboxDirectory } from './outbox.js';
 import { createHash } from 'node:crypto';
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import path from 'node:path';
@@ -102,6 +104,11 @@ async function listQueue(projectDir: string): Promise<QueueEntry[]> { const dir 
 const title = (rel: string, body: string): string => (/^#\s+(.+)$/m.exec(body)?.[1] ?? path.basename(rel, '.md')).replace(/\s+/g, ' ').trim().slice(0, 200) || path.basename(rel);
 
 export async function syncFile(ctx: SyncContext, candidate: string): Promise<SyncOutcome> {
+  const outcome = await syncFileOnce(ctx, candidate);
+  if (outcome.status === 'QUEUED_OFFLINE') { const { binding } = ctx; const token = binding.credentialRef ? process.env[binding.credentialRef] : undefined; if (binding.serverUrl && token) void ensureWatcher({ url: binding.serverUrl, token, workspaceId: binding.workspaceId, outbox: defaultOutboxDirectory(), projectDir: ctx.projectDir, tokenEnv: binding.credentialRef! }); }
+  return outcome;
+}
+async function syncFileOnce(ctx: SyncContext, candidate: string): Promise<SyncOutcome> {
   const { projectDir, binding, sink } = ctx; const now = (ctx.now ?? new Date()).toISOString();
   if (!binding.fileSyncConsent) return { path: candidate, status: 'DISABLED', detail: 'no file-sync consent is recorded for this project' };
   const eligible = await evaluatePath(projectDir, binding, candidate);

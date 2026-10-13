@@ -16,6 +16,9 @@ jobs:
       - run: sed --version | head -1 && gawk --version | head -1 && sort --version | head -1
       - run: npm ci
       - run: npm run verify            # lint, typecheck, fast tests
+      - run: node --test tests/linux-packaging.test.mjs
+      - name: Verify Linux client and server daemons on the disposable runner
+        run: sudo env ENGRAM_TEST_SYSTEMD=1 "$(command -v node)" --test tests/linux-systemd-smoke.mjs
       - run: npm run verify:unix       # includes GNU-only parity cases and sandboxed awk/sed execution (MDB_REQUIRE_GNU=1 fails if the tools are missing)
       - run: npm run verify:query
       - run: npm run verify:search
@@ -55,6 +58,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci && npm run verify && npm run verify:unix && npm run verify:query
+      - run: node --test tests/macos-packaging.test.mjs
 
   package-client:
     name: Package client
@@ -70,7 +74,7 @@ jobs:
       - run: node scripts/package-client.mjs release/client
       - uses: actions/upload-artifact@v4
         with:
-          name: release-client
+          name: release-client-portable
           path: release/client/*.tgz
           if-no-files-found: error
           retention-days: 1
@@ -98,7 +102,28 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: node scripts/standalone.mjs package "${{ matrix.os }}" "${{ matrix.arch }}"
-      - run: mkdir -p release/server && tar -czf "release/server/engram-server-${{ matrix.target }}.tar.gz" -C "dist-standalone/engram-${{ matrix.os }}-${{ matrix.arch }}" .
+      - name: Build native macOS apps with app and menu bar icons
+        if: matrix.os == 'darwin'
+        run: node scripts/package-macos.mjs dist-macos "dist-standalone/engram-${{ matrix.os }}-${{ matrix.arch }}"
+      - name: Package Linux client and server daemons
+        if: matrix.os == 'linux'
+        run: node scripts/package-linux.mjs dist-linux "dist-standalone/engram-${{ matrix.os }}-${{ matrix.arch }}"
+      - name: Archive client and server packages
+        run: |
+          mkdir -p release/server release/client
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            tar -czf "release/server/engram-server-${{ matrix.target }}.tar.gz" -C dist-macos "Engram Server.app" install-macos-boot.mjs README.md
+            tar -czf "release/client/engram-client-${{ matrix.target }}.tar.gz" -C dist-macos "Engram Client.app" install-macos-boot.mjs README.md
+          else
+            tar -czf "release/server/engram-server-${{ matrix.target }}.tar.gz" -C dist-linux/engram-server .
+            tar -czf "release/client/engram-client-${{ matrix.target }}.tar.gz" -C dist-linux/engram-client .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-client-${{ matrix.target }}
+          path: release/client/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: release-server-${{ matrix.target }}
@@ -116,8 +141,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-client
+          pattern: release-client-*
           path: release/client
+          merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
           pattern: release-server-*
@@ -128,10 +154,9 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mkdir -p release/payload/server
-          client_archive="$(find release/client -maxdepth 1 -type f -name '*.tgz' -print -quit)"
-          test -n "$client_archive"
-          cp "$client_archive" "release/payload/engram-client-${GITHUB_SHA::12}.tgz"
+          mkdir -p release/payload/server release/payload/client
+          cp release/client/*.tgz release/client/*.tar.gz release/payload/client/
+          tar -czf "release/payload/engram-client-${GITHUB_SHA::12}.tar.gz" -C release/payload/client .
           cp release/servers/*.tar.gz release/payload/server/
           tar -czf "release/payload/engram-server-${GITHUB_SHA::12}.tar.gz" -C release/payload/server .
       - name: Create one prerelease for this push
@@ -143,10 +168,10 @@ jobs:
           set -euo pipefail
           tag="ci-${GITHUB_RUN_ID}"
           gh release create "$tag" \
-            "release/payload/engram-client-${GITHUB_SHA::12}.tgz" \
+            "release/payload/engram-client-${GITHUB_SHA::12}.tar.gz" \
             "release/payload/engram-server-${GITHUB_SHA::12}.tar.gz" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Engram build ${GITHUB_SHA::12}" \
-            --notes "Automated client and server packages for commit ${GITHUB_SHA}. Server package contains Linux x64 and macOS arm64 bundles." \
+            --notes "Automated client and server packages for commit ${GITHUB_SHA}. Both include Linux x64 daemon bundles and macOS arm64 apps with background startup support. Client also includes portable CLI/SDK." \
             --prerelease

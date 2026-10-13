@@ -1,3 +1,4 @@
+import { ensureWatcher } from './outbox-watch.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -15,7 +16,7 @@ import { appendLog, defaultOutboxDirectory, drainOutbox, enqueueWrite, entryKey,
 export const WRITE_TOOLS = ['engram_task_upsert', 'engram_note_upsert', 'engram_handoff_write'] as const;
 type Rpc = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
 type RpcReply = { jsonrpc: '2.0'; id: string | number | null; result?: unknown; error?: { code: number; message: string } };
-export interface ProxyOptions { /** have each drain pass recount the queue (used by one-shot drains that report it) */ countRemaining?: boolean; /** called with the result of every drain pass */ onDrain?: (result: DrainResult) => void; /** how long to wait for the last drain when input ends (default 3000) */ drainWaitMs?: number; url: string; token: string; workspaceId?: string; outbox?: string; input: Readable; output: Writable; timeoutMs?: number; drainIntervalMs?: number; fetchImpl?: typeof fetch; log?: (line: string) => void }
+export interface ProxyOptions { /** start the background watcher when a write is kept locally (default true; ENGRAM_AUTO_RECONNECT=0 also disables) */ autoReconnect?: boolean; /** have each drain pass recount the queue (used by one-shot drains that report it) */ countRemaining?: boolean; /** called with the result of every drain pass */ onDrain?: (result: DrainResult) => void; /** how long to wait for the last drain when input ends (default 3000) */ drainWaitMs?: number; url: string; token: string; workspaceId?: string; outbox?: string; input: Readable; output: Writable; timeoutMs?: number; drainIntervalMs?: number; fetchImpl?: typeof fetch; log?: (line: string) => void }
 class Unreachable extends Error { constructor(readonly kind: 'offline' | 'auth', message: string, readonly retryAfterMs?: number) { super(message); } }
 
 const textReply = (id: Rpc['id'], value: unknown, isError = false): RpcReply => ({ jsonrpc: '2.0', id: id ?? null, result: { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], ...(isError ? { isError: true } : {}) } });
@@ -126,6 +127,7 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
       // a write made on top of an earlier queued write of the same record is based on THAT write (the client has not seen the server's changes), not on whatever the server has by the time it is delivered
     const predecessor = (await listOutbox(outbox, e => mine(e) && e.key === key)).at(-1)?.entry;
     try { const entry = await enqueueWrite(outbox, { url: options.url, ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}), tool, arguments: args, ...(cache.serverTime ? { serverTime: cache.serverTime } : {}), ...(predecessor ? { baseArguments: predecessor.arguments } : cache.bases![key] ? { baseRevisionId: cache.bases![key] } : {}) }); await appendLog(outbox, { event: 'queued', id: entry.id, tool, key, queuedAt: entry.queuedAt, reason: why.slice(0, 120), ...(entry.serverTime ? { serverTime: entry.serverTime } : {}) });
+        if (options.autoReconnect !== false) void ensureWatcher({ url: options.url, token: options.token, ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}), outbox }); // the default: deliver by itself when the server returns, even if this session ends first
         return textReply(message.id, { persistence: 'QUEUED_OFFLINE', queuedId: entry.id, tool, reason: why, note: 'Saved on this machine only. It will be written to the Engram server, in order, when the connection returns, and the local copy is then deleted. Other agents cannot see it yet.' }); }
       catch (error) { return textReply(message.id, { persistence: 'FAILED', error: { code: 'OUTBOX_UNAVAILABLE', message: (error as Error).message } }, true); }
     };

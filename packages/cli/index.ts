@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { queryCommand, lineGrep, STREAM_COMMANDS, STREAMED } from './query.js';
 import { detectUnix, unixMain } from './unix.js';
 import { resolve } from 'node:path';
@@ -36,7 +36,7 @@ remote mode: any client runs these against the server instead of a local vault w
     search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | insight search | capabilities
     task upsert --id ID --title T --status S [--body B] [--expected-revision R | --as-of TIME]    note upsert --id ID --title T (--body B | --file F)    handoff write --session ID --state ended|interrupted [--completed a,b --next ... --blockers ... --files ... --open-tasks ...]
     remote tools | remote call TOOL --input JSON      (every server tool; task/note/handoff writes made while the server is unreachable are kept in the local outbox and merged in later)
-outbox [drain --url URL --token-env VAR [--workspace ID] | log [--limit N]]   what is waiting on this machine (queued, conflicts, rejected); drain sends it now; log is the timestamped record
+outbox [drain --url URL --token-env VAR [--workspace ID] | watch --url URL (--token-env VAR | --token-file F) [--workspace ID] [--project-dir D] [--interval-sec N] [--exit-when-empty-sec N] | watch-unit --url URL --token-file F [--platform macos|linux] | log [--limit N]]   what is waiting on this machine (queued, conflicts, rejected); drain sends it now; log is the timestamped record
 model show | test | set (--local-agent [claude|codex|auto] | --api URL [--model NAME] [--api-key-env VAR] [--allow-network]) [--allow-private-to-remote] [--no-check]
     one vault-wide model switch for profile/insight collection, dream and project insight relevance; keys come from the environment only
 
@@ -200,6 +200,18 @@ export async function execute(argv: string[]): Promise<unknown> {
   if (command === 'outbox') { // writes kept on this machine while the server was unreachable: status (default), `drain` to send them now, `log` for the timestamped record
     const { outboxStatus, defaultOutboxDirectory, readLog } = await import('../memory/outbox.js'); const directory = text(flags, 'outbox') ? resolve(text(flags, 'outbox')!) : defaultOutboxDirectory();
     if (sub === 'log') return readLog(directory, number(flags, 'limit') ?? 50);
+    if (sub === 'watch' || sub === 'watch-unit') { // keeps retrying by itself so delivery does not wait for the next agent session; `watch-unit` only PRINTS a launchd/systemd definition (nothing is installed)
+      const url = required(text(flags, 'url'), '--url'); const tokenFile = text(flags, 'token-file') ? resolve(text(flags, 'token-file')!) : undefined;
+      if (sub === 'watch-unit') { const { watcherServiceText } = await import('../memory/outbox-watch.js'); return watcherServiceText(text(flags, 'platform') === 'linux' ? 'linux' : 'macos', { node: process.execPath, mdb: process.argv[1] ?? 'mdb', url, tokenFile: required(tokenFile ? text(flags, 'token-file') : undefined, '--token-file'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'outbox') ? { outbox: directory } : {}), ...(text(flags, 'project-dir') ? { projectDir: resolve(text(flags, 'project-dir')!) } : {}) }); }
+      let token: string | undefined;
+      if (tokenFile) { const info = await stat(tokenFile).catch(() => undefined); if (!info?.isFile()) throw new MDBError('INVALID_ARGUMENT', `Token file ${tokenFile} does not exist`); if ((info.mode & 0o077) !== 0) throw new MDBError('INVALID_ARGUMENT', `Token file ${tokenFile} must not be readable by others (chmod 600)`); token = (await readFile(tokenFile, 'utf8')).trim(); }
+      else { const tokenEnv = required(text(flags, 'token-env'), '--token-env or --token-file'); token = process.env[tokenEnv]; if (!token) throw new MDBError('INVALID_ARGUMENT', `Environment variable ${tokenEnv} is not set`); }
+      const projectDir = text(flags, 'project-dir') ? resolve(text(flags, 'project-dir')!) : undefined; const { watchOutbox } = await import('../memory/outbox-watch.js');
+      const syncProject = projectDir ? async () => { const binding = await readBinding(projectDir); if (!binding.serverUrl || !(await isTrusted(projectDir, binding))) return; await reconcile({ projectDir, binding, sink: remoteSink(binding) }); } : undefined;
+      const abort = new AbortController(); for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => abort.abort());
+      await watchOutbox({ url, token, ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), outbox: directory, intervalMs: (number(flags, 'interval-sec') ?? 10) * 1000, ...(number(flags, 'exit-when-empty-sec') !== undefined ? { exitWhenEmptyMs: number(flags, 'exit-when-empty-sec')! * 1000 } : {}), ...(projectDir && syncProject ? { projectDir, syncProject } : {}), signal: abort.signal, onEvent: event => process.stderr.write(`engram-outbox-watch: ${JSON.stringify(event)}\n`) });
+      process.exit(0); // a service command: leave when asked, even if an idle keep-alive connection is still open
+    }
     if (sub === 'drain') {
       const tokenEnv = required(text(flags, 'token-env'), '--token-env'), token = process.env[tokenEnv]; if (!token) throw new MDBError('INVALID_ARGUMENT', `Environment variable ${tokenEnv} is not set`);
       const url = required(text(flags, 'url'), '--url'); const { drainOutboxNow } = await import('../memory/mcp-proxy.js');
