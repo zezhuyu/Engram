@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Engram } from '../sdk/index.js';
 import { scopeKey } from '../core/vault.js';
 import { manifestFor, type ManifestEntry } from '../search-files/manifest.js';
+import { readRanking } from './relevance.js';
 import { buildProjection, neutralize, type ProjectionItem } from '../project-init.js';
 
 /**
@@ -39,7 +40,7 @@ export async function buildSessionContext(client: Engram, input: { workspaceId: 
   // Accepted profile (reviewed insights only), same projection rules as the instruction file.
   const rows: ProjectionItem[] = [];
   for (const scopeLabel of ['global', input.workspaceId]) for (const item of (await client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights as Array<{ id: string; claim: string; category?: string; sensitivity?: string }>) rows.push({ id: item.id, scope: scopeLabel, ...(item.category ? { category: item.category } : {}), ...(item.sensitivity === 'sensitive' ? { sensitive: true } : {}), claim: item.claim });
-  const projection = buildProjection(rows, input.workspaceId, Math.floor(maxTokens * 0.35), 'local');
+  const projection = buildProjection(rows, input.workspaceId, Math.floor(maxTokens * 0.35), 'local', await readRanking(client, input.workspaceId).catch(() => undefined));
 
   // The typed tools address a record by its stable id (taskId / noteId), not by the object id: show that, so an agent updates the existing record instead of creating a duplicate.
   const stable = async (e: ManifestEntry): Promise<string> => { const doc = await client.vault.get(e.id).catch(() => undefined); const id = doc?.metadata.stableId; return typeof id === 'string' ? id.replace(/^(task|note|decision):/, '') : e.id; };

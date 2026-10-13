@@ -49,6 +49,7 @@ export const HOSTS: Record<'claude-code' | 'codex', HostSpec> = {
   }
 };
 const quote = (value: string): string => { if (/["`$\\\n\r]/.test(value)) throw new MDBError('INVALID_INPUT', 'Refusing to place a path with shell metacharacters into a hook command'); return `"${value}"`; };
+export const mdbBinaryPath = (): string => mdbBinary();
 const mdbBinary = () => fileURLToPath(new URL('../../../bin/mdb.js', import.meta.url));
 export function hookCommand(host: string, root: string, registrationId: string, node = process.execPath, projectRoot?: string): string {
   return `${quote(node)} ${quote(mdbBinary())} memory capture --root ${quote(root)} --host ${host} --registration ${registrationId}${projectRoot ? ` --project-root ${quote(projectRoot)}` : ''} ${MARKER}${registrationId}`;

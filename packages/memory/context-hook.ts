@@ -5,6 +5,8 @@ import path from 'node:path';
 import { findTrustedBinding } from '../core/project-trust.js';
 import { Engram } from '../sdk/index.js';
 import { buildSessionContext } from './session-context.js';
+import { defaultOutboxDirectory, listOutbox } from './outbox.js';
+import { drainOutboxNow } from './mcp-proxy.js';
 import { openRemoteSession, RemoteError } from './remote-client.js';
 import { readUserConfig } from './user-config.js';
 import { insideProject } from './user-setup.js';
@@ -28,6 +30,12 @@ async function recordState(env: NodeJS.ProcessEnv, state: ContextState): Promise
 }
 const render = (host: string, text: string, format: 'claude' | 'text'): string => format === 'claude' ? `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } })}\n` : `${text}\n`;
 
+async function drainWaitingWrites(url: string, token: string, workspaceId: string, env: NodeJS.ProcessEnv): Promise<void> {
+  try {
+    const directory = env.ENGRAM_OUTBOX ?? defaultOutboxDirectory(); if (!(await listOutbox(directory, entry => entry.url === url && (entry.workspaceId ?? '') === workspaceId)).length) return;
+    await drainOutboxNow({ url, token, workspaceId, outbox: directory, timeoutMs: 1200, waitMs: 1800 });
+  } catch { /* the outbox is retried by the proxy and by the next session */ }
+}
 export async function runContextHook(options: ContextHookOptions): Promise<ContextHookResult> {
   const env = options.env ?? process.env; const now = options.now ?? new Date(); const format = options.format ?? (options.host === 'claude-code' ? 'claude' : 'text');
   const finish = async (result: ContextHookResult): Promise<ContextHookResult> => { await recordState(env, { host: options.host, at: now.toISOString(), outcome: result.outcome, ...(result.workspaceId ? { workspaceId: result.workspaceId } : {}), ...(result.reason ? { reason: result.reason } : {}) }); return result; };
@@ -53,6 +61,8 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
       return finish({ outcome: 'fresh', output: render(options.host, context.text, format), workspaceId });
     }
     const token = tokenEnv ? env[tokenEnv] : undefined; if (!token) return finish({ outcome: 'none', output: '', workspaceId, reason: `$${tokenEnv} is not set; no context without authentication` });
+    // Writes this machine kept while the server was unreachable are sent now that a session is starting (bounded: the hook has a few seconds). Failure here never affects the context.
+    await drainWaitingWrites(serverUrl, token, workspaceId, env);
     const file = cacheFile(env, serverUrl, workspaceId); const credential = createHash('sha256').update(`engram-credential\0${token}`).digest('hex').slice(0, 24); // identity of the credential, never the credential
     try {
       const session = await openRemoteSession({ url: serverUrl, token, workspaceId, timeoutMs: options.timeoutMs ?? 1500 });

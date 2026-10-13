@@ -39,7 +39,7 @@ test('profile: explicit preference outranks conflicting inference, newer explici
   let next: ModelProposal = { kind: 'user_insight', title: 'Indentation', body: 'Prefers spaces.', evidence: quoted(excerpt, 'wrote tests with spaces'), metadata: { category: 'preference', preferenceKey: 'indent', sensitivity: 'none' } };
   const engine = new IntelligenceEngine(vault, fake(() => next));
 
-  await engine.run({ job: 'profile', limit: 1 });
+  await engine.enqueue('profile', { scope: profileScope }); await engine.run({ job: 'profile', limit: 1 }); // global mode is explicit: a profile job names its scope
   const [conflict] = await engine.proposals();
   assert.equal(conflict!.status, 'rejected', `status=${conflict!.status} flags=${JSON.stringify(conflict!.flags)} metadata=${JSON.stringify(conflict!.input.metadata)} reason=${conflict!.reason}`);
   assert.ok(conflict!.flags!.includes('conflicts_user_statement'));
@@ -49,7 +49,7 @@ test('profile: explicit preference outranks conflicting inference, newer explici
   assert.equal((await kinds(vault, 'user_insight')).length, 0);
 
   next = { kind: 'user_insight', title: 'Theme', body: 'Prefers the dark theme.', evidence: quoted(excerpt, 'chose the dark theme'), metadata: { category: 'preference', preferenceKey: 'theme', sensitivity: 'none' } };
-  await engine.run({ job: 'profile', limit: 1 });
+  await engine.enqueue('profile', { scope: profileScope }); await engine.run({ job: 'profile', limit: 1 }); // global mode is explicit: a profile job names its scope
   const pending = (await engine.proposals()).find(p => p.status === 'pending')!;
   assert.equal(pending.critic?.verdict, 'accept');
   const approved = await engine.review(pending.id, true, 'Looks right');
@@ -79,7 +79,7 @@ test('profile: sensitive inferred items need explicit confirmation, rejection st
     { kind: 'user_insight', title: 'Venue', body: 'Likes calm venues.', evidence: quoted(excerpt, 'calm venues'), metadata: { category: 'preference', preferenceKey: 'venues', sensitivity: 'none' } }
   ];
   const engine = new IntelligenceEngine(vault, fake(() => queue.shift()!));
-  for (let i = 0; i < 3; i++) await engine.run({ job: 'profile', limit: 1 });
+  for (let i = 0; i < 3; i++) { await engine.enqueue('profile', { scope: profileScope }); await engine.run({ job: 'profile', limit: 1 }); }
   const all = await engine.proposals();
   assert.equal(all.length, 3);
   const [health, declared, plain] = all;

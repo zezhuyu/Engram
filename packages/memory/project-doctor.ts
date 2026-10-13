@@ -41,13 +41,21 @@ async function hostReport(dir: string, host: BindingHost, binding: ProjectBindin
   } catch (error) { instructions = cap('FAIL', error instanceof Error ? error.message : String(error)); }
   let mcpConfig: Capability;
   try {
-    if (!binding.serverUrl) mcpConfig = cap('DISABLED', 'local mode: no remote MCP configured');
+    if (!binding.serverUrl) {
+      // local mode: the agent talks to the built-in server over stdio (no network, no token)
+      const file = host === 'claude-code' ? path.join(dir, '.mcp.json') : path.join(dir, '.codex', 'config.toml'); const text = await fs.readFile(file, 'utf8').catch(() => '');
+      const present = host === 'claude-code' ? /"engram"[\s\S]*mdb-mcp\.js/.test(text) : /\[mcp_servers\.engram\][\s\S]*mdb-mcp\.js/.test(text);
+      mcpConfig = !present ? cap('INCOMPLETE', 'local mode: the agent has no tool connection to the built-in server; rerun init (or this installation has no built-in server)') : !text.includes(binding.workspaceId) ? cap('INCOMPLETE', 'the local connection is bound to a different workspace; rerun init') : cap('PASS', 'local agent connects to the built-in server over stdio (file check only)');
+    }
     else if (host === 'claude-code') {
-      const config = JSON.parse(await fs.readFile(path.join(dir, '.mcp.json'), 'utf8')) as { mcpServers?: { engram?: { url?: string; headers?: Record<string, string> } } }; const e = config.mcpServers?.engram;
-      mcpConfig = !e ? cap('FAIL', '.mcp.json has no engram server') : e.url !== binding.serverUrl ? cap('FAIL', 'server URL differs from the binding') : e.headers?.['X-Engram-Workspace'] !== binding.workspaceId ? cap('INCOMPLETE', 'workspace header missing or different; rerun init') : cap('PASS', 'entry present with the bound workspace header (file check only; see remote)');
+      const config = JSON.parse(await fs.readFile(path.join(dir, '.mcp.json'), 'utf8')) as { mcpServers?: { engram?: { url?: string; type?: string; command?: string; args?: string[]; env?: Record<string, string>; headers?: Record<string, string> } } }; const e = config.mcpServers?.engram;
+      if (e?.type === 'stdio') mcpConfig = await proxyEntryStatus(e.command, e.args, e.env && Object.keys(e.env)[0], binding);
+      else mcpConfig = !e ? cap('FAIL', '.mcp.json has no engram server') : e.url !== binding.serverUrl ? cap('FAIL', 'server URL differs from the binding') : e.headers?.['X-Engram-Workspace'] !== binding.workspaceId ? cap('INCOMPLETE', 'workspace header missing or different; rerun init') : cap('PASS', 'entry present with the bound workspace header (file check only; see remote)');
     } else {
       const toml = await fs.readFile(path.join(dir, '.codex', 'config.toml'), 'utf8');
-      mcpConfig = !/\[mcp_servers\.engram\]/.test(toml) ? cap('FAIL', '.codex/config.toml has no engram server') : !toml.includes(binding.serverUrl) ? cap('FAIL', 'server URL differs from the binding') : !toml.includes(`"X-Engram-Workspace" = "${binding.workspaceId}"`) ? cap('INCOMPLETE', 'workspace header missing; rerun init') : cap('PASS', 'entry present with the bound workspace header (file check only; see remote)');
+      const proxyArgs = /^args = \[(.*)\]$/m.exec(toml)?.[1]; const proxyCommandLine = /^command = "(.*)"$/m.exec(toml)?.[1];
+      if (/\[mcp_servers\.engram\]/.test(toml) && proxyArgs && proxyCommandLine) mcpConfig = await proxyEntryStatus(JSON.parse(`"${proxyCommandLine}"`), JSON.parse(`[${proxyArgs}]`) as string[], /^env_vars = \["(.*)"\]/m.exec(toml)?.[1], binding);
+      else mcpConfig = !/\[mcp_servers\.engram\]/.test(toml) ? cap('FAIL', '.codex/config.toml has no engram server') : !toml.includes(binding.serverUrl) ? cap('FAIL', 'server URL differs from the binding') : !toml.includes(`"X-Engram-Workspace" = "${binding.workspaceId}"`) ? cap('INCOMPLETE', 'workspace header missing; rerun init') : cap('PASS', 'entry present with the bound workspace header (file check only; see remote)');
     }
   } catch (error) { mcpConfig = cap('FAIL', error instanceof Error ? error.message : String(error)); }
   let capture: Capability;
@@ -69,7 +77,7 @@ async function hostReport(dir: string, host: BindingHost, binding: ProjectBindin
       let states: Record<string, ContextState> = {}; try { states = JSON.parse(await fs.readFile(contextStateFile(), 'utf8')); } catch { /* never ran */ }
       const last = states[`${host}:${binding.workspaceId}`]; const ageDays = last ? (Date.now() - Date.parse(last.at)) / 86_400_000 : Infinity;
       let blocked: Capability | undefined;
-      if (host === 'codex' && process.env.ENGRAM_CODEX_PROBE !== '0') try { const state = await codexHookState(dir); if (state.untrusted.length) blocked = cap('FAIL', `Codex has not trusted ${state.untrusted.length} Engram hook(s) for this project, so it never runs them. Review them in Codex (/hooks) or run \`mdb project trust-codex-hooks --yes\`.`); else if (!state.engram.length) blocked = cap('FAIL', 'Codex does not list the Engram hooks for this project (is the project trusted in Codex, and hooks enabled?)'); } catch (error) { blocked = cap('INCOMPLETE', `Codex trust could not be checked: ${error instanceof Error ? error.message : String(error)}`); }
+      if (host === 'codex' && process.env.ENGRAM_CODEX_PROBE !== '0') try { const state = await codexHookState(dir); const untrustedCapture = state.untrusted.filter(h => / memory capture /.test(h.command)); const untrustedOther = state.untrusted.filter(h => !untrustedCapture.includes(h)); if (untrustedCapture.length && (capture.status === 'PASS' || capture.status === 'INCOMPLETE')) capture = cap('FAIL', `Codex has not trusted ${untrustedCapture.length} Engram capture hook(s) for this project, so it never runs them and nothing is recorded. Review them in Codex (/hooks) or run \`mdb project trust-codex-hooks --yes\`.`); if (untrustedOther.length) blocked = cap('FAIL', `Codex has not trusted ${untrustedOther.length} Engram hook(s) for this project, so it never runs them. Review them in Codex (/hooks) or run \`mdb project trust-codex-hooks --yes\`.`); else if (!state.engram.length) blocked = cap('FAIL', 'Codex does not list the Engram hooks for this project (is the project trusted in Codex, and hooks enabled?)'); } catch (error) { blocked = cap('INCOMPLETE', `Codex trust could not be checked: ${error instanceof Error ? error.message : String(error)}`); }
       if (blocked) sessionContext = blocked;
       else if (!last) sessionContext = cap('INCOMPLETE', 'hook installed but it has not run yet (start a session in this project)');
       else if (last.outcome === 'fresh' && ageDays <= 7) sessionContext = cap('PASS', `last session start produced fresh context at ${last.at}${host === 'codex' ? ' and Codex trusts the hook' : ''} (model-side use is not observable from here)`);
@@ -134,3 +142,15 @@ export async function projectDoctor(projectDir: string, options: { settingsPaths
   return { projectDir: dir, binding: { present: true, trusted, workspaceId: binding.workspaceId, hosts: binding.hosts, ...(binding.serverUrl ? { serverUrl: binding.serverUrl } : {}), ...(binding.credentialRef ? { credentialRef: binding.credentialRef, tokenAvailable: !!token } : {}), ...(binding.registrationId ? { registrationId: binding.registrationId } : {}) }, hosts, features, summary: summarize(features) };
 }
 function summarize(features: Record<string, Capability>): Record<FeatureStatus, number> { const out: Record<FeatureStatus, number> = { PASS: 0, INCOMPLETE: 0, DISABLED: 0, FAIL: 0, NOT_RUN: 0 }; for (const f of Object.values(features)) out[f.status]++; return out; }
+
+/** The offline-buffering proxy entry: it must run this machine's Engram CLI for the bound server and workspace, with the token variable passed through. Also reports what is waiting locally. */
+async function proxyEntryStatus(command: string | undefined, args: string[] | undefined, tokenVar: string | undefined, binding: ProjectBinding): Promise<Capability> {
+  const a = args ?? []; const value = (flag: string) => a[a.indexOf(flag) + 1];
+  if (!command || !a.includes('mcp-proxy')) return cap('FAIL', 'the engram entry is a stdio server that is not the Engram proxy');
+  if (value('--url') !== binding.serverUrl) return cap('FAIL', 'the proxy points at a different server than the binding');
+  if (value('--workspace') !== binding.workspaceId) return cap('INCOMPLETE', 'the proxy is bound to a different workspace; rerun init');
+  if (!await fs.stat(command).then(() => true, () => false) || !await fs.stat(a[0] ?? '').then(() => true, () => false)) return cap('FAIL', 'the proxy command or the Engram CLI path no longer exists on this machine; rerun init');
+  if (!tokenVar || tokenVar !== value('--token-env')) return cap('INCOMPLETE', 'the token variable is not passed through to the proxy; rerun init');
+  const { outboxStatus, defaultOutboxDirectory } = await import('./outbox.js'); const status = await outboxStatus(defaultOutboxDirectory(), entry => entry.url === binding.serverUrl);
+  return cap('PASS', `offline buffering enabled (local proxy). Waiting on this machine: ${status.queued} queued write(s)${status.queued ? ` since ${status.oldest}` : ''}, ${status.rejected} rejected${status.rejected ? ' (kept in the outbox rejected/ folder for a person to look at)' : ''}; log ${status.log}`);
+}
