@@ -253,7 +253,7 @@ test('a schema-valid no_insight abstention completes the job, stores nothing, an
   const w = await world(t); const message = await w.userSaid('Would you prefer a table or a paragraph for this comparison?');
   const calls: ModelRequest[] = []; const engine = new IntelligenceEngine(w.vault, { id: 'abstainer', async generate(r) { calls.push(r); return abstain(); } });
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
-  assert.equal(job!.status, 'complete'); assert.equal(calls.length, 1); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 1, malformed: 0, repairs: 0, outcome: 'abstained', proposals: 0, complete: true });
+  assert.equal(job!.status, 'complete'); assert.equal(calls.length, 1); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 1, malformed: 0, repairs: 0, outcome: 'abstained', proposals: 0, complete: true, calls: { generate: 1, repair: 0, critic: 0 }, retries: 0, tokens: { input: 0, output: 0, reported: false }, budget: { max: 5, exhausted: false }, terminal: 'abstained' }); // new accounting fields added; the original fields are unchanged
   assert.equal((await engine.proposals()).length, 0); assert.equal((await w.vault.listDocuments()).filter(d => d.kind === 'user_insight').length, 0);
   recordCase({ suite: 'profile', name: 'profile-no-insight-abstention', status: 'PASS' });
 });
@@ -262,7 +262,7 @@ test('malformed profile output is repaired within a bounded budget and never inv
   let n = 0; const notes: string[] = [];
   const engine = new IntelligenceEngine(w.vault, { id: 'flaky', async generate(r) { n++; notes.push(r.instruction); if (n === 1) return { kind: 'user_insight', title: 'x', body: 'y', evidence: [] } as ModelProposal; if (n === 2) return { kind: 'preference_note', title: 'x', body: 'y', evidence: [ref(message, 'command first')] } as ModelProposal; return { kind: 'user_insight', title: 'Command first', body: 'The user wants the command first and the explanation after.', evidence: [ref(message, 'give me the command first')], metadata: { category: 'working_style', preferenceKey: 'answer-order', sensitivity: 'none', explicitStatement: true } }; } });
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
-  assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 4, malformed: 2, repairs: 2, outcome: 'proposed', proposals: 1, complete: true, duplicates: 1 } /* 2 repairs + the insight + one confirming call that returned the same claim */);
+  assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 4, malformed: 2, repairs: 2, outcome: 'proposed', proposals: 1, complete: true, duplicates: 1, calls: { generate: 2, repair: 2, critic: 0 }, retries: 0, tokens: { input: 0, output: 0, reported: false }, budget: { max: 5, exhausted: false }, terminal: 'proposed' } /* 2 repairs + the insight + one confirming call that returned the same claim */);
   assert.match(notes[1]!, /failed schema validation \(Model output invalid at proposal\.evidence/); assert.ok(!notes[1]!.includes('give me the command'), 'repair note never echoes values');
   const proposal = await last(engine); assert.equal(proposal.input.evidence![0]!.span, 'give me the command first');
   recordCase({ suite: 'profile', name: 'profile-bounded-schema-repair', status: 'PASS' });

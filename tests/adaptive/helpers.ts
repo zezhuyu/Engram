@@ -35,8 +35,8 @@ export class Scripted implements ModelProvider {
   }
 }
 export interface World { root: string; vault: Vault; ai: AdaptiveIntelligence; provider: Scripted; say: (workspaceId: string, text: string, extra?: Record<string, unknown>) => Promise<Document>; note: (workspaceId: string, kind: string, title: string, body: string, tags?: string[]) => Promise<Document> }
-export async function world(t: T, options: { sqlite?: boolean; config?: Record<string, unknown>; workspaces?: string[]; provider?: boolean } = {}): Promise<World> {
-  const { root, vault } = await disposableVault(t, { sqlite: options.sqlite ?? false });
+export async function world(t: T, options: { sqlite?: boolean; config?: Record<string, unknown>; workspaces?: string[]; provider?: boolean; /** injected clock for the vault's timestamps */ now?: () => Date } = {}): Promise<World> {
+  const { root, vault } = await disposableVault(t, { sqlite: options.sqlite ?? false, ...(options.now ? { now: options.now } : {}) });
   for (const id of options.workspaces ?? ['alpha', 'beta']) await vault.createWorkspace(id, `workspace ${id}`);
   const config = await vault.config(); config.dream = { ...config.dream, enabled: true, eventDriven: false, modes: ['micro', 'deep', 'strategic'] }; await fs.writeFile(path.join(root, 'mdb.yaml'), YAML.stringify(config));
   const provider = new Scripted(); const ai = new AdaptiveIntelligence(vault, options.provider === false ? undefined : provider);

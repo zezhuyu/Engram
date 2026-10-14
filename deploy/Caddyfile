@@ -1,4 +1,13 @@
 memory.example.com {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:3333
+	@memory path /mcp /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp
+	handle @memory {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:3333
+	}
+	handle {
+		respond "Not found" 404
+	}
 }

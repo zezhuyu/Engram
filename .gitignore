@@ -289,4 +289,5 @@ isolate-*.log
 
 # Native macOS packaging output
 /dist-macos/
+/dist-standalone/
 /dist-linux/

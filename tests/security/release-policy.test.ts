@@ -1,11 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PRODUCTION_EVIDENCE, classifyRelease, collectProductionEvidence, validateExclusions, type ProductionEvidence } from '../../scripts/lib/release-policy.js';
+import { PRODUCTION_EVIDENCE, classifyRelease, collectProductionEvidence, modelEvidenceMatches, validateExclusions, type ProductionEvidence } from '../../scripts/lib/release-policy.js';
 
 const green = { storageVerdict: 'PASS', openAreas: [] as string[], openGates: [] as string[], failedGates: [] as string[] };
 const evidence = (over: Record<string, ProductionEvidence['status']> = {}): ProductionEvidence[] => PRODUCTION_EVIDENCE.map(({ id, title }) => ({ id, title, status: over[id] ?? 'PASS', detail: '', source: 'test' }));
 const approved = (id: string) => ({ id, approvedBy: 'owner', reason: 'private tailnet only', approvedAt: '2026-10-12T00:00:00Z' });
+
+test('historical model PASS needs matching source evidence and never promotes missing or failed runs', () => {
+  const current = { 'engine.ts': 'engine-v2', 'provider.ts': 'provider-v2' };
+  assert.equal(modelEvidenceMatches(undefined, current), false);
+  assert.equal(modelEvidenceMatches({ status: 'PASS' }, current), false);
+  assert.equal(modelEvidenceMatches({ status: 'PASS', evidenceSource: { files: { 'engine.ts': 'engine-v1', 'provider.ts': 'provider-v2' } } }, current), false);
+  assert.equal(modelEvidenceMatches({ status: 'FAIL', evidenceSource: { files: current } }, current), false);
+  assert.equal(modelEvidenceMatches({ status: 'PASS', evidenceSource: { files: current } }, current), true);
+  assert.equal(modelEvidenceMatches({ status: 'PASS', evidenceSource: { files: {} } }, {}), false);
+});
 
 test('every automated gate passing does not make a release GA while production evidence is incomplete', () => {
   const result = classifyRelease({ ...green, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: undefined });

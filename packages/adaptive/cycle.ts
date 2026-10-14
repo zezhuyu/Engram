@@ -49,7 +49,7 @@ export class CycleRunner {
         vault: this.vault, engine, provider: this.provider, store: this.store, config, cycle: cyc, view, events, signal: controller.signal, pressure: () => pressure,
         checkpoint: async () => { await this.store.saveCycle(cyc); await this.store.renewLease(instance, id, leaseMs); },
         own: async action => { const before = (await this.vault.events()).at(-1)?.sequence ?? 0; try { return await action(); } finally { const after = (await this.vault.events()).at(-1)?.sequence ?? 0; if (after > before) cyc.ownSequenceRanges.push([before + 1, after]); } },
-        spendModelCall: () => { cyc.budgets.modelCallsUsed++; cyc.metrics.modelCalls = (cyc.metrics.modelCalls ?? 0) + 1; }
+        spendModelCall: (calls = 1) => { cyc.budgets.modelCallsUsed += calls; cyc.metrics.modelCalls = (cyc.metrics.modelCalls ?? 0) + calls; }
       };
       { const before = (await this.vault.events()).at(-1)?.sequence ?? 0; const invalidated = await propagatePurges(this.vault, this.store); const after = (await this.vault.events()).at(-1)?.sequence ?? 0; if (after > before) cyc.ownSequenceRanges.push([before + 1, after]); if (invalidated.length) (cyc.accessEvents ??= []).push(...invalidated.map(i => ({ at: nowIso(), note: `${i.action} ${i.kind} ${i.objectId}: ${i.because}` }))); }
       await this.drive(ctx, opts);

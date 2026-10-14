@@ -2,7 +2,8 @@ import { createHash, createPublicKey, verify as verifySignature, type JsonWebKey
 import type { ActorContext } from '../core/types.js';
 import { isValidRemotePermission } from './credentials.js';
 
-type OAuthConfig = { issuer: string; jwksUrl: string; resource: string; audience: string; clients: string[]; subjects: Record<string, { actorId: string; permissions: string[] }>; scopeMap: Record<string, string[]> };
+type SubjectGrant = { actorId: string; permissions: string[]; clients?: Record<string, { actorId: string; permissions: string[] }> };
+type OAuthConfig = { issuer: string; jwksUrl: string; resource: string; audience: string; clients: string[]; subjects: Record<string, SubjectGrant>; scopeMap: Record<string, string[]> };
 type Jwk = JsonWebKey & { kid?: string; alg?: string; use?: string };
 let jwksCache: { url: string; expires: number; keys: Jwk[] } | undefined;
 const fail = (): undefined => undefined;
@@ -10,13 +11,25 @@ const parseConfig = (env: NodeJS.ProcessEnv): OAuthConfig | undefined => {
   const { MDB_MCP_OAUTH_ISSUER: issuer, MDB_MCP_OAUTH_JWKS_URL: jwksUrl, MDB_MCP_OAUTH_RESOURCE: resource, MDB_MCP_OAUTH_AUDIENCE: audience, MDB_MCP_OAUTH_CLIENT_IDS: rawClients, MDB_MCP_OAUTH_SUBJECTS_JSON: rawSubjects, MDB_MCP_OAUTH_SCOPE_MAP_JSON: rawScopeMap } = env;
   if (![issuer, jwksUrl, resource, audience, rawClients, rawSubjects, rawScopeMap].some(Boolean)) return undefined;
   if (![issuer, jwksUrl, resource, audience, rawClients, rawSubjects, rawScopeMap].every(Boolean)) throw new Error('OAuth resource validation requires issuer, JWKS URL, resource, audience, allowed client IDs, subject map, and scope map');
-  const safeHttps = (value: string) => { const url = new URL(value); return url.protocol === 'https:' || url.hostname === 'localhost' || url.hostname === '127.0.0.1'; };
+  const safeHttps = (value: string) => { const url = new URL(value); return !url.username && !url.password && !url.hash && (url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)); };
   try {
     if (!safeHttps(issuer!) || !safeHttps(jwksUrl!) || !safeHttps(resource!)) throw new Error();
     if (audience !== resource) throw new Error();
     const clients = JSON.parse(rawClients!) as unknown; const subjects = JSON.parse(rawSubjects!) as OAuthConfig['subjects']; const scopeMap = JSON.parse(rawScopeMap!) as OAuthConfig['scopeMap'];
     if (!Array.isArray(clients) || !clients.length || clients.some(client => typeof client !== 'string' || client.length > 256) || !subjects || Array.isArray(subjects) || typeof subjects !== 'object' || !scopeMap || Array.isArray(scopeMap) || typeof scopeMap !== 'object') throw new Error();
-    for (const [subject, mapping] of Object.entries(subjects)) if (!subject || !mapping || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(mapping.actorId) || !Array.isArray(mapping.permissions) || !mapping.permissions.length || mapping.permissions.some(p => !isValidRemotePermission(p))) throw new Error();
+    const validGrant = (mapping: { actorId: string; permissions: string[] }) => mapping && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(mapping.actorId) && Array.isArray(mapping.permissions) && mapping.permissions.length && mapping.permissions.every(isValidRemotePermission);
+    const actorClients = new Map<string, string>();
+    for (const [subject, mapping] of Object.entries(subjects)) {
+      if (!subject || !validGrant(mapping)) throw new Error();
+      if (mapping.clients !== undefined) {
+        if (!mapping.clients || Array.isArray(mapping.clients) || typeof mapping.clients !== 'object' || !Object.keys(mapping.clients).length) throw new Error();
+        for (const [clientId, grant] of Object.entries(mapping.clients)) {
+          if (!clients.includes(clientId) || !validGrant(grant) || grant.permissions.some(permission => !mapping.permissions.includes(permission))) throw new Error();
+          if (actorClients.has(grant.actorId) && actorClients.get(grant.actorId) !== clientId) throw new Error();
+          actorClients.set(grant.actorId, clientId);
+        }
+      }
+    }
     for (const [scope, permissions] of Object.entries(scopeMap)) if (!/^[A-Za-z0-9:._/-]{1,120}$/.test(scope) || !Array.isArray(permissions) || !permissions.length || permissions.some(p => !isValidRemotePermission(p))) throw new Error();
     if (!Object.keys(subjects).length || !Object.keys(scopeMap).length) throw new Error();
     return { issuer: issuer!, jwksUrl: jwksUrl!, resource: resource!, audience: audience!, clients, subjects, scopeMap };
@@ -65,9 +78,11 @@ export async function resolveOAuthActor(authorization: string | undefined, env: 
     const now = Math.floor(Date.now() / 1000); if (typeof claims.exp !== 'number' || !Number.isSafeInteger(claims.exp) || typeof claims.iat !== 'number' || !Number.isSafeInteger(claims.iat) || claims.iat > now + 30 || claims.exp <= now || claims.exp - claims.iat > 3600 || claims.nbf !== undefined && (typeof claims.nbf !== 'number' || !Number.isSafeInteger(claims.nbf) || claims.nbf > now + 30)) return fail();
     if (typeof claims.sub !== 'string') return fail();
     const subject = config.subjects[claims.sub]; if (!subject) return fail();
+    // Explicit client mappings never fall back to the shared subject identity.
+    const grant = subject.clients ? subject.clients[clientId] : subject; if (!grant) return fail();
     const scopes = typeof claims.scope === 'string' ? claims.scope.split(/\s+/) : Array.isArray(claims.scp) && claims.scp.every(item => typeof item === 'string') ? claims.scp as string[] : [];
     const tokenPermissions = new Set(scopes.flatMap(scope => config.scopeMap[scope] ?? []));
-    const permissions = subject.permissions.filter(permission => tokenPermissions.has(permission)); if (!permissions.length) return fail();
-    return { actorId: subject.actorId, permissions, credentialBound: true, authId: `oauth:${createHash('sha256').update(token).digest('hex')}` };
+    const permissions = grant.permissions.filter(permission => tokenPermissions.has(permission)); if (!permissions.length) return fail();
+    return { actorId: grant.actorId, permissions, credentialBound: true, authId: `oauth:${createHash('sha256').update(token).digest('hex')}` };
   } catch { return fail(); }
 }
