@@ -17,7 +17,7 @@ import { recordCase } from '../helpers/report.js';
 
 type Cleanup = { after(fn: () => void | Promise<void>): void };
 const hasCodex = !!findExecutable('codex');
-async function temp(t: Cleanup, prefix: string): Promise<string> { const d = await mkdtemp(path.join(tmpdir(), prefix)); t.after(() => rm(d, { recursive: true, force: true })); return d; }
+async function temp(t: Cleanup, prefix: string): Promise<string> { const d = await mkdtemp(path.join(tmpdir(), prefix)); t.after(() => rm(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 })); return d; } // a late write by a process that is still shutting down must not fail the cleanup (the product code now also waits for that process to exit)
 
 test('only the exact commands this installation writes for a project count as Engram hooks', async t => {
   const dir = await temp(t, 'engram-cx-cmd-'); const id = contextHookId({ projectRoot: dir }, 'local'); const root = path.resolve(dir);

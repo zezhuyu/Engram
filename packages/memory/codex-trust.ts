@@ -20,7 +20,14 @@ async function withCodex<T>(timeoutMs: number, work: (call: Rpc) => Promise<T>):
   child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk: string) => { buffer += chunk; let index: number; while ((index = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); try { const m = JSON.parse(line); if (m.id !== undefined && waiting.has(m.id)) { waiting.get(m.id)!(m); waiting.delete(m.id); } } catch { /* not a protocol line */ } } });
   const call: Rpc = (method, params) => new Promise((resolve, reject) => { const mine = id++; const timer = setTimeout(() => reject(new Error(`Codex did not answer ${method} in ${timeoutMs} ms`)), timeoutMs); waiting.set(mine, m => { clearTimeout(timer); resolve(m); }); child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: mine, method, params })}\n`); });
   try { await call('initialize', { clientInfo: { name: 'engram', title: null, version: '1' }, capabilities: null }); child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'initialized' })}\n`); return await work(call); }
-  finally { child.kill('SIGTERM'); }
+  finally { await stopChild(child); }
+}
+/** Ends the Codex process and RETURNS ONLY AFTER IT HAS EXITED (SIGTERM, then SIGKILL after a grace period), so nothing of it can still be writing into the user's Codex home when the caller goes on, for example a test that removes that directory next. */
+async function stopChild(child: ReturnType<typeof spawn>, graceMs = 2000, capMs = 8000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>(resolve => { child.once('exit', () => resolve()); child.once('error', () => resolve()); });
+  child.kill('SIGTERM'); const hard = setTimeout(() => child.kill('SIGKILL'), graceMs); const cap = new Promise<void>(resolve => setTimeout(resolve, capMs).unref());
+  try { await Promise.race([exited, cap]); } finally { clearTimeout(hard); }
 }
 export async function listCodexHooks(projectDir: string, timeoutMs = 8000): Promise<CodexHook[]> {
   return withCodex(timeoutMs, async call => { const reply = await call('hooks/list', { cwds: [path.resolve(projectDir)] }); if (reply.error) throw new Error(reply.error.message ?? 'hooks/list failed'); return (reply.result?.data?.[0]?.hooks ?? []) as CodexHook[]; });

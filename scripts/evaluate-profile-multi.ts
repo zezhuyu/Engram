@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Vault } from '../packages/core/vault.js';
 import { createProviderFromConfig } from '../packages/models/factory.js';
-import { IntelligenceEngine, PROFILE_MAX_INSIGHTS } from '../packages/intelligence/index.js';
+import { IntelligenceEngine, PROFILE_MAX_INSIGHTS, type JobTelemetry } from '../packages/intelligence/index.js';
 import { inputPath } from './lib/suite.js';
 
 /**
@@ -25,11 +25,14 @@ for (const item of corpus.cases) {
     const config = await vault.config(); config.model.critic = false; await fs.writeFile(path.join(root, 'mdb.yaml'), (await import('yaml')).default.stringify(config));
     const scope = { type: 'workspace' as const, workspaceId: 'orion' };
     const source = await vault.put({ scope, kind: 'observation', title: `[SYNTHETIC EVAL] ${item.id}`, body: item.text, metadata: { speaker: 'user', evidenceClass: 'user_authored', eventType: 'user.message', evaluationCase: item.id } });
-    const engine = new IntelligenceEngine(vault, provider); let calls = 0; const wrapped = { ...provider, id: provider.id, locality: provider.locality, generate: (...a: Parameters<typeof provider.generate>) => { calls++; return provider.generate(...a); } };
-    const timed = new IntelligenceEngine(vault, wrapped); void engine;
+    const timed = new IntelligenceEngine(vault, provider);
+    const batches: Array<{ batch: number; status: string; telemetry?: JobTelemetry }> = [];
     const afterJobs: number[] = [];
     for (let job = 1; job <= 2; job++) {
-      await timed.enqueue('profile', { scope, objectIds: [source.id], instruction: `job ${job}` }); await timed.run({ job: 'profile', limit: 1 });
+      const queued = await timed.enqueue('profile', { scope, objectIds: [source.id], instruction: `job ${job}` });
+      const [finished] = await timed.run({ job: 'profile', jobId: queued.id, limit: 1 });
+      if (!finished) throw new Error(`Evaluation batch ${job} did not execute`);
+      batches.push({ batch: job, status: finished.status, telemetry: finished.telemetry });
       const mine = (await timed.proposals()).filter(p => p.input.kind === 'user_insight' && p.status !== 'rejected' && p.input.evidence?.some(e => e.uri === source.uri));
       afterJobs.push(gold(mine.map(p => `${p.input.title} ${p.input.body}`.toLowerCase()), item).matchedGold);
     }
@@ -37,7 +40,7 @@ for (const item of corpus.cases) {
     const claims = proposals.map(p => `${p.input.title} ${p.input.body}`.toLowerCase());
     const grounded = proposals.filter(p => p.input.evidence!.every(e => typeof e.span === 'string' && item.text.includes(e.span))).length;
     const result = gold(claims, item);
-    rows.push({ id: item.id, goldCount: item.gold.length, proposals: claims.length, truePositive: result.matchedGold, falsePositive: result.falsePositive, forbidden: result.forbidden, afterOneJob: afterJobs[0], afterTwoJobs: afterJobs[1], grounded, allPending: proposals.every(p => p.status === 'pending'), modelCalls: calls, claims });
+    rows.push({ id: item.id, goldCount: item.gold.length, proposals: claims.length, truePositive: result.matchedGold, falsePositive: result.falsePositive, forbidden: result.forbidden, afterOneJob: afterJobs[0], afterTwoJobs: afterJobs[1], grounded, allPending: proposals.every(p => p.status === 'pending'), modelCalls: batches.reduce((sum, b) => sum + (b.telemetry?.modelCalls ?? 0), 0), retries: batches.reduce((sum, b) => sum + (b.telemetry?.retries ?? 0), 0), tokens: { input: batches.reduce((sum, b) => sum + (b.telemetry?.tokens?.input ?? 0), 0), output: batches.reduce((sum, b) => sum + (b.telemetry?.tokens?.output ?? 0), 0), reported: batches.some(b => b.telemetry?.tokens?.reported === true) }, batches, claims });
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 function gold(claims: string[], item: Case) {

@@ -6,11 +6,11 @@ import { waitForDrainIdle } from '../../packages/memory/capture.js';
 
 type Cleanup = { after(fn: () => void | Promise<void>): void };
 /** Destructive tests only ever touch directories created here under the OS temp dir. */
-export async function disposableVault(t: Cleanup, options: { sqlite?: boolean; prefix?: string } = {}): Promise<{ root: string; vault: Vault }> {
+export async function disposableVault(t: Cleanup, options: { sqlite?: boolean; prefix?: string; /** injected clock for the vault's timestamps */ now?: () => Date } = {}): Promise<{ root: string; vault: Vault }> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), options.prefix ?? 'engram-acid-'));
   // a hook may have started a detached drain that is still writing: removing the vault under it is the race this wait closes
   t.after(async () => { assertDisposable(root); await waitForDrainIdle(root); await fs.rm(root, { recursive: true, force: true }); });
-  const vault = new Vault(root); await vault.init({ sqlite: options.sqlite ?? false });
+  const vault = options.now ? new Vault(root, undefined, { now: options.now }) : new Vault(root); await vault.init({ sqlite: options.sqlite ?? false });
   return { root, vault };
 }
 export function assertDisposable(root: string): void {

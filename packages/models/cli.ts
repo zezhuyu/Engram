@@ -41,13 +41,15 @@ export class CliAgentProvider implements ModelProvider {
     if (call.signal?.aborted) throw new CancelledError();
     const prompt = messages.map(m => `[${m.role.toUpperCase()}]\n${m.content}`).join('\n\n') + '\n\nRespond now with the single JSON object only.';
     if (estimateTokens(prompt) > this.options.maxInputTokens) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Input exceeds the configured model token budget');
-    let last: ProviderError | undefined;
+    let last: ProviderError | undefined; let launched = 0; // agent CLIs report no token counts; the number of launches is still real accounting
+    try {
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt++) {
       if (attempt > 0) await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, 1000 * 2 ** (attempt - 1)); call.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new CancelledError()); }, { once: true }); });
-      try { return await this.once(prompt, call.signal); }
+      launched++; try { return await this.once(prompt, call.signal); }
       catch (error) { if (!(error instanceof ProviderError) || !error.retryable) throw error; last = error; }
     }
     throw new ProviderError(`${last?.message ?? 'Agent CLI failed'} (retries exhausted)`, false);
+    } finally { call.onUsage?.({ retries: Math.max(0, launched - 1) }); }
   }
 
   private async once(prompt: string, signal?: AbortSignal): Promise<string> {

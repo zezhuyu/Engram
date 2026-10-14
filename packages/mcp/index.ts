@@ -237,8 +237,9 @@ function listen(server: ReturnType<typeof createServer>, port: number, host: str
 
 async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Tool[], env: NodeJS.ProcessEnv, legacyActor: ActorContext): Promise<void> {
   const token = env.MDB_MCP_HTTP_TOKEN;
+  const oauthMetadata = oauthResourceMetadata(env);
   if (token && Buffer.byteLength(token) < 32) throw new Error('MDB_MCP_HTTP_TOKEN must have at least 32 bytes');
-  if (!token && !(await hasHttpCredentials(root))) throw new Error('HTTP transport requires a scoped credential (mdb credential create) or MDB_MCP_HTTP_TOKEN with at least 32 bytes');
+  if (!token && !oauthMetadata && !(await hasHttpCredentials(root))) throw new Error('HTTP transport requires a scoped credential, OAuth resource validation, or MDB_MCP_HTTP_TOKEN with at least 32 bytes');
   const host = env.MDB_MCP_HTTP_HOST ?? '127.0.0.1';
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
     // Opt-in (MDB_TRANSPORT_TRUST=tailscale): plain HTTP on 0.0.0.0 or a tailnet address, but every connection is then limited to loopback and tailnet peers.
@@ -247,7 +248,6 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   }
   const port = env.MDB_MCP_HTTP_PORT === undefined ? 3333 : Number(env.MDB_MCP_HTTP_PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('MDB_MCP_HTTP_PORT must be an integer from 0 to 65535');
-  const oauthMetadata = oauthResourceMetadata(env);
   const resource = oauthMetadata ? new URL(oauthMetadata.resource) : undefined;
   const protectedResourcePath = resource && resource.pathname !== '/' ? `/.well-known/oauth-protected-resource${resource.pathname}` : '/.well-known/oauth-protected-resource';
   const sessions = new Map<string, { initialized: boolean; expires: number; authId: string; protocolVersion: string; defaultWorkspace?: string }>();

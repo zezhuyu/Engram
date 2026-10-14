@@ -28,7 +28,7 @@ async function pki(dir: string) {
 async function backend(t: Cleanup) {
   const { root } = await disposableVault(t); const owner = new Engram(root); await owner.createWorkspace('proj');
   const cred = await createHttpCredential(owner.vault, 'agent-tls', ['workspace:proj:read', 'workspace:proj:write']); await owner.vault.grant('proj', 'agent-tls', ['read', 'write']);
-  const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: '0' } });
+  const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_TOOLSET: 'remote-web', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: '0' } });
   let err = ''; const url = await new Promise<string>((res, rej) => { child.stderr.setEncoding('utf8'); child.stderr.on('data', (c: string) => { err += c; const m = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(err); if (m) res(m[1]!); }); child.once('exit', c => rej(new Error(`exit ${c} ${err}`))); });
   t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(r => child.once('exit', () => r())); } });
   return { token: cred.token, port: Number(new URL(url).port) };
@@ -58,6 +58,14 @@ test('over HTTPS the client accepts only a valid, trusted, correctly named certi
   const real = await backend(t);
   const good = await terminator(t, dir, 'good', real.port);
   const accepted = await client(`https://localhost:${good.port}/mcp`, real.token, ca); assert.equal(accepted.ok, true, JSON.stringify(accepted)); assert.ok(good.seen.withAuthorization > 0, 'a valid chain and name: the request goes through');
+  const probeEnv: NodeJS.ProcessEnv = { ...process.env, NODE_EXTRA_CA_CERTS: ca, ENGRAM_PROBE_URL: `https://localhost:${good.port}/mcp`, ENGRAM_PROBE_TOKEN: real.token, ENGRAM_PROBE_SCOPE: JSON.stringify({ type: 'workspace', workspaceId: 'proj' }) };
+  delete probeEnv.ENGRAM_PROBE_REPORT; delete probeEnv.ENGRAM_PROBE_OBJECT_ID; delete probeEnv.NODE_TLS_REJECT_UNAUTHORIZED;
+  const probe = JSON.parse(await runNode([resolve('scripts/verify-hosted-mcp.mjs')], probeEnv));
+  assert.equal(probe.status, 'PASS'); assert.equal(probe.checks.length, 5);
+  assert.equal(probe.hostedChatGPT, 'NOT_RUN'); assert.equal(probe.hostedClaudeAI, 'NOT_RUN'); assert.equal(probe.writes, 'NOT_RUN');
+  assert.doesNotMatch(JSON.stringify(probe), new RegExp(real.token));
+  const badProbe = JSON.parse(await runNode([resolve('scripts/verify-hosted-mcp.mjs')], { ...probeEnv, ENGRAM_PROBE_URL: `https://127.0.0.1:${good.port}/mcp` }));
+  assert.equal(badProbe.status, 'FAIL'); assert.equal(badProbe.checks.length, 0, 'TLS name validation fails before authenticated HTTP');
   const before = good.seen.withAuthorization;
   const untrusted = await client(`https://localhost:${good.port}/mcp`, real.token); assert.equal(untrusted.ok, false, 'a private CA the client does not trust'); assert.equal(good.seen.withAuthorization, before, 'handshake failed before any credential was sent');
   const wrongHost = await client(`https://127.0.0.1:${good.port}/mcp`, real.token, ca); assert.equal(wrongHost.ok, false, 'trusted CA but the address is not in the certificate'); assert.equal(good.seen.withAuthorization, before);

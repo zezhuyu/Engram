@@ -47,12 +47,13 @@ export async function packageMacApps(destination, backend) {
       const name = `Engram ${role === 'client' ? 'Client' : 'Server'}`;
       const app = join(output, `${name}.app`);
       const contents = join(app, 'Contents');
+      await rm(app, { recursive: true, force: true });
       await mkdir(join(contents, 'MacOS'), { recursive: true });
       await mkdir(join(contents, 'Resources'), { recursive: true });
       await cp(executable, join(contents, 'MacOS/Engram'));
       await cp(icns, join(contents, 'Resources/Engram.icns'));
       await cp(join(root, 'macos/assets/menu_bar.png'), join(contents, 'Resources/menu_bar.png'));
-      await cp(bundle, join(contents, 'Resources/backend'), { recursive: true });
+      await cp(bundle, join(contents, 'Resources/backend'), { recursive: true, verbatimSymlinks: true });
       await writeFile(join(contents, 'MacOS/engram-worker'), workerLauncher(role), { mode: 0o755 });
       const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.engram.${role}</string><key>CFBundleName</key><string>${name}</string><key>CFBundleExecutable</key><string>Engram</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>${metadata.version}</string><key>CFBundleShortVersionString</key><string>${metadata.version}</string><key>CFBundleIconFile</key><string>Engram.icns</string><key>LSUIElement</key><true/><key>NSHighResolutionCapable</key><true/><key>LSMinimumSystemVersion</key><string>13.0</string><key>EngramRole</key><string>${role}</string></dict></plist>\n`;
       await writeFile(join(contents, 'Info.plist'), plist);

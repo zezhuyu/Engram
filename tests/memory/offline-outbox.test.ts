@@ -23,6 +23,7 @@ type Cleanup = { after(fn: () => void | Promise<void>): void };
 const MCP = resolve('bin/mdb-mcp.js');
 const freePort = () => new Promise<number>(res => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as { port: number }).port; s.close(() => res(p)); }); });
 async function world(t: Cleanup) {
+  let stopProxy: (() => Promise<void>) | undefined; t.after(() => stopProxy?.()); // stop cache writers before either directory is removed
   let stopServer: (() => Promise<void>) | undefined; t.after(() => stopServer?.()); // registered before the vault's cleanup: the server must be gone before its directory is removed
   const { root } = await disposableVault(t); const owner = new Engram(root); await owner.createWorkspace('proj'); await owner.createWorkspace('other');
   const cred = await createHttpCredential(owner.vault, 'agent-o', ['workspace:proj:read', 'workspace:proj:write']); await owner.vault.grant('proj', 'agent-o', ['read', 'write']);
@@ -35,8 +36,8 @@ async function world(t: Cleanup) {
   // an in-process proxy wired to pipes, exactly as an agent host would talk to it over stdio
   const input = new PassThrough(), output = new PassThrough(); const pending = new Map<number, (m: any) => void>(); let nextId = 1;
   output.setEncoding('utf8'); let buffer = ''; output.on('data', (chunk: string) => { buffer += chunk; let i; while ((i = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, i); buffer = buffer.slice(i + 1); const m = JSON.parse(line); pending.get(m.id)?.(m); } });
-  const done = runMcpProxy({ url, token: cred.token, workspaceId: 'proj', outbox, input, output, timeoutMs: 2500, drainIntervalMs: 60_000 });
-  t.after(async () => { input.end(); await done.catch(() => undefined); });
+  const done = runMcpProxy({ url, token: cred.token, workspaceId: 'proj', outbox, input, output, timeoutMs: 2500, drainIntervalMs: 60_000, autoReconnect: false }); // watcher behavior has its own process-lifecycle suite
+  stopProxy = async () => { input.end(); await done.catch(() => undefined); };
   const rpc = (method: string, params?: unknown): Promise<any> => new Promise(res => { const id = nextId++; pending.set(id, res); input.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) })}\n`); });
   const call = async (name: string, args: Record<string, unknown>) => { const reply = await rpc('tools/call', { name, arguments: args }); const text = reply.result?.content?.[0]?.text as string | undefined; return { reply, value: text ? JSON.parse(text) : undefined, isError: !!reply.result?.isError }; };
   const task = (taskId: string, title: string, status = 'open', extra: Record<string, unknown> = {}) => call('engram_task_upsert', { taskId, title, status, ...extra });

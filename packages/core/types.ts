@@ -27,11 +27,13 @@ export interface CommitJournalStore { initializeJournal(): Promise<void>; readCo
 export interface SearchIndexAdapter { capabilities(): Record<string, boolean>; query(input: SearchInput, actor: ActorContext): Promise<SearchResult>; rebuild(scope?: Scope): Promise<void>; health(): Promise<Record<string, unknown>> }
 export interface EmbeddingProvider { modelId: string; dimensions: number; locality?: 'local' | 'remote'; embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]> }
 export interface VectorIndexAdapter { query(vector: number[], actor: ActorContext, scopes: Scope[]): Promise<SearchHit[]> }
-export interface ModelConfig { provider: string | null; allowNetwork: boolean; baseUrl?: string; modelName?: string; apiKeyEnv?: string; timeoutMs?: number; maxRetries?: number; maxInputTokens?: number; maxOutputTokens?: number; allowPrivateContentToRemote?: boolean; critic?: boolean; command?: string; locality?: 'local' | 'remote' }
+export interface ModelConfig { provider: string | null; allowNetwork: boolean; baseUrl?: string; modelName?: string; apiKeyEnv?: string; timeoutMs?: number; maxRetries?: number; maxInputTokens?: number; maxOutputTokens?: number; allowPrivateContentToRemote?: boolean; critic?: boolean; /** most provider calls (generate, schema repair, critic) one profile batch may make; default 5, 1..50 */ maxCallsPerProfileBatch?: number; command?: string; locality?: 'local' | 'remote' }
 /** Dreaming is off by default; deep and strategic modes are separate opt-ins. All limits are per run unless stated. */
 export interface DreamConfig { enabled: boolean; maxCandidates: number; /** queue micro/strategic/deep dreams automatically when knowledge changes (default true when dreaming is enabled) */ eventDriven?: boolean; modes?: Array<'micro' | 'deep' | 'strategic'>; maxProposalsPerRun?: number; maxRunsPerDay?: number; maxDurationMs?: number; deepThreshold?: number; autoAccept?: boolean; quietHours?: { startHour: number; endHour: number } }
 export interface ModelProposal { kind: string; title: string; body: string; evidence: Evidence[]; status?: string; metadata?: Record<string, unknown> }
-export interface ModelCallOptions { signal?: AbortSignal; maxOutputTokens?: number }
+/** What a provider knows about the cost of ONE call: token counts when the endpoint reports them (absent for CLI agents), and the extra requests it made itself (HTTP retries, a fallback without JSON mode). */
+export interface ModelUsage { inputTokens?: number; outputTokens?: number; retries?: number }
+export interface ModelCallOptions { signal?: AbortSignal; maxOutputTokens?: number; /** called exactly once per provider call, also when the call failed */ onUsage?: (usage: ModelUsage) => void }
 export interface ModelRequest { job: string; documents: Document[]; goals: string; instruction: string }
 export interface CritiqueRequest { proposal: ModelProposal; evidence: Document[]; instruction: string }
 export interface CriticVerdict { verdict: 'accept' | 'reject'; rationale: string; flags?: string[] }

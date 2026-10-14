@@ -37,7 +37,8 @@ export class MicroTrigger {
     const relevant = pending.filter(e => { const entry = manifest.entries.get(e.objectId); return entry && config.micro.kinds.includes(entry.kind) && entry.status !== 'deleted' && entry.status !== 'tombstone'; });
     const to = pending.at(-1)!.sequence, from = cursors.micro;
     if (!relevant.length) { await this.store.advanceCursors(c => { c.micro = to; }); return 'no relevant change'; }
-    const ids = { scheduleId: 'micro', trigger: 'micro' as const, fromSequence: from, toSequence: to };
+    // every event of this tick carries the tick's own clock: the daily cap below compares these timestamps with `now`, so both must come from the same clock (they only differ when `now` is injected)
+    const ids = { scheduleId: 'micro', trigger: 'micro' as const, fromSequence: from, toSequence: to, at: now.toISOString() };
     const today = localParts(now, config.timezone).date;
     const ranToday = (await this.store.events(500)).filter(e => e.type === 'dream_started' && e.trigger === 'micro' && localParts(new Date(e.at), config.timezone).date === today).length;
     const skip = async (reason: string): Promise<string> => { const last = (await this.store.events(1))[0]; if (!(last?.type === 'dream_skipped' && last.reason === reason && last.trigger === 'micro')) await this.store.appendEvent({ type: 'dream_skipped', reason, ...ids }); return reason; };

@@ -65,9 +65,30 @@ test('poison cycle: after the configured failed attempts it is dead-lettered and
   recordCase({ suite: 'adaptive', name: 'worker-dead-letter', status: 'PASS', detail: { outcomes } });
 });
 
+/** A settable clock: the vault stamps its events with it and `later(n)` moves it n minutes past the base, returning that instant for the tick. */
+const microClock = (baseIso: string) => { const base = Date.parse(baseIso); let at = base; return { now: () => new Date(at), later: (minutes: number) => { at = base + minutes * 60_000; return new Date(at); } }; };
+const microWorld = async (t: Parameters<typeof world>[0], clock: ReturnType<typeof microClock>) => world(t, { now: clock.now, config: { timezone: NY, micro: { enabled: true, debounceMinutes: 10, maxPerDay: 1, kinds: ['wiki_page'] } } });
+const wikiPage = (w: Awaited<ReturnType<typeof world>>, title: string) => w.vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title, body: `${title}: Python services expose JSON over HTTP.`, tags: ['domain:python-api', 'api', 'json'] });
+
+test('micro Dream daily cap follows the LOCAL calendar day exactly: it holds until New York midnight, rolls over at 00:00 sharp, and a run just after midnight is a new day, wherever the suite happens to run', async t => {
+  // 23:30 NY: the first run (23:41) uses day 1's only slot; the cap holds at 23:59 and is released at 00:00
+  const evening = microClock('2026-03-05T04:30:00Z'); const a = await microWorld(t, evening); assert.equal(await a.ai.microTick(evening.later(0)), 'initialized');
+  await wikiPage(a, 'First page'); assert.equal(await a.ai.microTick(evening.later(11)), 'completed', '23:41 New York, first run of day 1');
+  await wikiPage(a, 'Second page'); assert.equal(await a.ai.microTick(evening.later(29)), 'DAILY_CAP', '23:59 New York: still day 1');
+  assert.equal(await a.ai.microTick(evening.later(30)), 'completed', '00:00 New York: day 2 has its own slot, the deferred change runs');
+  await wikiPage(a, 'Third page'); assert.equal(await a.ai.microTick(evening.later(45)), 'DAILY_CAP', '00:15 New York: day 2 is now used up');
+  // 23:58 NY: the change was made on day 1 but the run happens on day 2: the cap counts the day of the RUN, so a second run on day 2 is refused
+  const late = microClock('2026-03-05T04:58:00Z'); const b = await microWorld(t, late); assert.equal(await b.ai.microTick(late.later(0)), 'initialized');
+  await wikiPage(b, 'Late page'); assert.equal(await b.ai.microTick(late.later(11)), 'completed', '00:09 New York (day 2)');
+  await wikiPage(b, 'Later page'); assert.equal(await b.ai.microTick(late.later(25)), 'DAILY_CAP', '00:23 New York: the same day 2');
+  const events = (await b.ai.events(50)).filter(e => e.type === 'dream_started' && e.trigger === 'micro'); assert.equal(events.length, 1); assert.equal(events[0]!.at, '2026-03-05T05:09:00.000Z', 'the run is stamped with the tick clock, not the wall clock');
+  recordCase({ suite: 'adaptive', name: 'micro-cap-local-midnight', status: 'PASS' });
+});
+
 test('micro Dream trigger: opt-in, debounced, one bounded job per accepted-change range, no recursion, daily cap, no model means a logged skip', async t => {
-  const w = await world(t, { config: { timezone: NY, micro: { enabled: true, debounceMinutes: 10, maxPerDay: 1, kinds: ['wiki_page', 'user_insight'] } } });
-  const later = (min: number) => new Date(Date.now() + min * 60_000);
+  // a fixed clock (12:00 New York, far from any midnight): the result no longer depends on when the suite runs
+  const clock = microClock('2026-03-04T17:00:00Z'); const w = await world(t, { now: clock.now, config: { timezone: NY, micro: { enabled: true, debounceMinutes: 10, maxPerDay: 1, kinds: ['wiki_page', 'user_insight'] } } });
+  const later = clock.later;
   assert.equal(await w.ai.microTick(later(0)), 'initialized', 'enabling never backfills history');
   await w.vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Python JSON APIs', body: 'Python services expose JSON over HTTP using FastAPI.', tags: ['domain:python-api', 'api', 'json', 'provides:json'] });
   await w.vault.put({ scope: { type: 'workspace', workspaceId: 'alpha' }, kind: 'wiki_page', title: 'Alpha dashboards', body: 'Browser dashboards consume JSON through fetch and render widgets.', tags: ['domain:js-frontend', 'dashboard', 'consumes:json'] });

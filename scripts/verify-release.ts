@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { environment, gitCommit, type SuiteReport } from './lib/suite.js';
 import { inputPath } from './lib/suite.js';
-import { classifyRelease, collectProductionEvidence, type PhysicalHostsReport } from './lib/release-policy.js';
+import { classifyRelease, collectProductionEvidence, modelEvidenceMatches, type PhysicalHostsReport } from './lib/release-policy.js';
 
 /**
  * Release aggregator. The decision is computed from machine-readable reports, never from prose. It does NOT run the suites:
@@ -28,7 +28,9 @@ const adaptiveGate = (id: MandatoryGate['id'], names: string[], detail: string):
 const dreamCases = new Map((suites.dream?.caseDetails ?? []).map(c => [c.name.replace(/^dream\//, ''), c.status]));
 const schedulerMechanics = await read<{ osServiceInstalled?: boolean; unattendedCompletedCycle?: boolean; unattendedDueRun?: boolean; restartSafe?: boolean; notes?: string[] }>('verification/dream/scheduler-latest.json');
 /** The launchd verification is the only source of OS-service and model-backed evidence; it counts only when its own checks all passed. */
-const launchdRun = await read<{ status?: string; id?: string; checks?: Array<{ pass: boolean }> }>('verification/dream/launchd-e2e-latest.json'); const launchdPass = launchdRun?.status === 'PASS' && !!launchdRun.checks?.length && launchdRun.checks.every(c => c.pass);
+const launchdRun = await read<{ status?: string; id?: string; checks?: Array<{ pass: boolean }>; evidenceSource?: { files?: Record<string, string> } }>('verification/dream/launchd-e2e-latest.json');
+const schedulerSources = ['packages/adaptive/worker.ts', 'packages/adaptive/cycle.ts', 'packages/adaptive/stages.ts', 'packages/intelligence/index.ts'];
+const launchdPass = launchdRun?.status === 'PASS' && !!launchdRun.checks?.length && launchdRun.checks.every(c => c.pass) && modelEvidenceMatches(launchdRun, Object.fromEntries(schedulerSources.map(source => [source, createHash('sha256').update(readFileSync(source)).digest('hex')])));
 const schedulerRecord = { ...schedulerMechanics, osServiceInstalled: launchdPass, unattendedCompletedCycle: launchdPass, unattendedDueRun: !!schedulerMechanics?.unattendedDueRun || launchdPass, restartSafe: !!schedulerMechanics?.restartSafe && (launchdPass || !launchdRun) };
 const learningReport = await read<{ id?: string; status?: string; precisionAtK?: { baselineMean: number; learnedMean: number; gainMean: number }; limitations?: string[] }>('verification/dream/learning-latest.json');
 const SCHEDULER_CASES = ['worker-daily-once', 'worker-two-instances-restart', 'worker-errors-and-abort', 'worker-no-provider-blocked', 'worker-dead-letter', 'micro-trigger', 'micro-disabled-no-provider', 'service-print-and-cli', 'duplicate-schedulers', 'dst-spring-fall', 'crash-at-every-checkpoint', 'micro-crash-control', 'micro-two-workers', 'service-unit-launchd-lint', 'service-unit-systemd-shape'];
@@ -53,6 +55,18 @@ const containerPass = !!containerTier?.scenarios?.length && containerTier.scenar
 /** REMOTE_CAPTURE passes only with real multi-host evidence (verification/memory/physical-hosts.json, produced by scripts/xhost/physical.mjs merge) on top of the container tier. Containers alone never pass it. */
 const remoteGate = (g: MandatoryGate): MandatoryGate => g.id !== 'REMOTE_CAPTURE' ? g : physical?.physicalHostVerified === true && (physical.hosts?.length ?? 0) >= 2 && containerPass ? { ...g, status: 'PASS', evidence: [...g.evidence, 'verification/memory/physical-hosts.json'], detail: `${g.detail} Physical multi-host evidence verified across ${physical.hosts!.length} distinct non-container machines (scripts/xhost/physical.mjs); transport: ${physical.transport ?? 'https'}${physical.tlsVerified === false ? ' (TLS NOT tested: Tailscale/WireGuard private network, operator opt-in)' : ''}.` } : { ...g, status: g.status === 'FAIL' ? 'FAIL' : 'INCOMPLETE', detail: `${g.detail} Physical multi-host evidence: ${physical ? `INCOMPLETE (${(physical.problems ?? []).slice(0, 3).join('; ') || 'not verified'})` : 'NOT_RUN (no verification/memory/physical-hosts.json; run scripts/xhost/physical.mjs on separate machines)'}.` };
 const allMandatory: MandatoryGate[] = [...mandatory.gates.map(remoteGate), ...computedGates];
+// Historical model scores remain evidence of that run, not of changed model-call code.
+// Require source-bound evaluation evidence before preserving a model gate PASS.
+for (const gate of allMandatory.filter(g => ['PREFERENCES', 'DREAM_ENGINE'].includes(g.id) && g.status === 'PASS')) {
+  const file = gate.id === 'PREFERENCES' ? 'verification/profile/real-model-evaluation.json' : 'verification/dream/real-model-evaluation.json';
+  const evaluation = await read<{ status?: string; evidenceSource?: { files?: Record<string, string> } }>(file);
+  const required = ['packages/intelligence/index.ts', 'packages/models/openai.ts', 'packages/models/cli.ts'];
+  const matches = modelEvidenceMatches(evaluation, Object.fromEntries(required.map(source => [source, createHash('sha256').update(readFileSync(source)).digest('hex')])));
+  if (!matches) {
+    gate.status = 'INCOMPLETE';
+    gate.detail = `Historical model evaluation retained, but ${file} does not bind a passing run to the current intelligence/provider source hashes. Current-checkout model quality NOT_RUN. Historical result: ${gate.detail}`;
+  }
+}
 const fromSuite = (name: string, filter?: (n: string) => boolean): { status: Status; cases: number } => { const r = suites[name]; if (!r) return { status: 'NOT_RUN', cases: 0 }; const cases = r.caseDetails.filter(c => !filter || filter(c.name)); const failed = cases.some(c => c.status === 'FAIL'); return { status: r.status === 'FAIL' || failed ? 'FAIL' : cases.length || r.counts.total ? r.status : 'NOT_RUN', cases: cases.length }; };
 const baseline = spawnSync('npm', ['run', '--silent', 'lint'], { encoding: 'utf8' });
 const currentCommit = gitCommit();

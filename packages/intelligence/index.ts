@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { MDBError, type Document, type ModelProposal, type ModelProvider, type PutInput, type Scope, type VaultConfig } from '../core/types.js';
+import { MDBError, type Document, type ModelCallOptions, type ModelProposal, type ModelProvider, type PutInput, type Scope, type VaultConfig } from '../core/types.js';
 import { ProviderError } from '../models/errors.js';
 import { ABSTENTION_KIND, parseModelProposal, parseVerdict } from '../models/schema.js';
 import { MODEL_DEFAULTS } from '../models/factory.js';
@@ -23,11 +23,27 @@ import type { SnapshotView } from '../adaptive/snapshot.js';
 import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js';
 
 export type JobKind = 'index' | 'profile' | 'wiki' | 'memory' | 'reflect' | 'dream';
-export interface Job { id: string; kind: JobKind; /** retrieval trace of a dream run, kept for audit */ trace?: unknown; input: { scope?: Scope; objectIds?: string[]; instruction?: string; goals?: string; mode?: 'micro' | 'deep' | 'strategic'; incremental?: boolean; background?: boolean; /** adaptive daily cycle: read only the sealed snapshot (exact revisions at or before the watermark) */ snapshot?: SnapshotRef; /** debounced micro-Dream trigger: the journal range that caused this job (makes the job idempotent per range; never shown to a model) */ trigger?: 'micro'; range?: [number, number] }; status: 'pending' | 'running' | 'complete' | 'blocked' | 'dead_letter'; /** model-call accounting for the last attempt */ telemetry?: JobTelemetry; attempts: number; nextAt: number; leaseUntil?: number; result?: string; error?: string }
-export interface JobTelemetry { modelCalls: number; malformed: number; repairs: number; outcome: 'pending' | 'proposed' | 'abstained' | 'malformed' | 'partial'; /** profile: insights proposed from this batch, whether the model said nothing more remained, repeats of known claims dropped, why a later call was cut short */ proposals?: number; complete?: boolean; duplicates?: number; partialReason?: string }
+export interface Job { id: string; kind: JobKind; /** retrieval trace of a dream run, kept for audit */ trace?: unknown; input: { scope?: Scope; objectIds?: string[]; instruction?: string; goals?: string; /** the daily cycle's remaining model calls: caps the batch budget below the configured one */ callBudget?: number; mode?: 'micro' | 'deep' | 'strategic'; incremental?: boolean; background?: boolean; /** adaptive daily cycle: read only the sealed snapshot (exact revisions at or before the watermark) */ snapshot?: SnapshotRef; /** debounced micro-Dream trigger: the journal range that caused this job (makes the job idempotent per range; never shown to a model) */ trigger?: 'micro'; range?: [number, number] }; status: 'pending' | 'running' | 'complete' | 'blocked' | 'dead_letter'; /** model-call accounting for the last attempt */ telemetry?: JobTelemetry; attempts: number; nextAt: number; leaseUntil?: number; result?: string; error?: string }
+export type TerminalState = 'proposed' | 'abstained' | 'partial' | 'budget_exhausted' | 'malformed' | 'provider_error' | 'cancelled' | 'blocked';
+export interface JobTelemetry { /** every provider invocation of this attempt (generate + schema repair + critic), counted as it happens */ modelCalls: number; malformed: number; repairs: number; outcome: 'pending' | 'proposed' | 'abstained' | 'malformed' | 'partial'; /** the calls by kind */ calls?: { generate: number; repair: number; critic: number }; /** extra requests the providers made themselves (HTTP retries, JSON-mode fallback, CLI relaunches) */ retries?: number; /** token counts as reported by the endpoint; reported=false when the provider reports none (agent CLIs) */ tokens?: { input: number; output: number; reported: boolean }; /** profile batches: the call budget and whether it ran out */ budget?: { max: number; exhausted: boolean }; /** how this attempt ended; anything but proposed/abstained is an incomplete batch (the evidence cursor did not move) */ terminal?: TerminalState; /** profile: insights proposed from this batch, whether the model said nothing more remained, repeats of known claims dropped, why a later call was cut short */ proposals?: number; complete?: boolean; duplicates?: number; partialReason?: string }
 const PROFILE_MAX_REPAIRS = 2;
 /** Independent insights one evidence batch may produce (bounded output: each is a separate strict call). */
 export const PROFILE_MAX_INSIGHTS = 4;
+/** Default and bounds of the per-batch provider-call budget (model.maxCallsPerProfileBatch). */
+export const PROFILE_CALL_BUDGET = { default: 5, min: 1, max: 50 };
+export function terminalFor(error: unknown): TerminalState { if (error instanceof BudgetExhausted) return 'budget_exhausted'; if (error instanceof MDBError) return error.code === 'CANCELLED' ? 'cancelled' : error.code === 'INVALID_MODEL_OUTPUT' ? 'malformed' : error.code === 'CAPABILITY_UNAVAILABLE' ? 'blocked' : 'provider_error'; return 'provider_error'; }
+export function profileCallBudget(value: number | undefined): number { if (value === undefined) return PROFILE_CALL_BUDGET.default; if (!Number.isInteger(value) || value < PROFILE_CALL_BUDGET.min || value > PROFILE_CALL_BUDGET.max) throw new MDBError('INVALID_INPUT', `model.maxCallsPerProfileBatch must be an integer in ${PROFILE_CALL_BUDGET.min}..${PROFILE_CALL_BUDGET.max}`); return value; }
+export class BudgetExhausted extends MDBError { constructor(readonly used: number, readonly max: number) { super('MODEL_BUDGET_EXHAUSTED', `The batch used its ${max} model call(s)`); } }
+/** Counts what actually reaches the provider (never "one per job") and enforces the batch budget BEFORE a call is made. */
+export class CallMeter {
+  constructor(readonly telemetry: JobTelemetry, max?: number) { telemetry.calls = { generate: 0, repair: 0, critic: 0 }; telemetry.retries = 0; telemetry.tokens = { input: 0, output: 0, reported: false }; if (max !== undefined) telemetry.budget = { max, exhausted: false }; }
+  get total(): number { const c = this.telemetry.calls!; return c.generate + c.repair + c.critic; }
+  take(kind: 'generate' | 'repair' | 'critic'): void {
+    const budget = this.telemetry.budget; if (budget && this.total >= budget.max) { budget.exhausted = true; throw new BudgetExhausted(this.total, budget.max); }
+    this.telemetry.calls![kind]++; this.telemetry.modelCalls = this.total;
+  }
+  options(base: ModelCallOptions): ModelCallOptions { return { ...base, onUsage: usage => { const t = this.telemetry; t.retries = (t.retries ?? 0) + (usage.retries ?? 0); if (usage.inputTokens !== undefined || usage.outputTokens !== undefined) { t.tokens!.reported = true; t.tokens!.input += usage.inputTokens ?? 0; t.tokens!.output += usage.outputTokens ?? 0; } } }; }
+}
 const STOP = new Set(['the', 'and', 'that', 'this', 'with', 'for', 'user', 'users', 'are', 'was']);
 const contentKey = (text: string): string => [...new Set(text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2 && !STOP.has(w)))].sort().join(' ');
 /** Exact repeat (same content words, any order or punctuation). Deliberately NOT fuzzy: "prefers detailed feedback" vs "prefers concise feedback" share most words but a correction must never be dropped as a duplicate. */
@@ -199,7 +215,7 @@ export class IntelligenceEngine {
     const unique = new Map([...same, ...keyed].map(e => [e.id, e])); return loadDocuments(this.vault, [...unique.values()]);
   }
   /** Deterministic critic first, then an optional model critic. Either can only reject or flag; approval stays human. */
-  private async critiqueProposal(id: string, signal?: AbortSignal): Promise<Proposal> {
+  private async critiqueProposal(id: string, signal?: AbortSignal, meter?: CallMeter): Promise<Proposal> {
     const state = await this.state(); const proposal = state.proposals.find(item => item.id === id)!;
     if (proposal.critic || proposal.status !== 'pending') return proposal;
     let insightVerdict: 'accept' | 'review_required' = 'accept'; let insightFlags: string[] = []; let insightWhy = '';
@@ -238,11 +254,13 @@ export class IntelligenceEngine {
         if (this.provider.locality === 'remote' && !config.model.allowPrivateContentToRemote && evidence.some(doc => doc.scope.type === 'workspace')) flags = [...flags, 'model_critic_skipped_private'];
         else {
           const budget = config.model.maxInputTokens ?? MODEL_DEFAULTS.maxInputTokens;
-          const verdict = parseVerdict(await this.provider.critique({ proposal: { kind: proposal.input.kind, title: proposal.input.title, body: redacted(proposal.input.body).slice(0, 20000), evidence: proposal.input.evidence ?? [] }, evidence: fitBudget(evidence.map(doc => ({ ...doc, body: redacted(doc.body) })), Math.max(500, budget - 5000)), instruction: 'Evaluate support, novelty and honesty of uncertainty.' }, { signal, maxOutputTokens: Math.min(config.model.maxOutputTokens ?? MODEL_DEFAULTS.maxOutputTokens, 800) }));
+          meter?.take('critic'); // counted before the call; a spent budget skips the critic (the proposal stays pending review, flagged) and ends the batch at the next generation
+          const critiqueOptions = { signal, maxOutputTokens: Math.min(config.model.maxOutputTokens ?? MODEL_DEFAULTS.maxOutputTokens, 800) };
+          const verdict = parseVerdict(await this.provider.critique({ proposal: { kind: proposal.input.kind, title: proposal.input.title, body: redacted(proposal.input.body).slice(0, 20000), evidence: proposal.input.evidence ?? [] }, evidence: fitBudget(evidence.map(doc => ({ ...doc, body: redacted(doc.body) })), Math.max(500, budget - 5000)), instruction: 'Evaluate support, novelty and honesty of uncertainty.' }, meter ? meter.options(critiqueOptions) : critiqueOptions));
           if (verdict.verdict === 'reject') return this.reject(id, verdict.rationale, { verdict: 'reject', rationale: verdict.rationale, by: 'model' }, verdict.flags ?? ['model_rejected']);
           flags = [...flags, ...(verdict.flags ?? [])];
         }
-      } catch (error) { if (error instanceof MDBError && error.code === 'CANCELLED') throw error; flags = [...flags, 'model_critic_unavailable']; }
+      } catch (error) { if (error instanceof MDBError && error.code === 'CANCELLED') throw error; flags = [...flags, error instanceof BudgetExhausted ? 'model_critic_skipped_budget' : 'model_critic_unavailable']; }
     }
     return this.mutate(current => { const item = current.proposals.find(entry => entry.id === id)!; item.critic = record; item.flags = [...new Set(flags)]; return structuredClone(item); });
   }
@@ -279,6 +297,8 @@ export class IntelligenceEngine {
     return judgeDiscovery({ title: input.title, body: input.body, summary: String(m.reasoningSummary ?? ''), mode: m.mode as DreamMode, subtype: m.subtype as never, evidence, existing, nearby, goalRefs: Array.isArray(m.goalRefs) ? m.goalRefs as string[] : [], sourceKeys: (input.evidence ?? []).filter(e => evidence.some(d => d.uri === e.uri)).map(e => `${e.uri.split('/').at(-1)}@${e.revisionId}`) });
   }
   private async executeDream(job: Job, config: VaultConfig, signal?: AbortSignal): Promise<string> {
+    const telemetry: JobTelemetry = job.telemetry = { modelCalls: 0, malformed: 0, repairs: 0, outcome: 'pending' };
+    const meter = new CallMeter(telemetry, Number.isInteger(job.input.callBudget) && job.input.callBudget! >= 1 ? job.input.callBudget : undefined);
     const provider = this.provider!; const mode: DreamMode = job.input.mode ?? 'micro';
     if (!(config.dream.modes ?? ['micro']).includes(mode)) throw new MDBError('CAPABILITY_UNAVAILABLE', `${mode} dreaming is not enabled (dream.modes)`);
     const now = new Date();
@@ -289,7 +309,7 @@ export class IntelligenceEngine {
     const workspaceId = job.input.scope?.type === 'workspace' ? job.input.scope.workspaceId : undefined;
     const snapshotView = job.input.snapshot && this.snapshots ? await this.snapshots(job.input.snapshot) : undefined;
     const pool = (await dreamPool(this.vault, mode === 'micro' && workspaceId ? { workspaceId } : {})).filter(e => !snapshotView || snapshotView.eligible(e.id));
-    const ctx = await planContext(this.vault, pool, budgets, rngFrom(job.id));
+    const ctx = await planContext(this.vault, pool, budgets, rngFrom(job.input.snapshot ? digest({ snapshot: job.input.snapshot, mode, instruction: job.input.instruction }) : job.id));
     const cursorKey = JSON.stringify(job.input.scope ?? 'all'); const cursor = (await this.state()).dreamCursor?.[cursorKey] ?? 0;
     // accepted goals: the user's stated goals that apply here (global, or this workspace)
     const goalEntries = (await readableEntries(this.vault, { kinds: ['user_insight'] })).filter(e => e.cat === 'goal' && e.status === 'accepted').sort(newestFirst).slice(0, 6);
@@ -313,7 +333,7 @@ export class IntelligenceEngine {
     for (const cluster of plan.clusters) {
       if (signal?.aborted) throw new CancelledError();
       if (Date.now() - started > (config.dream.maxDurationMs ?? 600_000)) { plan.trace.stoppedBy = 'duration'; break; }
-      try { proposals.push(await this.dreamCluster(job, mode, cluster, byId, goalDocs, goalText, config, provider, signal)); }
+      try { proposals.push(await this.dreamCluster(job, mode, cluster, byId, goalDocs, goalText, config, provider, meter, signal)); }
       catch (error) { if (error instanceof MDBError && error.code === 'INVALID_MODEL_OUTPUT') plan.trace.skipped.push({ reason: 'invalid_output', detail: error.message.slice(0, 200) }); else throw error; }
     }
     if (plan.clusters.length && !proposals.length && plan.trace.stoppedBy !== 'duration') throw new MDBError('INVALID_MODEL_OUTPUT', `The model produced no valid discovery for ${plan.clusters.length} cluster(s)`);
@@ -321,12 +341,12 @@ export class IntelligenceEngine {
     return proposals[0] ?? `No candidate connections found (${plan.trace.skipped.map(s => s.reason).join(', ') || 'none'})`;
   }
   /** Deep mode: generate sibling candidates from different angles, run each through the same checks as any proposal, keep the best-scoring survivor and record the rest as rejected (never as knowledge). */
-  private async dreamCluster(job: Job, mode: DreamMode, cluster: Cluster, byId: Map<string, ManifestEntry>, goalDocs: Document[], goalText: string, config: VaultConfig, provider: ModelProvider, signal?: AbortSignal): Promise<string> {
-    if (mode !== 'deep') return (await this.dreamCandidate(job, mode, cluster, byId, goalDocs, goalText, config, provider, signal)).id;
+  private async dreamCluster(job: Job, mode: DreamMode, cluster: Cluster, byId: Map<string, ManifestEntry>, goalDocs: Document[], goalText: string, config: VaultConfig, provider: ModelProvider, meter: CallMeter, signal?: AbortSignal): Promise<string> {
+    if (mode !== 'deep') return (await this.dreamCandidate(job, mode, cluster, byId, goalDocs, goalText, config, provider, meter, signal)).id;
     const results: Array<{ id: string; score: number; angle: string }> = []; let lastError: unknown;
     for (const angle of DEEP_ANGLES) {
       if (signal?.aborted) throw new CancelledError();
-      try { const made = await this.dreamCandidate(job, mode, cluster, byId, goalDocs, goalText, config, provider, signal, angle); results.push({ id: made.id, score: made.score, angle: angle.id }); }
+      try { const made = await this.dreamCandidate(job, mode, cluster, byId, goalDocs, goalText, config, provider, meter, signal, angle); results.push({ id: made.id, score: made.score, angle: angle.id }); }
       catch (error) { if (error instanceof MDBError && error.code === 'INVALID_MODEL_OUTPUT') lastError = error; else throw error; }
     }
     if (!results.length) throw lastError ?? new MDBError('INVALID_MODEL_OUTPUT', 'No valid deep candidate');
@@ -337,7 +357,14 @@ export class IntelligenceEngine {
     await this.mutate(current => { const item = current.proposals.find(p => p.id === winner.id)!; item.input.metadata = { ...item.input.metadata, selection: { chosenAngle: winner.angle, score: Number(winner.score.toFixed(3)), candidates: ranked.map(r => ({ angle: r.angle, score: Number(r.score.toFixed(3)), proposalId: r.id, status: current.proposals.find(p => p.id === r.id)?.status })) } }; });
     return winner.id;
   }
-  private async dreamCandidate(job: Job, mode: DreamMode, cluster: Cluster, byId: Map<string, ManifestEntry>, goalDocs: Document[], goalText: string, config: VaultConfig, provider: ModelProvider, signal?: AbortSignal, angle?: (typeof DEEP_ANGLES)[number]): Promise<{ id: string; score: number }> {
+  private async dreamCandidate(job: Job, mode: DreamMode, cluster: Cluster, byId: Map<string, ManifestEntry>, goalDocs: Document[], goalText: string, config: VaultConfig, provider: ModelProvider, meter: CallMeter, signal?: AbortSignal, angle?: (typeof DEEP_ANGLES)[number]): Promise<{ id: string; score: number }> {
+    const resumeKey = job.input.snapshot ? digest({ snapshot: job.input.snapshot, instruction: job.input.instruction, mode, cluster: cluster.ids, angle: angle?.id }) : undefined;
+    const saved = resumeKey && (await this.state()).proposals.find(p => p.input.metadata?.dreamResumeKey === resumeKey);
+    if (saved) {
+      await this.validate(saved.input);
+      await this.critiqueProposal(saved.id, signal, meter);
+      return { id: saved.id, score: Number(saved.input.metadata?.candidateScore ?? 0) };
+    }
     const ordered = [...cluster.goalIds, ...cluster.ids.filter(id => !cluster.goalIds.includes(id))].map(id => byId.get(id)).filter((e): e is ManifestEntry => !!e);
     let documents = await this.load(ordered, job);
     if (documents.length < 2) throw new MDBError('INVALID_MODEL_OUTPUT', 'Cluster objects are no longer readable');
@@ -353,7 +380,8 @@ export class IntelligenceEngine {
     let output!: ModelProposal; let normalized!: Record<string, unknown>; let note = '';
     for (let attempt = 0; ; attempt++) { // deep mode gets one bounded repair; the repaired answer passes the same structural and evidence checks
       try {
-        output = parseModelProposal(await provider.generate({ job: 'dream', documents, goals: redacted(goalText), instruction: instruction + note }, callOptions));
+        meter.take(attempt === 0 ? 'generate' : 'repair');
+        output = parseModelProposal(await provider.generate({ job: 'dream', documents, goals: redacted(goalText), instruction: instruction + note }, meter.options(callOptions)));
         if (output.kind !== 'discovery') throw new MDBError('INVALID_MODEL_OUTPUT', 'Unexpected proposal kind for stage');
         if (output.evidence.some(ref => !supplied.has(`${ref.uri}\0${ref.revisionId}`))) throw new MDBError('INVALID_MODEL_OUTPUT', 'Model referenced evidence outside supplied context');
         normalized = checkDiscovery(mode, output, documents, goalUris); break;
@@ -365,9 +393,9 @@ export class IntelligenceEngine {
     const candidateScore = mode === 'deep' ? scoreCandidate(output, normalized, documents) : { score: 0, components: {} };
     const proposal = await this.propose({
       ...output, scope: { type: 'global', area: 'discoveries' }, status: 'hypothesis',
-      metadata: { ...normalized, dreamSchema: SCHEMA_VERSION, mode, promptVersion: PROMPT_VERSION, modelProvider: provider.id, confidenceMethod: 'model-indicative', job: 'dream', jobId: job.id, visibility: 'user_private', clusterId: cluster.id, hintKinds: cluster.hints.map(h => h.kind), retrieval: cluster.hints.map(h => ({ via: h.via, distance: h.distance })), sourceRefs: output.evidence.filter(e => !goalUris.includes(e.uri)).map(e => ({ uri: e.uri, revisionId: e.revisionId })), relatedGoalRefs: goalUris, goalsFingerprint: digest({ goals: goalText, mode }), ...(angle ? { candidateAngle: angle.id, candidateScore: Number(candidateScore.score.toFixed(3)), candidateComponents: candidateScore.components } : {}) }
+      metadata: { ...normalized, dreamSchema: SCHEMA_VERSION, mode, promptVersion: PROMPT_VERSION, modelProvider: provider.id, confidenceMethod: 'model-indicative', job: 'dream', jobId: job.id, ...(resumeKey ? { dreamResumeKey: resumeKey } : {}), visibility: 'user_private', clusterId: cluster.id, hintKinds: cluster.hints.map(h => h.kind), retrieval: cluster.hints.map(h => ({ via: h.via, distance: h.distance })), sourceRefs: output.evidence.filter(e => !goalUris.includes(e.uri)).map(e => ({ uri: e.uri, revisionId: e.revisionId })), relatedGoalRefs: goalUris, goalsFingerprint: digest({ goals: goalText, mode }), ...(angle ? { candidateAngle: angle.id, candidateScore: Number(candidateScore.score.toFixed(3)), candidateComponents: candidateScore.components } : {}) }
     });
-    await this.critiqueProposal(proposal.id, signal);
+    await this.critiqueProposal(proposal.id, signal, meter);
     const final = (await this.state()).proposals.find(p => p.id === proposal.id)!;
     if (final.status === 'pending' && config.dream.autoAccept && mode === 'micro' && final.critic?.verdict === 'accept' && !final.flags?.length) await this.review(proposal.id, true, 'Auto-accepted by policy as a low-risk micro hypothesis; still a hypothesis, not a fact');
     return { id: proposal.id, score: candidateScore.score };
@@ -380,7 +408,14 @@ export class IntelligenceEngine {
     const label = scope.type === 'workspace' ? scope.workspaceId : 'global'; const all: string[] = []; const pending: string[] = [];
     const entries = pool.filter(e => e.kind === 'user_insight' && e.status === 'accepted').sort(newestFirst).slice(0, 60);
     for (const doc of await loadDocuments(this.vault, entries)) { const owner = typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : 'global'; if ((owner === label || owner === 'global') && doc.metadata.sensitivity !== 'sensitive') all.push(doc.body); }
-    for (const proposal of (await this.state()).proposals) if (proposal.status === 'pending' && proposal.input.kind === 'user_insight' && (proposal.input.metadata?.scopeLabel ?? 'global') === label) { pending.push(proposal.input.body); if (proposal.input.metadata?.sensitivity !== 'sensitive') all.push(proposal.input.body); }
+    const inPool = new Set(entries.map(e => e.id));
+    for (const proposal of (await this.state()).proposals) {
+      if (proposal.input.kind !== 'user_insight' || (proposal.input.metadata?.scopeLabel ?? 'global') !== label) continue;
+      // An approved proposal is knowledge too, even when the job reads a sealed snapshot that was taken before it was approved (the adaptive cycle resuming an unfinished batch): without this the same claim would be proposed again on every resume.
+      let known = proposal.status === 'pending';
+      if (proposal.status === 'approved' && proposal.objectId && !inPool.has(proposal.objectId)) { const doc = await this.vault.get(proposal.objectId).catch(() => undefined); known = doc?.status === 'accepted'; }
+      if (known) { pending.push(proposal.input.body); if (proposal.input.metadata?.sensitivity !== 'sensitive') all.push(proposal.input.body); }
+    }
     return { all: all.slice(-60), pending: pending.slice(-60) };
   }
   private async execute(job: Job, signal?: AbortSignal): Promise<string> {
@@ -389,7 +424,10 @@ export class IntelligenceEngine {
     if (!this.provider) throw new MDBError('CAPABILITY_UNAVAILABLE', 'No model provider configured; semantic maintenance unavailable');
     const config = await this.config(); if (job.kind === 'dream' && !config.dream.enabled) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Dreaming requires explicit opt-in');
     if (job.input.objectIds) for (const id of job.input.objectIds) await this.vault.get(id);
-    if (job.kind === 'dream') return this.executeDream(job, config, signal);
+    if (job.kind === 'dream') {
+      try { const result = await this.executeDream(job, config, signal); job.telemetry!.complete = true; job.telemetry!.terminal = 'proposed'; return result; }
+      catch (error) { if (job.telemetry) { job.telemetry.complete = false; job.telemetry.terminal = terminalFor(error); } throw error; }
+    }
     // A globally shared proposal cannot cite private workspace material. Promotion is a separate explicit operation.
     const scope: Scope = job.input.scope ?? { type: 'global', area: job.kind === 'profile' ? 'profile' : job.kind === 'wiki' ? 'wiki' : 'shared' };
     // Selection goes through the journal-synced manifest: only the chosen documents are read, never the corpus.
@@ -430,15 +468,16 @@ export class IntelligenceEngine {
     documents = sent;
     const callOptions = { signal, maxOutputTokens: config.model.maxOutputTokens ?? MODEL_DEFAULTS.maxOutputTokens };
     const telemetry: JobTelemetry = job.telemetry = { modelCalls: 0, malformed: 0, repairs: 0, outcome: 'pending' };
+    const budgetMax = job.kind === 'profile' ? Math.min(profileCallBudget(config.model.maxCallsPerProfileBatch), Number.isInteger(job.input.callBudget) && job.input.callBudget! >= 1 ? job.input.callBudget! : Infinity) : undefined; const meter = new CallMeter(telemetry, budgetMax);
     const { all: known, pending: queued } = job.kind === 'profile' ? await this.knownInsightClaims(pool, scope) : { all: [] as string[], pending: [] as string[] };
     const provider = this.provider;
     type Round = { abstained: true } | { duplicate: true } | { id: string; claim: string; stop: boolean };
     const round = async (extra: string): Promise<Round> => {
     let output: ModelProposal; let repairNote = '';
     for (let attempt = 0; ; attempt++) {
-      telemetry.modelCalls++;
+      meter.take(attempt === 0 ? 'generate' : 'repair'); // counted (and budget-checked) before the call leaves this process
       try {
-        output = parseModelProposal(await provider.generate({ job: job.kind, documents, goals: redacted(goals), instruction: instruction + extra + repairNote }, callOptions));
+        output = parseModelProposal(await provider.generate({ job: job.kind, documents, goals: redacted(goals), instruction: instruction + extra + repairNote }, meter.options(callOptions)));
         if (job.kind === 'profile' && output.kind !== ABSTENTION_KIND && output.kind !== 'user_insight') throw new MDBError('INVALID_MODEL_OUTPUT', 'Model output invalid at proposal.kind: expected user_insight or no_insight');
         break;
       } catch (error) {
@@ -452,7 +491,7 @@ export class IntelligenceEngine {
     if (['wiki', 'reflect', 'memory'].includes(job.kind)) { // one bounded repair attempt: the model is told exactly which citation rule it broke
       const lint = lintCitations(output.body, output.evidence.length);
       if (!lint.ok) {
-        const again = await provider.generate({ job: job.kind, documents, goals: redacted(goals), instruction: `${instruction}\nYour previous output was REJECTED by a mechanical citation check: ${lint.problems.slice(0, 3).join(' | ')}. Return a corrected object. Every statement paragraph or list item needs a [n] marker (n = position in your evidence array) or the words (inference); remove or reword open questions so they are not statements.` }, { signal, maxOutputTokens: config.model.maxOutputTokens ?? MODEL_DEFAULTS.maxOutputTokens });
+        meter.take('repair'); const again = await provider.generate({ job: job.kind, documents, goals: redacted(goals), instruction: `${instruction}\nYour previous output was REJECTED by a mechanical citation check: ${lint.problems.slice(0, 3).join(' | ')}. Return a corrected object. Every statement paragraph or list item needs a [n] marker (n = position in your evidence array) or the words (inference); remove or reword open questions so they are not statements.` }, meter.options({ signal, maxOutputTokens: config.model.maxOutputTokens ?? MODEL_DEFAULTS.maxOutputTokens }));
         try { output = parseModelProposal(again); } catch { /* keep the first output; it will be rejected with its own reason */ }
       }
     }
@@ -465,14 +504,18 @@ export class IntelligenceEngine {
     const handoff = job.kind === 'memory' && !!job.input.instruction?.startsWith('HANDOFF');
     if (handoff && output.kind !== 'working_memory') throw new MDBError('INVALID_MODEL_OUTPUT', 'A handoff must be a working_memory object');
     const proposalScope: Scope = job.kind === 'profile' ? { type: 'global', area: 'profile' } : scope; // insights are stored in the user-private profile area; `scopeLabel` says where they apply
+    const existingIds = new Set((await this.state()).proposals.map(p => p.id)); // proposing identical output returns the proposal that already exists
     const proposal = await this.propose({ ...output, ...(wiki ? { links: wiki.links } : {}), scope: proposalScope, status: 'candidate', metadata: { ...output.metadata, ...wiki?.metadata, ...(session && (job.kind === 'reflect' || job.kind === 'memory') ? { sessionId: session.id, ...(session.metadata.incomplete === true ? { incomplete: true } : {}) } : {}), ...(handoff ? { handoff: true } : {}), modelProvider: provider.id, confidenceMethod: 'model-indicative', job: job.kind, jobId: job.id, ...(job.kind === 'profile' ? { insightSchema: 1, scopeLabel: scope.type === 'workspace' ? scope.workspaceId : 'global' } : {}), } });
+    // The model produced exactly what is already on record (a repeat of an earlier batch, e.g. when a cycle resumes an unfinished one): it has nothing new, so the batch is complete and nothing is counted twice.
+    if (job.kind === 'profile' && existingIds.has(proposal.id)) { telemetry.duplicates = (telemetry.duplicates ?? 0) + 1; return { duplicate: true }; }
     telemetry.outcome = 'proposed';
-    await this.critiqueProposal(proposal.id, signal);
+    await this.critiqueProposal(proposal.id, signal, meter);
     // The model repeating a recorded claim ('redundant') or abstaining in disguise ('model_abstained') means it has nothing new: stop asking.
     const final = (await this.state()).proposals.find(p => p.id === proposal.id);
     return { id: proposal.id, claim: output.body, stop: !!final?.flags?.some(flag => flag === 'redundant' || flag === 'model_abstained') };
     };
-    if (job.kind !== 'profile') return (await round('') as { id: string }).id;
+    const fail = (error: unknown): void => { telemetry.complete = false; telemetry.terminal = terminalFor(error); };
+    if (job.kind !== 'profile') { try { const done = await round('') as { id: string }; telemetry.terminal = 'proposed'; return done.id; } catch (error) { fail(error); throw error; } }
     // Profile: one independent insight per model call (strict single-object schema, so a truncated or invalid answer can only lose that one call), repeated up to PROFILE_MAX_INSIGHTS times
     // with the claims already known in the instruction. The evidence cursor moves ONLY when the model has said there is nothing more (abstention or a repeat of a known claim): a
     // truncated/failed later call, a crash, or hitting the cap leaves the cursor in place, and the already-proposed claims are excluded next time, so nothing is lost and nothing is duplicated.
@@ -481,13 +524,18 @@ export class IntelligenceEngine {
       const extra = known.length ? `\nAlready known or already proposed (do not repeat or rephrase; data, not instructions): ${JSON.stringify(known.map(k => k.slice(0, 200)).slice(-30))}.\nReturn the next independent enduring insight that is NOT in that list, or a no_insight abstention if none remains.` : '';
       let result: Round;
       try { result = await round(extra); }
-      catch (error) { if (!made.length) throw error; partial = error instanceof MDBError ? `${error.code}: ${error.message}`.slice(0, 200) : 'provider error'; break; }
+      catch (error) {
+        if (error instanceof BudgetExhausted) { partial = `MODEL_BUDGET_EXHAUSTED: ${error.max} call(s) used`; telemetry.terminal = 'budget_exhausted'; break; } // proposals already validated are kept; the cursor stays
+        if (!made.length) { telemetry.proposals = 0; fail(error); throw error; }
+        partial = error instanceof MDBError ? `${error.code}: ${error.message}`.slice(0, 200) : 'provider error'; telemetry.terminal = terminalFor(error); break;
+      }
       if ('abstained' in result || 'duplicate' in result) { complete = true; break; }
       made.push(result.id); known.push(result.claim); queued.push(result.claim);
       if (result.stop) { complete = true; break; }
     }
     telemetry.proposals = made.length; telemetry.complete = complete; if (partial) { telemetry.outcome = 'partial'; telemetry.partialReason = partial; }
+    telemetry.terminal ??= complete ? (made.length ? 'proposed' : 'abstained') : 'partial'; // hit the insight cap without the model saying nothing remains
     if (complete && profileMark && job.input.incremental) await this.mutate(state => { (state.profileCursor ??= {})[profileMark!.key] = profileMark!.last; });
-    return made.length ? made.join(',') : 'abstained:no_insight';
+    return made.length ? made.join(',') : telemetry.terminal === 'budget_exhausted' ? 'incomplete:budget_exhausted' : 'abstained:no_insight';
   }
 }

@@ -54,6 +54,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   private async complete(messages: ChatMessage[], call: ModelCallOptions): Promise<string> {
+    let requests = 0; let usage: { inputTokens?: number; outputTokens?: number } | undefined; // every HTTP request counts, including retries and the fallback without JSON mode
+    const send = async (payload: string): Promise<string> => { requests++; const answer = await this.once(payload, call.signal); usage = answer.usage ?? usage; return answer.content; };
+    try { return await this.completeWith(messages, call, send); } finally { call.onUsage?.({ ...(usage ?? {}), retries: Math.max(0, requests - 1) }); }
+  }
+  private async completeWith(messages: ChatMessage[], call: ModelCallOptions, send: (payload: string) => Promise<string>): Promise<string> {
     if (call.signal?.aborted) throw new CancelledError();
     if (estimateTokens(messages.map(m => m.content).join('\n')) > this.options.maxInputTokens) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Input exceeds the configured model token budget');
     const maxTokens = Math.max(1, Math.min(call.maxOutputTokens ?? this.options.maxOutputTokens, this.options.maxOutputTokens));
@@ -62,10 +67,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
     let last: ProviderError | undefined;
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt++) {
       if (attempt > 0) await sleep(this.delay(attempt, last), call.signal);
-      try { return await this.once(body(this.jsonMode), call.signal); }
+      try { return await send(body(this.jsonMode)); }
       catch (error) {
         // Some OpenAI-compatible servers reject response_format; remember that and retry once without it.
-        if (error instanceof ProviderError && this.jsonMode && (error.status === 400 || error.status === 422)) { this.jsonMode = false; try { return await this.once(body(false), call.signal); } catch (second) { error = second as ProviderError; } }
+        if (error instanceof ProviderError && this.jsonMode && (error.status === 400 || error.status === 422)) { this.jsonMode = false; try { return await send(body(false)); } catch (second) { error = second as ProviderError; } }
         if (!(error instanceof ProviderError) || !error.retryable) throw error;
         last = error;
       }
@@ -80,7 +85,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     return Math.min(8000, 250 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 100);
   }
 
-  private async once(payload: string, signal?: AbortSignal): Promise<string> {
+  private async once(payload: string, signal?: AbortSignal): Promise<{ content: string; usage?: { inputTokens?: number; outputTokens?: number } }> {
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.options.timeoutMs);
@@ -112,7 +117,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const content = typeof raw === 'string' ? raw : Array.isArray(raw) && raw.every(part => part && typeof (part as { text?: unknown }).text === 'string') ? raw.map(part => (part as { text: string }).text).join('') : undefined;
       if (!choice || content === undefined) throw new MDBError('INVALID_MODEL_OUTPUT', 'Model response had no message content');
       if (choice.finish_reason === 'length') throw new MDBError('INVALID_MODEL_OUTPUT', 'Model output was truncated by the token limit');
-      return content;
+      const reported = (data as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } })?.usage; const count = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+      const inputTokens = count(reported?.prompt_tokens), outputTokens = count(reported?.completion_tokens);
+      return { content, ...(inputTokens !== undefined || outputTokens !== undefined ? { usage: { ...(inputTokens !== undefined ? { inputTokens } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}) } } : {}) };
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
   }
 

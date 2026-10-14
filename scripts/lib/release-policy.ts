@@ -8,6 +8,10 @@
  */
 export type EvidenceStatus = 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NOT_RUN';
 export interface ProductionEvidence { id: string; title: string; status: EvidenceStatus; detail: string; source: string }
+/** Historical scores count for this checkout only when every required source is bound to the passing run. */
+export function modelEvidenceMatches(record: { status?: string; evidenceSource?: { files?: Record<string, string> } } | undefined, current: Record<string, string>): boolean {
+  return record?.status === 'PASS' && Object.keys(current).length > 0 && Object.entries(current).every(([file, hash]) => record.evidenceSource?.files?.[file] === hash);
+}
 export interface Exclusion { id: string; approvedBy: string; reason: string; approvedAt: string }
 export type ReleaseLevel = 'NOT_RELEASABLE' | 'BETA' | 'GA_ELIGIBLE';
 export interface PolicyInput { storageVerdict: string; openAreas: string[]; openGates: string[]; failedGates: string[]; evidence: ProductionEvidence[]; exclusions: unknown }

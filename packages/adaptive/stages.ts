@@ -20,7 +20,7 @@ export class StageBlocked extends Error { constructor(readonly error: CycleError
 export interface StageContext {
   vault: Vault; engine: IntelligenceEngine; provider: ModelProvider | undefined; store: AdaptiveStore; config: AdaptiveConfig; cycle: Cycle;
   view: SnapshotView; events: CommitEvent[]; signal: AbortSignal; pressure: () => Pressure | undefined;
-  checkpoint: () => Promise<void>; own: <T>(action: () => Promise<T>) => Promise<T>; spendModelCall: () => void;
+  checkpoint: () => Promise<void>; own: <T>(action: () => Promise<T>) => Promise<T>; spendModelCall: (calls?: number) => void;
 }
 const now = () => new Date().toISOString();
 const err = (category: CycleError['category'], message: string): CycleError => ({ category, message: message.slice(0, 300), at: now() });
@@ -39,20 +39,23 @@ const lowRisk = (p: Proposal) => p.status === 'pending' && p.critic?.verdict ===
   && p.input.metadata?.evidenceClass === 'explicit' && p.input.metadata?.sensitivity !== 'sensitive';
 
 /** Runs one model-backed engine job against the sealed snapshot and returns the proposals it created. */
-async function runEngineJob(ctx: StageContext, kind: 'profile' | 'dream', input: Record<string, unknown>): Promise<{ status: string; error?: string; proposals: Proposal[]; trace?: unknown }> {
+async function runEngineJob(ctx: StageContext, kind: 'profile' | 'dream', input: Record<string, unknown>): Promise<{ status: string; error?: string; proposals: Proposal[]; trace?: unknown; /** a profile batch that stopped early (call budget, a failed later call): its validated proposals exist, but the evidence is not fully processed */ incomplete?: string; /** the batch stopped because its call budget ran out (resumable), not because something failed */ budgetExhausted?: boolean }> {
   if (!ctx.provider) throw new StageBlocked(err('MODEL_UNAVAILABLE', 'No model provider is configured; model-assisted stages cannot run'));
   if (ctx.cycle.budgets.modelCallsUsed >= ctx.cycle.budgets.modelCallsMax) throw new PauseSignal('RESOURCE_PRESSURE', 'cycle model-call budget exhausted');
   await checkpoint(ctx);
-  const job = await ctx.engine.enqueue(kind, input as never);
+  const remaining = Math.max(1, ctx.cycle.budgets.modelCallsMax - ctx.cycle.budgets.modelCallsUsed); // a profile batch may never spend more provider calls than the cycle has left
+  const job = await ctx.engine.enqueue(kind, { ...input, callBudget: remaining } as never);
   await ctx.engine.retryNow(job.id, { force: true }); // the cycle lease guarantees no other worker owns this job
-  ctx.spendModelCall();
   await ctx.own(() => ctx.engine.run({ job: kind, jobId: job.id, limit: 1, signal: ctx.signal } as never));
   const done = (await ctx.engine.jobs()).find(j => j.id === job.id);
   if (!done) throw new Error('engine job disappeared');
+  // Charge only measured invocations; a Dream job without candidate clusters makes no provider calls.
+  const used = done.telemetry?.modelCalls ?? 0; if (used > 0) ctx.spendModelCall(used);
   if (done.status === 'pending' && ctx.signal.aborted) await checkpoint(ctx);
   // Proposals are tied to their job (metadata.jobId, or the job's recorded result), so a resumed cycle finds them again after a crash instead of re-running the model.
   const proposals = (await ctx.engine.proposals()).filter(p => p.input.metadata?.jobId === job.id || p.id === done.result);
-  return { status: done.status, ...(done.error ? { error: done.error } : {}), proposals, ...(done.trace ? { trace: done.trace } : {}) };
+  const incomplete = done.telemetry?.complete === false ? (done.telemetry.partialReason ?? done.telemetry.terminal ?? 'incomplete') : undefined;
+  return { status: done.status, ...(done.error ? { error: done.error } : {}), proposals, ...(done.trace ? { trace: done.trace } : {}), ...(incomplete ? { incomplete, budgetExhausted: done.telemetry?.terminal === 'budget_exhausted' } : {}) };
 }
 async function settleProposals(ctx: StageContext, proposals: Proposal[], kind: string, stage: 'WORKSPACE_INSIGHT' | 'GLOBAL_INSIGHT', into: { accepted: OutputRef[]; pendingReview: string[]; rejected: string[] }): Promise<void> {
   for (const p of proposals.filter(x => x.input.kind === kind)) {
@@ -93,7 +96,9 @@ export async function runWorkspaceStage(ctx: StageContext, workspaceId: string, 
         const run = await runEngineJob(ctx, 'profile', { scope: group.scope, objectIds: group.ids, instruction: `adaptive:${cycle.id}:${workspaceId}:${tag}:profile`, snapshot: { cycleId: cycle.id, watermark: view.watermark } });
         if (run.status === 'blocked') throw new StageBlocked(err('MODEL_UNAVAILABLE', run.error ?? 'profile extraction blocked'));
         if (run.status !== 'complete') throw new Error(`profile extraction ${run.status}: ${run.error ?? ''}`);
-        await settleProposals(ctx, run.proposals, 'user_insight', 'WORKSPACE_INSIGHT', rec); done.add(tag); rec.insights.jobKey = [...done].join(','); await ctx.checkpoint();
+        await settleProposals(ctx, run.proposals, 'user_insight', 'WORKSPACE_INSIGHT', rec);
+        if (run.incomplete) { if (run.budgetExhausted) throw new PauseSignal('RESOURCE_PRESSURE', 'profile batch model-call budget exhausted: validated proposals kept, the cursor did not move, resume continues'); throw new Error(`profile extraction incomplete (${run.incomplete}): validated proposals were kept, the workspace cursor did not move, the next run continues without repeating them`); }
+        done.add(tag); rec.insights.jobKey = [...done].join(','); await ctx.checkpoint();
       }
       rec.insights.status = 'COMPLETED';
     }
@@ -134,7 +139,9 @@ export async function runGlobalStage(ctx: StageContext, globalCursor: number): P
       const run = await runEngineJob(ctx, 'profile', { scope: { type: 'global', area: 'profile' }, objectIds: rec.evidenceIds, instruction: `adaptive:${cycle.id}:global:profile`, snapshot: { cycleId: cycle.id, watermark: view.watermark } });
       if (run.status === 'blocked') throw new StageBlocked(err('MODEL_UNAVAILABLE', run.error ?? 'global extraction blocked'));
       if (run.status !== 'complete') throw new Error(`global extraction ${run.status}: ${run.error ?? ''}`);
-      await settleProposals(ctx, run.proposals, 'user_insight', 'GLOBAL_INSIGHT', rec); rec.extraction = 'COMPLETED';
+      await settleProposals(ctx, run.proposals, 'user_insight', 'GLOBAL_INSIGHT', rec);
+      if (run.incomplete) { if (run.budgetExhausted) throw new PauseSignal('RESOURCE_PRESSURE', 'global profile batch model-call budget exhausted: validated proposals kept, the cursor did not move, resume continues'); throw new Error(`global extraction incomplete (${run.incomplete}): validated proposals were kept and the cursor did not move`); }
+      rec.extraction = 'COMPLETED';
     }
     // 2. cross-context promotion: only identical, non-sensitive, authorized preferences supported in at least two workspaces; conflicts stay scoped
     await checkpoint(ctx);
@@ -176,6 +183,7 @@ export async function runDreamStage(ctx: StageContext): Promise<void> {
     const permitted = cycle.permittedDerived.map(o => ({ objectId: o.objectId, revisionId: o.revisionId, proposalId: o.proposalId }));
     rec.corpusVisibility = { watermark: view.watermark, eligibleObjects: view.size, eligibleScopes: view.scopes(), policyVersion: cycle.policyVersion, retrievalVersion: `dream/${PROMPT_VERSION}+lexical-graph`, permittedDerived: permitted };
     const run = await runEngineJob(ctx, 'dream', { mode: ctx.config.dreamMode, instruction: `adaptive:${cycle.id}:dream`, snapshot: { cycleId: cycle.id, watermark: view.watermark, allowPost: permitted.map(o => o.objectId) } });
+    if (run.budgetExhausted) throw new PauseSignal('RESOURCE_PRESSURE', 'Dream exhausted the cycle model-call budget');
     if (run.status === 'blocked') throw new StageBlocked(err('MODEL_UNAVAILABLE', run.error ?? 'dream blocked'));
     if (run.status !== 'complete') throw new Error(`dream ${run.status}: ${run.error ?? ''}`);
     rec.proposals = run.proposals.filter(p => p.input.kind === 'discovery').map(p => ({ proposalId: p.id, status: p.status, evidence: (p.input.evidence ?? []).map(e => ({ uri: e.uri, revisionId: e.revisionId })) }));
