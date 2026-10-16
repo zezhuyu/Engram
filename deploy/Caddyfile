@@ -1,3 +1,5 @@
+# OPTIONAL external TLS adapter. Engram itself remains a loopback HTTP service.
+# Not required for local operation or OpenAI Secure MCP Tunnel.
 memory.example.com {
 	encode zstd gzip
 	@memory path /mcp /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp

@@ -4,6 +4,7 @@ import { manifestFor, type ManifestEntry } from '../search-files/manifest.js';
 import { scopeMatches } from '../search-files/index.js';
 import { SearchEngine } from '../search-sqlite/index.js';
 import { profileAsync, profileSync } from '../bench/instrumentation.js';
+import { insightCurrentlyAccessible } from './insight-access.js';
 
 export const MEMORY_KINDS = ['observation', 'note', 'decision', 'finding', 'insight', 'reflection', 'session', 'working_memory', 'procedure', 'analysis'];
 export type RecallMode = 'recent' | 'timeline' | 'time_range' | 'grep' | 'regex' | 'keyword' | 'semantic' | 'hybrid' | 'links' | 'auto';
@@ -183,6 +184,7 @@ export class MemoryRecall {
       if (e.status === 'deleted' || (input.status ? e.status !== input.status : ['superseded', 'rejected'].includes(e.status))) continue;
       if (input.category && e.cat !== input.category) continue;
       let doc: Document; try { doc = await this.vault.get(e.id); } catch { continue; }
+      if (!await insightCurrentlyAccessible(this.vault, doc, input.scopeLabel)) continue;
       if (input.evidenceClass && doc.metadata.evidenceClass !== input.evidenceClass) continue;
       if (input.scopeLabel && (typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : 'global') !== input.scopeLabel) continue;
       items.push({ id: doc.id, uri: doc.uri, revisionId: doc.revisionId, kind: doc.kind, at: doc.updatedAt, title: doc.title, scope: doc.scope, snippet: doc.body.replace(/\s+/g, ' ').slice(0, 300) });

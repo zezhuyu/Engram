@@ -4,7 +4,7 @@ The release contains `Engram Client.app` and `Engram Server.app`. Both use `maco
 
 ## Build and release
 
-`node scripts/package-macos.mjs dist-macos` builds the existing standalone runtime and both apps on the current Mac architecture. An existing standalone bundle may be supplied as the second argument to avoid rebuilding it. CI builds macOS arm64 alongside Linux x64, then creates one release with two outer archives: client (portable CLI/SDK, Linux daemon and macOS app) and server (Linux daemon and macOS app). Extract the platform archive inside the appropriate outer archive. Each Linux bundle includes its own systemd installation instructions.
+`node scripts/package-macos.mjs dist-macos` builds the existing standalone runtime and both apps on the current Mac architecture. An existing standalone bundle may be supplied as the second argument to avoid rebuilding it. CI publishes separate client and server app downloads for macOS arm64 (`.dmg`) and Linux x64 (`.deb`), plus `SHA256SUMS`. Each macOS disk image opens directly to its `.app`, boot-service installer, and this README. Linux Debian packages install each role under `/opt/engram-*` and include systemd installation instructions. Release assets are per-role installable platform packages, not gzip archives.
 
 The app bundles use ad hoc signatures. Developer ID signing and notarization require an Apple developer identity and are not configured here. Packaging tests compile and sign fixture app bundles without installing or opening production apps.
 

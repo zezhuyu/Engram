@@ -1,20 +1,11 @@
 import type { Document, PutInput, Scope } from '../core/types.js';
+import { isSensitive } from '../core/sensitivity.js';
 
 export interface CriticResult { verdict: 'accept' | 'reject' | 'review_required'; rationale: string; flags: string[] }
 const same = (a: Scope, b: Scope): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /** Keyword heuristic only: it can miss sensitive content. Sensitive inferred profile items always need explicit human confirmation. */
-const SENSITIVE = [
-  /\b(health|medical|medication|diagnos\w*|therap\w*|depress\w*|anxiety|disorder|illness|disabilit\w*|pregnan\w*|surgery)\b/i,
-  /\b(religio\w*|faith|atheis\w*|muslim|christian|jewish|hindu|buddhis\w*)\b/i,
-  /\b(politic\w*|vote[sd]?|voting|democrat|republican|party affiliation)\b/i,
-  /\b(sexual\w*|gay|lesbian|bisexual|transgender|orientation)\b/i,
-  /\b(ethnic\w*|race|racial|immigration|citizenship|visa status)\b/i,
-  /\b(salary|income|debt|bankrupt\w*|credit score|net worth)\b/i,
-  /\b(criminal|arrest\w*|convict\w*|lawsuit)\b/i,
-  /\b(biometric\w*|genetic\w*|dna)\b/i
-];
-export const isSensitive = (text: string): boolean => SENSITIVE.some(pattern => pattern.test(text));
+export { isSensitive } from '../core/sensitivity.js';
 const normalize = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ').trim();
 const words = (text: string): Set<string> => new Set(text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
 export function similarity(a: string, b: string): number {

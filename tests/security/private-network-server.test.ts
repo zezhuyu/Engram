@@ -14,6 +14,22 @@ const freePort = (): Promise<number> => new Promise(res => { const s = net.creat
 const baseEnv = (root: string, extra: Record<string, string>) => ({ ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_TOKEN: TOKEN, MDB_ACTOR_ID: 'net-test', MDB_PERMISSIONS: '*', ...extra });
 const initialize = (url: string) => fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'tests', version: '1' } } }), signal: AbortSignal.timeout(5000) });
 
+test('a malformed request target receives 400 and does not terminate the MCP HTTP process', async t => {
+  const { root } = await disposableVault(t); const port = await freePort();
+  const child = spawn(process.execPath, [MCP, '--root', root], { env: baseEnv(root, { MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: String(port) }) });
+  t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(r => child.once('exit', () => r())); } });
+  let stderr = ''; child.stderr.setEncoding('utf8');
+  await new Promise<void>((res, rej) => { child.stderr.on('data', (c: string) => { stderr += c; if (/MCP HTTP listening/.test(stderr)) res(); }); child.once('exit', code => rej(new Error(`exited ${code}: ${stderr}`))); });
+  const malformed = await new Promise<string>((resolve, reject) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port }, () => socket.write('GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'));
+    let response = ''; socket.setEncoding('utf8'); socket.on('data', chunk => response += chunk); socket.on('end', () => resolve(response)); socket.on('error', reject); setTimeout(() => socket.destroy(new Error('malformed request timed out')), 3000).unref();
+  });
+  assert.match(malformed, /^HTTP\/1\.1 400\b/);
+  assert.equal(child.exitCode, null, 'server remains available after malformed input');
+  const denied = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(3000) });
+  assert.equal(denied.status, 401);
+});
+
 test('without the opt-in a non-loopback plain-HTTP bind is refused, even on a tailnet address or 0.0.0.0', async t => {
   const { root } = await disposableVault(t);
   for (const host of ['0.0.0.0', '100.77.249.102']) {

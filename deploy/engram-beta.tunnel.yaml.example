@@ -1,0 +1,20 @@
+# Review template only: not installed, loaded or activated.
+# Derived from the installed official sample_mcp_with_dcr profile (config v1).
+# Replace the tunnel ID only after approval of the organization/workspace binding.
+# Install under ~/.config/engram/tunnel-client/engram-beta.yaml after approval.
+config_version: 1
+control_plane:
+  base_url: "https://api.openai.com"
+  tunnel_id: "REPLACE_WITH_APPROVED_ENGRAM_TUNNEL_ID"
+  api_key: "env:ENGRAM_TUNNEL_RUNTIME_KEY"
+health:
+  listen_addr: "127.0.0.1:0"
+admin_ui:
+  open_browser: false
+log:
+  level: info
+  format: json
+mcp:
+  server_urls:
+    - channel: main
+      url: "http://127.0.0.1:3333/mcp"

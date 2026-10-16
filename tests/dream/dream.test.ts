@@ -15,8 +15,15 @@ import { dreamPool, planContext } from '../../packages/intelligence/dream/contex
 import { budgetsFor, planDeep, rngFrom } from '../../packages/intelligence/dream/plan.js';
 import { readStats, recordFeedback, staleDiscoveries, successRate } from '../../packages/intelligence/dream/lifecycle.js';
 import { Engram, type ModelProposal, type Scope } from '../../packages/sdk/index.js';
+import { isUsableDreamCandidate } from '../../scripts/lib/dream-metrics.js';
 
 type T = { after(fn: () => void | Promise<void>): void };
+test('Dream evaluation does not count rejected unsupported candidates as usable output', () => {
+  assert.equal(isUsableDreamCandidate({ status: 'rejected' }), false);
+  assert.equal(isUsableDreamCandidate({ status: 'pending', flags: ['not_selected'] }), false);
+  assert.equal(isUsableDreamCandidate({ status: 'pending' }), true);
+  assert.equal(isUsableDreamCandidate({ status: 'approved' }), true);
+});
 type Cfg = Partial<{ enabled: boolean; eventDriven: boolean; modes: Array<'micro' | 'deep' | 'strategic'>; maxProposalsPerRun: number; maxRunsPerDay: number; maxDurationMs: number; autoAccept: boolean; quietHours: { startHour: number; endHour: number } }>;
 async function world(t: T, dream: Cfg = {}) {
   const { root, vault } = await disposableVault(t); const pack = await buildPack(vault);
@@ -60,7 +67,7 @@ test('three modes, three different behaviours: algorithms, prompts, output schem
   const calls = (mode: string) => model.calls.filter(c => modeOf(c) === mode); assert.ok(calls('micro').length >= 1 && calls('deep').length >= 2 && calls('strategic').length >= 1);
   assert.ok(calls('deep').every(c => c.documents.length <= 4), 'deep clusters are small and distant, not a dump'); assert.ok(calls('strategic').every(c => c.documents.some(d => d.kind === 'user_insight')), 'strategic always includes the goal');
   const system = (mode: string) => generationMessages({ job: 'dream', documents: [], goals: '', instruction: `MODE:${mode}` })[0]!.content;
-  assert.match(system('deep'), /mechanism/); assert.match(system('strategic'), /goalRefs/); assert.doesNotMatch(system('micro'), /goalRefs|mechanism \(/); assert.equal(new Set(['micro', 'deep', 'strategic'].map(system)).size, 3);
+  assert.match(system('deep'), /mechanism/); assert.match(system('deep'), /"facts"/); assert.match(system('deep'), /"missingEvidence"/); assert.match(system('strategic'), /goalRefs/); assert.match(system('strategic'), /evidence array MUST include the supplied goal object/i); assert.doesNotMatch(system('micro'), /goalRefs|mechanism \(/); assert.equal(new Set(['micro', 'deep', 'strategic'].map(system)).size, 3);
   const props = (await engine.proposals()); const byMode = (m: string) => props.filter(p => p.input.metadata?.mode === m);
   assert.ok(byMode('deep').every(p => typeof p.input.metadata!.mechanism === 'string')); assert.ok(byMode('strategic').every(p => Array.isArray(p.input.metadata!.goalRefs) && Array.isArray(p.input.metadata!.prerequisites))); assert.ok(byMode('micro').every(p => p.input.metadata!.mechanism === undefined));
   assert.ok(byMode('strategic').every(p => p.critic?.verdict === 'review_required' && p.flags!.includes('high_impact')), 'goal-directed options are always reviewed');
@@ -204,6 +211,38 @@ test('a deep candidate that is repaired once is accepted only if the repaired an
   const w = await isolatedDeep(t, ['pyRate', 'secRate'], model); const [job] = await enqueueRun(w.engine, { mode: 'deep' }); assert.equal(job!.status, 'complete', job!.error);
   assert.equal(model.calls.filter(c => /ANGLE:mechanism/.test(c.instruction)).length, 2); assert.match(model.calls.find(c => /mechanical check/.test(c.instruction))!.instruction, /hops/);
   recordCase({ suite: 'dream', name: 'deep-bounded-repair', status: 'PASS' });
+});
+test('strategic discoveries get one bounded repair when required goal metadata is missing', async t => {
+  let first = true;
+  const model = dreamer({ override: out => {
+    if (!first) return out;
+    first = false;
+    const { goalRefs: _goalRefs, prerequisites: _prerequisites, ...metadata } = out.metadata as Record<string, unknown>;
+    return { ...out, metadata };
+  } });
+  const w = await world(t); const engine = new IntelligenceEngine(w.vault, model);
+  const [job] = await enqueueRun(engine, { mode: 'strategic' });
+  assert.equal(job!.status, 'complete', job!.error);
+  assert.equal(model.calls.length, 2);
+  assert.match(model.calls[1]!.instruction, /goalRefs must be 1\+ concrete strings/i);
+  assert.ok((await engine.proposals()).some(p => Array.isArray(p.input.metadata?.goalRefs) && Array.isArray(p.input.metadata?.prerequisites)));
+  recordCase({ suite: 'dream', name: 'strategic-bounded-repair', status: 'PASS' });
+});
+test('strategic repair restores the goal object to evidence when a model omits it', async t => {
+  let first = true;
+  const model = dreamer({ override: out => {
+    if (!first) return out;
+    first = false;
+    return { ...out, evidence: out.evidence.filter(ref => !ref.uri.startsWith('mdb://profile/')) };
+  } });
+  const w = await world(t); const engine = new IntelligenceEngine(w.vault, model);
+  const [job] = await enqueueRun(engine, { mode: 'strategic' });
+  assert.equal(job!.status, 'complete', job!.error);
+  assert.equal(model.calls.length, 2);
+  assert.match(model.calls[1]!.instruction, /strategic discovery must cite the goal it serves/i);
+  const proposal = (await engine.proposals()).at(-1)!;
+  assert.ok(proposal.input.evidence!.some(ref => ref.uri.startsWith('mdb://profile/')));
+  recordCase({ suite: 'dream', name: 'strategic-goal-evidence-repair', status: 'PASS' });
 });
 test('a contradiction between existing claims is kept as an unresolved deep discovery with one hop and no invented resolution', async t => {
   const model = dreamer({ override: out => ({ ...out, metadata: { ...out.metadata, subtype: 'contradiction', hops: ['Caching all API responses is always safe -> contradicts -> authenticated responses must not be cached'] } }) });

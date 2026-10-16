@@ -6,7 +6,10 @@ import { disposableVault } from '../helpers/disposable-vault.js';
 import { run } from '../helpers/host.js';
 import { recordCase } from '../helpers/report.js';
 import { Vault } from '../../packages/core/vault.js';
+import { MDBError } from '../../packages/core/types.js';
 import { IntelligenceEngine } from '../../packages/intelligence/index.js';
+import { evaluateInsight } from '../../packages/intelligence/insights.js';
+import { generationMessages } from '../../packages/models/prompts.js';
 import { Engram, ingestRecord, eventFromHostPayload, readRegistration, createAdapter, type Document, type ModelProposal, type ModelProvider, type ModelRequest, type Scope } from '../../packages/sdk/index.js';
 import { tempDir, claudePayloads } from '../helpers/host.js';
 
@@ -28,6 +31,19 @@ function fakeProvider(spec: () => Spec | undefined): ModelProvider & { calls: Mo
 const extract = async (engine: IntelligenceEngine, scope: Scope = proj) => { await engine.enqueue('profile', { scope }); const jobs = await engine.run({ job: 'profile', limit: 3 }); return { jobs, proposals: await engine.proposals() }; };
 const last = async (engine: IntelligenceEngine) => (await engine.proposals()).at(-1)!;
 const read = (root: string, file: string) => fs.readFile(path.join(root, file), 'utf8');
+
+test('profile prompt distinguishes project outcome preferences, assistant workflows, polarity and third-party statements', async t => {
+  const w = await world(t); const message = await w.userSaid('For Orion only, keep deployment scripts compatible with staging.');
+  const calls: ModelRequest[] = [];
+  const provider: ModelProvider = { id: 'prompt-contract', async generate(request) { calls.push(request); return { kind: 'no_insight', title: 'No insight', body: 'No further insight.', evidence: [] }; } };
+  const engine = new IntelligenceEngine(w.vault, provider); await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 1 });
+  const systemPrompt = generationMessages(calls[0]!)[0]!.content;
+  assert.match(systemPrompt, /desired system outcome[\s\S]*?is a preference/);
+  assert.match(systemPrompt, /Preserve polarity/);
+  assert.match(systemPrompt, /not the user's own/);
+  assert.match(systemPrompt, /"I prefer bullet lists instead of long paragraphs" -> preference/);
+  assert.match(systemPrompt, /"Answer this one in French, then return to my usual language" -> abstain/);
+});
 
 test('a direct correction supersedes an earlier inferred preference: linked evidence, preserved history, regenerated projection', async t => {
   const w = await world(t);
@@ -88,6 +104,55 @@ test('model abstentions are rejected instead of being stored as user insights', 
   const proposal = await last(engine); assert.equal(proposal.status, 'rejected'); assert.ok(proposal.flags!.includes('model_abstained'));
   assert.equal((await w.vault.listDocuments()).filter(d => d.kind === 'user_insight').length, 0);
   recordCase({ suite: 'profile', name: 'model-abstentions-not-insights', status: 'PASS' });
+});
+
+test('explicit no-opinion, third-party-only and do-not-store source spans cannot become user memories', async t => {
+  const cases: Array<{ source: string; span: string; claim: string; flag: string; category?: string; key?: string }> = [
+    { source: "I don't have a preference about indentation in this repository.", span: "I don't have a preference about indentation", claim: 'The user has no preference about indentation in this repository.', flag: 'negative_or_attributed_evidence' },
+    { source: 'I read an article about Kubernetes yesterday; I have no view on whether we should use it.', span: 'I read an article about Kubernetes yesterday', claim: 'The user has an interest in Kubernetes.', category: 'interest', key: 'kubernetes', flag: 'exposure_not_interest' },
+    { source: "I saw a talk title about WebAssembly in my feed but I haven't read it or formed an opinion.", span: "I saw a talk title about WebAssembly in my feed but I haven't read it or formed an opinion.", claim: 'The user has not formed an opinion about WebAssembly.', category: 'knowledge_gap', key: 'webassembly-opinion', flag: 'negative_or_attributed_evidence' },
+    { source: 'This once, skip the tests, we are in a hurry.', span: 'This once, skip the tests, we are in a hurry.', claim: 'The user prefers to skip tests.', category: 'working_style', key: 'skip-tests', flag: 'temporary_evidence' },
+    { source: 'The vendor always wants invoices in PDF, which has nothing to do with my own habits.', span: 'which has nothing to do with my own habits', claim: 'The user has no preference about invoice format.', flag: 'negative_or_attributed_evidence' },
+    { source: 'My teammate prefers all reports in spreadsheets; that is not my own preference.', span: 'My teammate prefers all reports in spreadsheets', claim: 'The user does not prefer spreadsheets for reports.', flag: 'negative_or_attributed_evidence' },
+    { source: 'Please forget this and do not save it anywhere: I sometimes like dark roast coffee.', span: 'I sometimes like dark roast coffee', claim: 'The user sometimes likes dark roast coffee.', flag: 'user_opt_out' },
+    { source: 'I am not asking you to remember this and I do not want a lasting preference inferred from it.', span: 'I do not want a lasting preference inferred from it', claim: 'The user has a lasting preference about this topic.', flag: 'user_opt_out' },
+  ];
+  for (const item of cases) {
+    const w = await world(t); const message = await w.userSaid(item.source);
+    const engine = new IntelligenceEngine(w.vault, fakeProvider(() => ({ body: item.claim, ...(item.category ? { category: item.category, key: item.key } : {}), evidence: [{ doc: message, span: item.span }] })));
+    await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 1 });
+    const proposal = await last(engine); assert.equal(proposal.status, 'rejected', item.source); assert.ok(proposal.flags?.includes(item.flag), JSON.stringify(proposal.flags));
+  }
+  recordCase({ suite: 'profile', name: 'negative-attributed-and-opt-out-evidence-rejected', status: 'PASS' });
+});
+
+test('targeted opt-outs do not suppress unrelated facts, and counterfactual goals are rejected', async t => {
+  const w = await world(t); const message = await w.userSaid("My manager insists on weekly reports. Forget that I mentioned my cat, don't store it. I like reading release notes before upgrading.");
+  const insight = (key: string, claim: string, span: string, category = 'preference') => evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: claim, body: claim, evidence: [{ uri: message.uri, revisionId: message.revisionId, span }], metadata: { insightSchema: 1, category, preferenceKey: key } });
+  const blockedCat = await insight('cat', 'The user has a cat.', 'my cat'); assert.equal(blockedCat.verdict, 'reject'); assert.ok(blockedCat.flags.includes('user_opt_out'));
+  const allowedNotes = await insight('release-notes', 'The user likes reading release notes before upgrading.', 'I like reading release notes before upgrading.'); assert.equal(allowedNotes.verdict, 'accept');
+  const mixed = await w.userSaid('This once, skip the tests. I always pin dependencies.');
+  const durableBesideTemporary = await evaluateInsight(w.vault, { scope: proj, kind: 'user_insight', title: 'Pinned dependencies', body: 'The user always pins dependencies.', evidence: [{ uri: mixed.uri, revisionId: mixed.revisionId, span: 'I always pin dependencies.' }], metadata: { insightSchema: 1, category: 'working_style', preferenceKey: 'pin-dependencies' } });
+  assert.equal(durableBesideTemporary.verdict, 'accept', 'temporary markers only block a claim about the same clause');
+  const rust = await w.userSaid('I maintain the Rust client and can review Rust lifetime and ownership changes myself.');
+  const sameDomainSkill = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Rust client maintenance and review', body: 'I maintain the Rust client and can review Rust lifetime and ownership changes myself.', evidence: [{ uri: rust.uri, revisionId: rust.revisionId, span: rust.body }], metadata: { insightSchema: 1, category: 'capability', preferenceKey: 'rust-review' } });
+  assert.equal(sameDomainSkill.verdict, 'accept', 'two predicates about the same capability domain remain one useful insight');
+  const separateSkills = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Rust and Terraform skills', body: 'The user can review Rust code and can author Terraform modules.', evidence: [{ uri: rust.uri, revisionId: rust.revisionId, span: rust.body }], metadata: { insightSchema: 1, category: 'capability', preferenceKey: 'rust-terraform' } });
+  assert.ok(separateSkills.flags.includes('multiple_insights'), 'a conjunction of distinct capability topics is rejected');
+  const exposed = await w.userSaid('I skimmed a post about GraphQL today.');
+  const exposureOnly = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Interest in GraphQL', body: 'The user has an interest in GraphQL.', evidence: [{ uri: exposed.uri, revisionId: exposed.revisionId, span: 'I skimmed a post about GraphQL today.' }], metadata: { insightSchema: 1, category: 'interest', preferenceKey: 'graphql' } });
+  assert.equal(exposureOnly.verdict, 'reject'); assert.ok(exposureOnly.flags.includes('exposure_not_interest'));
+  const compound = await insight('repo-workflow', 'The user prefers make check before PR and prefers rebasing over merge commits.', 'I like reading release notes before upgrading.');
+  assert.equal(compound.verdict, 'reject'); assert.ok(compound.flags.includes('multiple_insights'));
+  const oneConcept = await w.userSaid("I don't like hard-coded environment values; please make them configurable.");
+  const sameConcept = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Configurable values', body: 'The user prefers not to use hard-coded environment values and wants them configurable.', evidence: [{ uri: oneConcept.uri, revisionId: oneConcept.revisionId, span: 'hard-coded environment values; please make them configurable' }], metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'configuration' } });
+  assert.equal(sameConcept.verdict, 'accept');
+  const hypothetical = await w.userSaid('Say I had a week off, I would learn Rust.');
+  const blockedHypothesis = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Learn Rust', body: 'The user wants to learn Rust.', evidence: [{ uri: hypothetical.uri, revisionId: hypothetical.revisionId, span: 'I would learn Rust' }], metadata: { insightSchema: 1, category: 'goal', preferenceKey: 'rust-learning' } });
+  assert.equal(blockedHypothesis.verdict, 'reject'); assert.ok(blockedHypothesis.flags.includes('hypothetical_evidence'));
+  const blockedPreference = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Rust preference', body: 'The user would like to learn Rust if they had a week off.', evidence: [{ uri: hypothetical.uri, revisionId: hypothetical.revisionId, span: 'Say I had a week off, I would learn Rust.' }], metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'rust' } });
+  assert.equal(blockedPreference.verdict, 'reject'); assert.ok(blockedPreference.flags.includes('hypothetical_evidence'));
+  recordCase({ suite: 'profile', name: 'scoped-opt-out-and-hypothetical-evidence', status: 'PASS' });
 });
 
 test('profile extraction repairs one schema-invalid model abstention and keeps it rejected', async t => {
@@ -161,7 +226,7 @@ test('sensitive candidates need confirmation, are never listed in projections or
   assert.match(await read(w.root, 'PROFILE.md'), /1 sensitive item\(s\) not listed/);
   assert.equal((await new Engram(w.root).memory.insights({ query: 'anxiety' })).insights.length, 1, 'the owner can still find it');
   assert.equal((await new Engram(w.root, { actorId: 'reader', permissions: [] }).memory.insights({ query: 'anxiety' })).insights.length, 0, 'an agent with read access to the workspace cannot see user insights: they live in the user-private profile area');
-  assert.equal((await new Engram(w.root, { actorId: 'profile-reader', permissions: ['global:profile:read'] }).memory.insights({ query: 'anxiety' })).insights.length, 1, 'only an explicit profile grant opens them');
+  assert.equal((await new Engram(w.root, { actorId: 'profile-reader', permissions: ['global:profile:read'] }).memory.insights({ query: 'anxiety' })).insights.length, 0, 'a profile grant does not bypass current access to the underlying workspace evidence');
   recordCase({ suite: 'profile', name: 'sensitive-gating-and-projection', status: 'PASS' });
 });
 
@@ -192,6 +257,8 @@ test('evidence must be real, authorized, content-consistent and correctly attrib
   const attempt = async (spec: Spec, jobScope: Scope = proj) => { const e = new IntelligenceEngine(w.vault, fakeProvider(() => spec)); await e.enqueue('profile', { scope: jobScope, objectIds: spec.evidence.map(x => x.doc.id) }); const jobs = await e.run({ job: 'profile', limit: 3 }); return { e, jobs, proposals: await e.proposals() }; };
   const fabricated = await attempt({ body: 'The user likes huge pull requests.', key: 'pr-size', evidence: [{ doc: said, span: 'I love gigantic pull requests' }], explicit: true });
   assert.equal(fabricated.proposals.at(-1)!.status, 'rejected'); assert.ok(fabricated.proposals.at(-1)!.flags!.includes('span_not_in_source'), 'a quote that is not in the source is rejected');
+  const truncated = await attempt({ body: 'The user likes small pull requests.', key: 'pr-size-truncated', evidence: [{ doc: said, span: 'I like small pull request' }], explicit: true });
+  assert.equal(truncated.proposals.at(-1)!.status, 'rejected'); assert.ok(truncated.proposals.at(-1)!.flags!.includes('span_not_in_source'), 'a near-match that truncates a source word is rejected');
   const noSpan = await attempt({ body: 'The user likes small pull requests.', key: 'pr-size2', evidence: [{ doc: said, span: '' }] }); assert.ok(noSpan.proposals.at(-1)!.flags!.includes('span_missing'));
   const dreamEvidence = await attempt({ body: 'The user loves pair programming.', key: 'pairing', evidence: [{ doc: dream, span: 'love pair programming' }] }, { type: 'global', area: 'discoveries' });
   assert.ok(dreamEvidence.proposals.at(-1)?.flags?.includes('dream_not_evidence') || dreamEvidence.jobs[0]!.status !== 'complete', 'dream hypotheses are never evidence about the user');
@@ -226,7 +293,7 @@ test('passively captured user messages feed profile extraction incrementally, ah
   const afterFirst = provider.calls.length; await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst, 'nothing new since the cursor: no further model call');
   await feed('UserPromptSubmit', { prompt: 'Also keep functions under thirty lines.', prompt_id: 'b' });
   await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 1, 'a new user message triggers one more extraction; the model repeats a claim that is already pending, so it is dropped as a duplicate and the batch is complete'); assert.equal((await engine.proposals()).filter(p => p.input.kind === 'user_insight').length, 1, 'no duplicate proposal across consecutive jobs'); void wikiNote;
-  const sourcesSeen = provider.calls[afterFirst]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(!sourcesSeen.some(b => /giant files/.test(b)), 'already-processed messages are not resent');
+  const sourcesSeen = provider.calls[afterFirst]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(sourcesSeen.some(b => /giant files/.test(b)), 'a repeated known claim keeps the whole eligible batch unconsumed until explicit abstention');
   recordCase({ suite: 'profile', name: 'passive-capture-to-profile', status: 'PASS' });
 });
 
@@ -249,6 +316,82 @@ test('CLI: profile correct, insight search and projection work end to end; agent
 
 // Regression: the five dead-lettered jobs in the first real-model run (abstentions with no evidence, and a non-user_insight kind).
 const abstain = (reason = 'The user asked a question; no enduring insight.'): ModelProposal => ({ kind: 'no_insight', title: 'No insight', body: reason, evidence: [] });
+test('a final no_insight call ends extraction without erasing proposals from the batch telemetry', async t => {
+  const w = await world(t); const message = await w.userSaid('I prefer concise summaries and bullet lists.'); let calls = 0;
+  const engine = new IntelligenceEngine(w.vault, { id: 'proposal-then-abstain', async generate() {
+    calls++;
+    if (calls > 1) return abstain('No other independent insight remains.');
+    return { kind: 'user_insight', title: 'Concise summaries', body: 'The user prefers concise summaries.', evidence: [ref(message, 'prefer concise summaries')], metadata: { category: 'preference', preferenceKey: 'summary-style', sensitivity: 'none' } } as ModelProposal;
+  } });
+  await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
+  assert.equal(job!.status, 'complete'); assert.equal(calls, 2);
+  assert.equal(job!.telemetry!.outcome, 'proposed'); assert.equal(job!.telemetry!.terminal, 'proposed');
+  assert.equal(job!.telemetry!.proposals, 1); assert.equal(job!.telemetry!.complete, true);
+  recordCase({ suite: 'profile', name: 'profile-proposal-survives-final-abstention-telemetry', status: 'PASS' });
+});
+
+test('profile model context excludes pending and approved claims after source ACL or sensitivity changes', async t => {
+  for (const status of ['pending', 'approved'] as const) for (const revocation of ['collection', 'workspace', 'delete', 'sensitivity'] as const) {
+    await t.test(`${status}-${revocation}`, async t => {
+      const { root, vault: owner } = await disposableVault(t);
+      await owner.createWorkspace('proj', '', { alice: ['read', 'write'] });
+      await owner.createWorkspace('other', '', { alice: ['read', 'write'] });
+      await owner.createCollection('proj', 'private', '', { alice: ['read', 'write'] });
+      const privateScope: Scope = { type: 'workspace', workspaceId: 'proj', collectionId: 'private' };
+      const visibleScope: Scope = { type: 'workspace', workspaceId: revocation === 'collection' ? 'proj' : 'other' };
+      const secret = await owner.put({ scope: privateScope, kind: 'observation', title: 'Private source', body: 'I prefer PRIVATE-ACL-CANARY-731 tea.', metadata: { speaker: 'user', evidenceClass: 'user_authored' } });
+      const alice = new Vault(root, { actorId: 'alice', permissions: ['global:profile:read', 'global:profile:write'] });
+      let first = true;
+      const provider: ModelProvider & { calls: ModelRequest[] } = { id: 'acl-prompt-spy', calls: [], async generate(request) {
+        this.calls.push(request);
+        if (first) { first = false; return { kind: 'user_insight', title: 'Tea preference', body: 'The user prefers PRIVATE-ACL-CANARY-731 tea.', evidence: [ref(secret, 'I prefer PRIVATE-ACL-CANARY-731 tea')], metadata: { category: 'preference', preferenceKey: 'tea', sensitivity: 'none' } } as ModelProposal; }
+        return abstain('No other insight.');
+      } };
+      const engine = new IntelligenceEngine(alice, provider);
+      await engine.enqueue('profile', { scope: privateScope, objectIds: [secret.id] }); await engine.run({ job: 'profile', limit: 1 });
+      const proposal = (await engine.proposals()).find(item => item.input.kind === 'user_insight')!;
+      assert.equal(proposal.status, 'pending');
+      if (status === 'approved') await engine.review(proposal.id, true, 'synthetic test approval');
+
+      if (revocation === 'collection') {
+        // Owner narrows this collection's grant using the same persisted ACL file as the audit reproduction.
+        await fs.writeFile(path.join(root, 'workspaces/proj/collections/private/.mdb/collection.json'), JSON.stringify({ id: 'private', workspaceId: 'proj', description: '', grants: {} }));
+        assert.equal(await alice.get(secret.id).then(() => false, error => error.code === 'NOT_FOUND_OR_FORBIDDEN'), true);
+      } else if (revocation === 'workspace') {
+        await owner.grant('proj', 'alice', []);
+        assert.equal(await alice.get(secret.id).then(() => false, error => error.code === 'NOT_FOUND_OR_FORBIDDEN'), true);
+      } else if (revocation === 'delete') {
+        await owner.delete(secret.id, secret.revisionId);
+        const deleted = await alice.get(secret.id); assert.equal(deleted.status, 'deleted'); assert.equal(deleted.body, '');
+      } else {
+        await owner.patch({ objectId: secret.id, expectedRevisionId: secret.revisionId, metadataPatch: { sensitivity: 'sensitive' } });
+      }
+      await owner.put({ scope: visibleScope, kind: 'observation', title: 'Visible source', body: 'Today was sunny.', metadata: { speaker: 'user', evidenceClass: 'user_authored' } });
+      provider.calls.length = 0;
+      const next = new IntelligenceEngine(alice, provider);
+      await next.enqueue('profile', { scope: visibleScope }); const jobs = await next.run({ job: 'profile', limit: 10 });
+      assert.ok(provider.calls.length > 0, `authorized control evidence must exercise prompt construction: ${JSON.stringify(jobs)}`);
+      assert.doesNotMatch(JSON.stringify(provider.calls), /PRIVATE-ACL-CANARY-731/, `${status} claim and evidence must be reauthorized at prompt time`);
+      assert.deepEqual(await next.proposals(), [], 'the inaccessible or newly sensitive proposal is absent from the actor-facing proposal list');
+    });
+  }
+});
+
+test('direct reads of derived claims recheck current evidence sensitivity for non-owner actors', async t => {
+  const w = await world(t);
+  const source = await w.userSaid('My health details include CANARY-992.', '2026-10-07T10:00:00.000Z');
+  const derived = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Private detail', body: 'The user prefers CANARY-992.', status: 'accepted', evidence: [ref(source, 'health details include CANARY-992')], metadata: { insightSchema: 1, modelProvider: 'test', category: 'preference', preferenceKey: 'private-detail', scopeLabel: 'proj', sensitivity: 'none' } });
+  assert.equal((await w.vault.get(derived.id)).body, derived.body, 'the owner retains direct access');
+  const reader = new Vault(w.root, { actorId: 'reader', permissions: ['global:profile:read'] });
+  assert.equal(await reader.get(source.id).then(() => true, () => false), true, 'the control actor is currently authorized to read the cited workspace source');
+  await assert.rejects(reader.get(derived.id), error => error instanceof MDBError && error.code === 'NOT_FOUND_OR_FORBIDDEN', 'a derived read does not expose sensitive evidence just because its metadata was not upgraded');
+  const unsupported = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Unlinked', body: 'Generated from a source that was later removed.', status: 'accepted', metadata: { insightSchema: 1, modelProvider: 'test', category: 'preference', preferenceKey: 'unlinked', scopeLabel: 'proj', sensitivity: 'none' } });
+  await assert.rejects(reader.get(unsupported.id), error => error instanceof MDBError && error.code === 'NOT_FOUND_OR_FORBIDDEN', 'a model-derived claim without resolvable evidence fails closed');
+  const visibleSource = await w.userSaid('I prefer CANARY-993.', '2026-10-07T10:01:00.000Z');
+  const sensitiveClaim = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Health note', body: 'The user mentioned a health detail CANARY-993.', status: 'accepted', evidence: [ref(visibleSource, 'I prefer CANARY-993')], metadata: { insightSchema: 1, modelProvider: 'test', category: 'preference', preferenceKey: 'health-detail', scopeLabel: 'proj', sensitivity: 'none' } });
+  await assert.rejects(reader.get(sensitiveClaim.id), error => error instanceof MDBError && error.code === 'NOT_FOUND_OR_FORBIDDEN', 'a sensitive derived claim is hidden even when its evidence is otherwise readable');
+  recordCase({ suite: 'profile', name: 'profile-direct-read-sensitive-source-guard', status: 'PASS' });
+});
 test('a schema-valid no_insight abstention completes the job, stores nothing, and is counted as an abstention', async t => {
   const w = await world(t); const message = await w.userSaid('Would you prefer a table or a paragraph for this comparison?');
   const calls: ModelRequest[] = []; const engine = new IntelligenceEngine(w.vault, { id: 'abstainer', async generate(r) { calls.push(r); return abstain(); } });
@@ -262,7 +405,7 @@ test('malformed profile output is repaired within a bounded budget and never inv
   let n = 0; const notes: string[] = [];
   const engine = new IntelligenceEngine(w.vault, { id: 'flaky', async generate(r) { n++; notes.push(r.instruction); if (n === 1) return { kind: 'user_insight', title: 'x', body: 'y', evidence: [] } as ModelProposal; if (n === 2) return { kind: 'preference_note', title: 'x', body: 'y', evidence: [ref(message, 'command first')] } as ModelProposal; return { kind: 'user_insight', title: 'Command first', body: 'The user wants the command first and the explanation after.', evidence: [ref(message, 'give me the command first')], metadata: { category: 'working_style', preferenceKey: 'answer-order', sensitivity: 'none', explicitStatement: true } }; } });
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
-  assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 4, malformed: 2, repairs: 2, outcome: 'proposed', proposals: 1, complete: true, duplicates: 1, calls: { generate: 2, repair: 2, critic: 0 }, retries: 0, tokens: { input: 0, output: 0, reported: false }, budget: { max: 5, exhausted: false }, terminal: 'proposed' } /* 2 repairs + the insight + one confirming call that returned the same claim */);
+  assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 4, malformed: 2, repairs: 2, outcome: 'proposed', proposals: 1, complete: true, duplicates: 1, calls: { generate: 2, repair: 2, critic: 0 }, retries: 0, tokens: { input: 0, output: 0, reported: false }, budget: { max: 5, exhausted: false }, terminal: 'proposed' });
   assert.match(notes[1]!, /failed schema validation \(Model output invalid at proposal\.evidence/); assert.ok(!notes[1]!.includes('give me the command'), 'repair note never echoes values');
   const proposal = await last(engine); assert.equal(proposal.input.evidence![0]!.span, 'give me the command first');
   recordCase({ suite: 'profile', name: 'profile-bounded-schema-repair', status: 'PASS' });

@@ -37,15 +37,18 @@ try {
   const proposalsDuring = (await new (await import('../packages/intelligence/index.js')).IntelligenceEngine(vault, undefined).proposals()).length;
   check('under resource pressure the due cycle is deferred with an explicit reason, not run and not silently dropped', skipped && (await store.cycles()).length === before && proposalsDuring === 0, { skipped, cycles: (await store.cycles()).length - before, proposalsDuring });
   await sleep(15_000); check('it stays deferred while the pressure lasts (no cycle, no proposals)', (await store.cycles()).length === before);
-  await store.setConfig({ resources: { maxLoadAverage: 10_000 } } as never); // pressure subsides
+  await store.setConfig({ resources: { maxLoadAverage: 10_000, maxRssMiB: 100_000 } } as never); // release both load and RSS ceilings for this model process
   const releasedAt = Date.now(); const doneDeadline = releasedAt + 12 * 60_000; let completed: Awaited<ReturnType<typeof store.cycles>>[number] | undefined;
   while (Date.now() < doneDeadline) { await sleep(5000); completed = (await store.cycles()).find(c => c.state === 'COMPLETED'); if (completed) break; }
   const allCycles = await store.cycles(); check('after the pressure subsides the deferred cycle runs by itself and COMPLETES (real worker, real clock, local Ollama)', !!completed, { waitedMs: Date.now() - releasedAt, states: allCycles.map(c => c.state), errors: allCycles.map(c => c.error), dream: allCycles.map(c => ({ status: c.dream.status, skipped: c.dream.skipped })) });
   const engine = new (await import('../packages/intelligence/index.js')).IntelligenceEngine(vault, undefined); const proposals = (await engine.proposals()).filter(p => p.input.kind === 'user_insight');
   check('the cycle produced reviewable insight proposals from the workspace conversation, each with evidence from alpha', proposals.length >= 2 && proposals.every(p => (p.input.evidence?.length ?? 0) >= 1), { proposals: proposals.map(p => ({ claim: p.input.body, status: p.status, spans: p.input.evidence?.map(e => e.span) })) });
   check('nothing was accepted automatically (autoAccept none)', proposals.every(p => p.status === 'pending' || p.status === 'rejected') && (await vault.listDocuments()).filter(d => d.kind === 'user_insight' && d.status === 'accepted').length === 0);
-  const events = await store.events(500);
-  check('the event log shows skipped(pressure) before started, and a single cycle for the local date', events.findIndex(e => e.type === 'dream_skipped') >= 0 && events.filter(e => e.type === 'dream_started').length === 1, { types: events.map(e => `${e.type}${e.reason ? ':' + String(e.reason).slice(0, 40) : ''}`).slice(-12) });
+  const events = await store.events(500); const dailyStarts = events.filter(e => e.type === 'dream_started' && e.trigger === 'daily');
+  const pressureSkips = events.filter(e => e.type === 'dream_skipped' && /RESOURCE_PRESSURE|load average|rss/i.test(String(e.reason)));
+  const dailyCycles = (await store.cycles()).filter(c => c.kind === 'scheduled' && c.localDate === localParts(new Date(), tz).date);
+  const startCycleIds = new Set(dailyStarts.map(e => e.cycleId));
+  check('pressure is skipped before start; retries retain one cycle ID and one cycle for the local date', pressureSkips.length > 0 && dailyStarts.length > 0 && events.indexOf(pressureSkips[0]!) < events.indexOf(dailyStarts[0]!) && dailyCycles.length === 1 && startCycleIds.size === 1, { pressureSkips: pressureSkips.length, starts: dailyStarts.length, cycleIds: [...startCycleIds], dailyCycles: dailyCycles.map(c => ({ id: c.id, state: c.state })), types: events.map(e => `${e.type}${e.reason ? ':' + String(e.reason).slice(0, 40) : ''}`).slice(-12) });
   check('journal verifies', (await new Vault(root).verify()).ok === true);
 } finally { try { worker?.kill('SIGTERM'); } catch { /* gone */ } await sleep(500); }
 const status = checks.every(x => x.pass) ? 'PASS' : 'FAIL'; const id = new Date().toISOString().replace(/[:.]/g, '-');

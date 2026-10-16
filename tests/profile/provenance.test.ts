@@ -37,7 +37,10 @@ test('metadataRemove cannot touch protected keys and is part of the idempotency 
   recordCase({ suite: 'profile', name: 'metadata-remove-protected', status: 'PASS' });
 });
 
-const insight = (client: Engram, body: string, scopeLabel: string | undefined, extra: { status?: string; sensitivity?: string } = {}) => client.put({ scope: profile, kind: 'user_insight', title: body.slice(0, 40), body, status: extra.status ?? 'accepted', metadata: { insightSchema: 1, category: 'preference', preferenceKey: body.slice(0, 12), evidenceClass: 'explicit', visibility: 'user_private', sensitivity: extra.sensitivity ?? 'none', ...(scopeLabel ? { scopeLabel } : {}) } });
+const insight = async (client: Engram, body: string, scopeLabel: string | undefined, extra: { status?: string; sensitivity?: string } = {}) => {
+  const source = await client.put({ scope: ws(scopeLabel ?? 'proj'), kind: 'observation', title: `Evidence for ${body.slice(0, 40)}`, body, metadata: { speaker: 'user', evidenceClass: 'user_authored' } });
+  return client.put({ scope: profile, kind: 'user_insight', title: body.slice(0, 40), body, status: extra.status ?? 'accepted', evidence: [{ uri: source.uri, revisionId: source.revisionId }], metadata: { insightSchema: 1, category: 'preference', preferenceKey: body.slice(0, 12), evidenceClass: 'explicit', visibility: 'user_private', sensitivity: extra.sensitivity ?? 'none', ...(scopeLabel ? { scopeLabel } : {}) } });
+};
 
 test('what a project job shows the model as goals: only accepted, non-sensitive insights labelled for that project or global', async t => {
   const { client, vault } = await world(t);

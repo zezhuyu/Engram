@@ -12,6 +12,7 @@ import { FilesystemSearch } from '../packages/search-files/index.js';
 import { SQLiteSearch } from '../packages/search-sqlite/index.js';
 import { buildFsIndex, fsIndexStatus } from '../packages/search-files/postings.js';
 import { profileReport, resetProfile, withProfileContext } from '../packages/bench/instrumentation.js';
+import { currentSourceEvidence } from './lib/source-evidence.js';
 
 const GENERATOR_VERSION = '2.0.0';
 const MANIFEST = '.engram-benchmark-manifest.json';
@@ -19,6 +20,7 @@ const DISTRIBUTION = '60% short (12 tokens), 30% medium (120), 10% long (600); 5
 type Workload = { name: string; input: SearchInput; expectedHits: number | null };
 type CorpusManifest = {
   schemaVersion: 1; corpusId: string; generator: { name: string; version: string; sourceSha256: string; distribution: string };
+  sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> };
   builtAt: string; seed: number; documents: number; workspaces: number; bodyBytes: number;
   knownHits: { rare: number; cjk: number; phrase: number; punctuation: number; tagAlpha: number; rareOrPhrase: number };
   workloads: Workload[]; files: Array<{ path: string; bytes: number; sha256: string }>; fileCount: number;
@@ -204,10 +206,12 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
     clearInterval(memoryTimer); memoryTimer = undefined; sampleBuildMemory();
     const workloads = buildWorkloads(seed, size, known, scopes);
     const sourcePath = path.resolve('scripts/benchmark.ts');
+    const source = await currentSourceEvidence();
+    const sourceBinding = { fingerprint: source.fingerprint, workingTreeSourceFingerprint: source.fingerprint, fullSourceFileCount: Object.keys(source.files).length, files: source.files };
     const files = await listCorpusFiles(root);
     const base = {
       schemaVersion: 1 as const, generator: { name: 'engram-benchmark', version: GENERATOR_VERSION, sourceSha256: hash(await fs.readFile(sourcePath)), distribution: DISTRIBUTION },
-      builtAt: new Date().toISOString(), seed, documents: size, workspaces: sizeOf, bodyBytes, knownHits: known, workloads, files, fileCount: files.length,
+      sourceBinding, builtAt: new Date().toISOString(), seed, documents: size, workspaces: sizeOf, bodyBytes, knownHits: known, workloads, files, fileCount: files.length,
       codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), benchmarkConfiguration: { buildMode: resume ? 'retained-resumed' : retain ? 'retained' : 'temporary', ...(resume ? { resumedAfterDocuments: completed } : {}), durableCommits: true, sqliteIndexBuilt: true, indexBuildMs: +sqliteBuildMs.toFixed(2), commitStats: stats(commit), commitCpuUserMs: buildCpu.user / 1000, commitCpuSystemMs: buildCpu.system / 1000, buildAllocationBytes, peakRssBytes: buildMemory.map(item => item.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: buildMemory.map(item => item.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: buildMemory.map(item => item.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), memorySamples: buildMemory.length, instrumentation: profileReport() }
     };
     const corpusId = hash(JSON.stringify({ seed, documents: size, generator: base.generator, files })).slice(0, 24);
@@ -242,6 +246,10 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
   const watched = async <T>(work: () => Promise<T>): Promise<T | typeof TIMED_OUT> => { let timer: NodeJS.Timeout | undefined; const limit = new Promise<typeof TIMED_OUT>(resolve => { timer = setTimeout(() => resolve(TIMED_OUT), queryTimeoutMs); }); try { return await Promise.race([work(), limit]); } finally { clearTimeout(timer); } };
   if (runs < 3 || runs > 200 || warmups < 0 || warmups > 20) throw new Error('runs must be 3..200; warmups must be 0..20');
   const manifest = await readManifest(root); await verifyCorpus(root, manifest);
+  const source = await currentSourceEvidence();
+  if (manifest.sourceBinding?.fingerprint !== source.fingerprint || manifest.sourceBinding.workingTreeSourceFingerprint !== source.fingerprint
+      || manifest.sourceBinding.fullSourceFileCount !== Object.keys(source.files).length) throw new Error('Benchmark corpus source identity is stale; rebuild it with the current full source set');
+  for (const [file, digest] of Object.entries(manifest.sourceBinding.files)) if (source.files[file] !== digest) throw new Error(`Benchmark corpus source hash changed: ${file}`);
   const vault = new Vault(root); const engines = { filesystem: new FilesystemSearch(vault), sqlite: new SQLiteSearch(vault) }; const workloads = manifest.workloads;
   // The filesystem backend is measured with its persistent trigram index (the corpus manifest excludes .mdb/indexes). The build is reported, never hidden.
   const fsIndexBuild = (await fsIndexStatus(vault)).present ? { reused: true as const } : { reused: false as const, ...(await buildFsIndex(vault)) };
@@ -308,7 +316,7 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
     const report = {
       schemaVersion: 1, mode: 'replay', historicalComparison: false, corpus: { corpusId: manifest.corpusId, seed: manifest.seed, documents: manifest.documents, fileCount: manifest.fileCount, verifiedHashes: true, manifestPath: path.join(root, MANIFEST) },
       timestamp: new Date().toISOString(), runs, warmups, cache: { mode: 'first-pass-plus-warm-interleaved', firstPass: 'measured after hash verification; reflects a fresh query pass, not a cold OS page cache', osPageCachePurged: false, note: 'Hash verification can warm OS page cache; no cold-cache claim is made.' },
-      codeRevision: await codeRevision(), hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
+      codeRevision: await codeRevision(), sourceBinding: manifest.sourceBinding, hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
       instrumentation: profileReport(), queryPlans: plans, cpu: { userMs: processCpu.user / 1000, systemMs: processCpu.system / 1000 },
       memory: { allocationCounter: allocationCounterAvailable ? 'v8.total_allocated_bytes' : 'unavailable', startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocationDelta(allocatedBytes(), allocStart),
         peakRssBytes: memorySamples.map(sample => sample.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: memorySamples.map(sample => sample.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: memorySamples.map(sample => sample.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), samples: memorySamples.length, samplingIntervalMs: 50 }

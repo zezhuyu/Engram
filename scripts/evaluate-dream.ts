@@ -6,15 +6,33 @@ import { createProviderFromConfig } from '../packages/models/factory.js';
 import { IntelligenceEngine } from '../packages/intelligence/index.js';
 import { buildPack } from '../tests/dream/pack.js';
 import { inputPath } from './lib/suite.js';
+import { currentSourceEvidence } from './lib/source-evidence.js';
+import { isUsableDreamCandidate } from './lib/dream-metrics.js';
 
 const spec = JSON.parse(await fs.readFile(inputPath('dream/labeled-scenarios.json'), 'utf8')) as { thresholds: { meanQualityPerMode: number; minimumEvidenceGrounding: number; criticAdversarialRejectionRecall: number; criticSupportedAcceptanceRate: number; feedbackDeterministicInfluence: number }; scenarios: Array<{ id: string; mode: 'micro' | 'deep' | 'strategic'; evidence: string[]; goal: string; relevanceTerms?: string[] }>; criticCases: Array<{ id: string; expected: 'accept' | 'reject'; proposal: string; evidence: string[] }> };
 const providerName = process.env.MDB_TEST_PROVIDER ?? 'claude-cli';
 const modelName = process.env.MDB_TEST_MODEL;
 if (!/-cli$|^auto$/.test(providerName) && !modelName) throw new Error('MDB_TEST_MODEL is required for API providers');
 const provider = createProviderFromConfig({ provider: providerName, allowNetwork: process.env.MDB_TEST_ALLOW_NETWORK === '1', ...(modelName ? { modelName } : {}), ...(process.env.MDB_TEST_BASE_URL ? { baseUrl: process.env.MDB_TEST_BASE_URL } : {}), ...(process.env.MDB_TEST_API_KEY_ENV ? { apiKeyEnv: process.env.MDB_TEST_API_KEY_ENV } : {}), timeoutMs: 240_000, maxRetries: 1 });
+// Keep exact inputs, outputs and bounded provider errors for this synthetic corpus so a reviewer can rescore the run.
+const providerCalls: Array<Record<string, unknown>> = [];
+const generate = provider.generate.bind(provider);
+provider.generate = async request => {
+  try { const response = await generate(request); providerCalls.push({ kind: 'generate', request, response }); return response; }
+  catch (error) { const e = error as { code?: string; message?: string }; providerCalls.push({ kind: 'generate', request, error: { code: e.code, message: e.message } }); throw error; }
+};
+if (provider.critique) {
+  const critique = provider.critique.bind(provider);
+  provider.critique = async request => {
+    try { const response = await critique(request); providerCalls.push({ kind: 'critique', request, response }); return response; }
+    catch (error) { const e = error as { code?: string; message?: string }; providerCalls.push({ kind: 'critique', request, error: { code: e.code, message: e.message } }); throw error; }
+  };
+}
 const RUNS = Math.max(1, Number(process.env.MDB_EVAL_RUNS ?? 1));
 const results: Array<Record<string, unknown>> = [];
 const criticResults: Array<Record<string, unknown>> = [];
+let criticRawStart = 0;
+const rawDir = path.join('verification/dream/raw-responses', new Date().toISOString().replace(/[:.]/g, '-'));
 const OBSERVABLE = /\b(measure|compare|check|record|observe|count|assert|time|log|render|confirm|verify|inspect|diff|test)\b/i;
 const UNIVERSAL = /(always safe|never leaks?|verified fact|proven that|guaranteed)/i;
 const ATTRIBUTED = /(claim|claims|says|said|states|stated|asserts?|according|source|note|page|finding|quote|"|\u201c|\*)/i;
@@ -33,7 +51,7 @@ const scoreProposal = (scenario: (typeof spec.scenarios)[number], proposal: { in
   const novelty = !!proposal && (m.novelty === 'new_to_user' || /hypothesis|could|might|combine|connect|composition|transfer|opportunity/i.test(proposal.input.body));
   const contradiction = scenario.mode !== 'deep' || scenario.id !== 'deep-cache-contradiction' || (/cache/.test(text) && /conflict|contradict|both|uncertain|cannot determine|incompatible|unresolved/i.test(text));
   const hallucinationFree = !!proposal && grounded && !unsupportedUniversal(proposal.input.body);
-  const dims: Record<string, boolean> = { novelty, relevance: modeRelevance, feasibility, evidenceGrounding: grounded, contradictionHandling: contradiction, hallucinationFree };
+  const dims: Record<string, boolean> = { novelty, relevance: modeRelevance, feasibility, citationIntegrity: grounded, contradictionHandling: contradiction, hallucinationFree };
   if (scenario.mode === 'deep') {
     dims.factSpeculationSeparation = Array.isArray(m.facts) && m.facts.length >= 1 && Array.isArray(m.speculation) && m.speculation.length >= 1 && Array.isArray(m.missingEvidence) && m.missingEvidence.length >= 1;
     dims.multiHop = Array.isArray(m.hops) && m.hops.length >= (m.subtype === 'contradiction' ? 1 : 2);
@@ -44,6 +62,7 @@ const scoreProposal = (scenario: (typeof spec.scenarios)[number], proposal: { in
 };
 try {
   for (let run = 1; run <= RUNS; run++) for (const scenario of spec.scenarios) {
+    const rawCallStart = providerCalls.length;
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mdb-dream-eval-'));
     try {
       const vault = new Vault(root); await vault.init();
@@ -67,13 +86,16 @@ try {
       const expectedRefs = new Set(sources.map(doc => `${doc.uri}\0${doc.revisionId}`));
       const hasLabeledEvidence = (item: (typeof proposalSet)[number]) => scenario.evidence.every(key => { const doc = sources.find(source => key === 'goal' ? source.id === pack.goalId : source.id === pack.ids[key]); return !!doc && item.input.evidence?.some(ref => ref.uri === doc.uri && ref.revisionId === doc.revisionId); });
       // Deep mode keeps one winner among sibling candidates; the others are recorded as rejected (not_selected). Score the winner, and all siblings for comparison.
-      const survivors = proposalSet.filter(item => !(item.flags ?? []).includes('not_selected'));
-      const proposal = survivors.find(hasLabeledEvidence) ?? survivors.at(-1) ?? proposalSet.at(-1);
+      const survivors = proposalSet.filter(isUsableDreamCandidate);
+      const proposal = survivors.find(hasLabeledEvidence) ?? survivors.at(-1);
       const scored = scoreProposal(scenario, proposal, sources);
       const siblings = proposalSet.map(item => scoreProposal(scenario, item, sources).quality);
-      results.push({ id: scenario.id, run, mode: scenario.mode, jobStatus: job?.status ?? 'missing', ...(job?.error ? { error: job.error } : {}), candidateCount: proposalSet.length, notSelected: proposalSet.length - survivors.length, siblingQualities: siblings, selectedByLabeledEvidence: !!proposal && hasLabeledEvidence(proposal), expectedEvidence: [...expectedRefs], proposalStatus: proposal?.status ?? 'no_candidate', candidate: proposal ? { title: proposal.input.title, body: proposal.input.body, evidence: proposal.input.evidence, metadata: proposal.input.metadata, critic: proposal.critic, flags: proposal.flags, speculativeStatus: proposal.input.status ?? 'hypothesis' } : null, dimensions: scored.dims, quality: scored.quality, legacyQuality: scored.legacy });
+      results.push({ id: scenario.id, run, mode: scenario.mode, jobStatus: job?.status ?? 'missing', ...(job?.error ? { error: job.error } : {}), telemetry: job?.telemetry, trace: job?.trace, candidateCount: proposalSet.length, rejectedCount: proposalSet.filter(item => item.status === 'rejected').length, usableCandidateCount: survivors.length, notSelected: proposalSet.length - survivors.length, siblingQualities: siblings, selectedByLabeledEvidence: !!proposal && hasLabeledEvidence(proposal), expectedEvidence: [...expectedRefs], proposalStatus: proposal?.status ?? 'no_usable_candidate', candidate: proposal ? { title: proposal.input.title, body: proposal.input.body, evidence: proposal.input.evidence, metadata: proposal.input.metadata, critic: proposal.critic, flags: proposal.flags, speculativeStatus: proposal.input.status ?? 'hypothesis' } : null, semanticGrounding: 'NOT_ASSESSED', dimensions: scored.dims, quality: scored.quality, legacyQuality: scored.legacy });
+      await fs.mkdir(rawDir, { recursive: true });
+      await fs.writeFile(path.join(rawDir, `${scenario.id}-run-${run}.json`), JSON.stringify({ scenario: scenario.id, run, job: job ? { status: job.status, error: job.error, telemetry: job.telemetry, trace: job.trace } : { status: 'missing' }, calls: providerCalls.slice(rawCallStart) }, null, 2) + '\n');
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   }
+  criticRawStart = providerCalls.length;
   for (let run = 1; run <= RUNS; run++) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mdb-dream-eval-'));
     try {
@@ -99,10 +121,14 @@ const byMode = Object.fromEntries(['micro', 'deep', 'strategic'].map(mode => {
   return [mode, { count: selected.length, scenarios: new Set(selected.map(row => row.id)).size, meanQuality: mean(selected.map(row => Number(row.quality))), legacyMeanQuality: mean(selected.map(row => Number(row.legacyQuality))), perRunMeanQuality: perRun, runStdDev: sd(perRun), minScenarioRunQuality: selected.length ? Math.min(...selected.map(row => Number(row.quality))) : 0, perDimension: Object.fromEntries(dimNames.map(name => [name, mean(selected.map(row => ((row.dimensions as Record<string, boolean>)[name] ? 1 : 0))) ])), jobsCompleted: selected.filter(row => row.jobStatus === 'complete').length, meanCandidatesPerRun: mean(selected.map(row => Number(row.candidateCount))), meanSiblingQuality: mean(selected.flatMap(row => row.siblingQualities as number[])), selectedVsSiblingGain: mean(selected.map(row => Number(row.quality) - mean(row.siblingQualities as number[]))) }];
 }));
 const rejects = criticResults.filter(row => row.expected === 'reject'); const accepts = criticResults.filter(row => row.expected === 'accept');
-const metrics = { modes: byMode, meanQualityPerModePass: Object.values(byMode).every(row => row.meanQuality >= spec.thresholds.meanQualityPerMode), minimumEvidenceGrounding: results.length ? Math.min(...results.map(row => (row.dimensions as { evidenceGrounding: boolean }).evidenceGrounding ? 1 : 0)) : 0, criticAdversarialRejectionRecall: rejects.length ? rejects.filter(row => row.correct).length / rejects.length : 1, criticSupportedAcceptanceRate: accepts.length ? accepts.filter(row => row.correct).length / accepts.length : 1, feedbackDeterministicInfluence: 1, feedbackEvidence: 'tests/dream/dream.test.ts: feedback drives status and ranking; rejected ideas do not come back without new evidence; repetition never validates' };
+const metrics = { modes: byMode, meanQualityPerModePass: Object.values(byMode).every(row => row.meanQuality >= spec.thresholds.meanQualityPerMode), minimumCitationIntegrity: results.length ? Math.min(...results.map(row => (row.dimensions as { citationIntegrity: boolean }).citationIntegrity ? 1 : 0)) : 0, semanticGrounding: 'NOT_ASSESSED' as const, criticAdversarialRejectionRecall: rejects.length ? rejects.filter(row => row.correct).length / rejects.length : 1, criticSupportedAcceptanceRate: accepts.length ? accepts.filter(row => row.correct).length / accepts.length : 1, feedbackDeterministicInfluence: 1, feedbackEvidence: 'tests/dream/dream.test.ts: feedback drives status and ranking; rejected ideas do not come back without new evidence; repetition never validates' };
 const thresholds = spec.thresholds;
-const pass = metrics.meanQualityPerModePass && metrics.minimumEvidenceGrounding >= thresholds.minimumEvidenceGrounding && metrics.criticAdversarialRejectionRecall >= thresholds.criticAdversarialRejectionRecall && metrics.criticSupportedAcceptanceRate >= thresholds.criticSupportedAcceptanceRate;
-const report = { status: pass ? 'PASS' : 'FAIL', runs: RUNS, command: `MDB_TEST_PROVIDER=claude-cli MDB_EVAL_RUNS=${RUNS} npm run eval:dream`, provider: provider.id, model: modelName ?? null, corpus: 'verification/dream/labeled-scenarios.json', thresholds, counts: { dreamScenarios: results.length, criticCases: criticResults.length }, metrics, scenarios: results, criticCases: criticResults, retrieval: { lexicalGraph: 'deterministic evidence: npm run verify:dream', semanticHybrid: 'NOT_RUN; no configured real embedding provider/backend for this run; optional semantic retrieval remains additive' }, limitations: ['v2 scoring reads the structured fields the rubric names (metadata.proposedValidation/testPlan for feasibility; attribution-aware hallucination check); legacyQuality reproduces the v1 scorer on the same outputs. Quality dimensions use the predeclared rubric with deterministic string/evidence checks; they are not a blinded expert panel.', 'Feedback influence is established by deterministic regression testing, not a multi-run model experiment.', 'No production embedding model was configured, so real semantic/hybrid quality comparison was not run.'] };
+const heuristicPass = metrics.meanQualityPerModePass && metrics.minimumCitationIntegrity >= thresholds.minimumEvidenceGrounding && metrics.criticAdversarialRejectionRecall >= thresholds.criticAdversarialRejectionRecall && metrics.criticSupportedAcceptanceRate >= thresholds.criticSupportedAcceptanceRate;
+const candidateMetrics = { generatedCandidates: results.reduce((n, row) => n + Number(row.candidateCount), 0), rejectedCandidates: results.reduce((n, row) => n + Number(row.rejectedCount), 0), usableCandidates: results.reduce((n, row) => n + Number(row.usableCandidateCount), 0), usableOutputYield: results.length ? results.filter(row => Number(row.usableCandidateCount) > 0).length / results.length : 0, semanticAdjudication: 'NOT_RUN' as const };
+const evidenceSource = await currentSourceEvidence();
+await fs.mkdir(rawDir, { recursive: true });
+await fs.writeFile(path.join(rawDir, `critic-run-${Date.now()}.json`), JSON.stringify({ calls: providerCalls.slice(criticRawStart), scoredCases: criticResults }, null, 2) + '\n');
+const report = { status: heuristicPass ? 'INCOMPLETE' : 'FAIL', heuristicStatus: heuristicPass ? 'PASS' : 'FAIL', runs: RUNS, command: `MDB_TEST_PROVIDER=${providerName} MDB_TEST_MODEL=${modelName ?? '(CLI default)'} MDB_EVAL_RUNS=${RUNS} npm run eval:dream`, provider: provider.id, model: modelName ?? null, corpus: 'verification/dream/labeled-scenarios.json', thresholds, counts: { dreamScenarios: results.length, criticCases: criticResults.length, ...candidateMetrics }, metrics, scenarios: results, criticCases: criticResults, evidenceSource, rawResponses: rawDir, retrieval: { lexicalGraph: 'deterministic evidence: npm run verify:dream', semanticHybrid: 'NOT_RUN; no configured real embedding provider/backend for this run; optional semantic retrieval remains additive' }, limitations: ['Citation presence and exact source-span integrity are measured separately from whether evidence semantically entails a candidate. Semantic adjudication was NOT_RUN, so a passing deterministic rubric remains INCOMPLETE.', 'Candidate quality, critic rejection accuracy and usable-output yield are separate counts; rejected or not-selected hypotheses are not usable results.', 'Feedback influence is established by deterministic regression testing, not a multi-run model experiment.', 'No production embedding model was configured, so real semantic/hybrid quality comparison was not run.'] };
 await fs.writeFile('verification/dream/real-model-evaluation.json', JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));
-if (!pass) process.exitCode = 1;
+if (report.status !== 'PASS') process.exitCode = 1;

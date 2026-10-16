@@ -1,12 +1,23 @@
 # Engram Linux background client and server
 
-Both standalone bundles include a private Node runtime and work without a desktop or an open application. The client runs the existing outbox delivery worker; the server runs the existing authenticated HTTP MCP gateway. Supported production targets are Linux x64 and arm64 on compatible glibc distributions with systemd. CI currently publishes x64.
+Both standalone bundles include a private Node runtime and work without a desktop or an open application. The client runs the existing outbox delivery worker; the server runs the existing authenticated HTTP MCP gateway. The package build supports Linux x64 and arm64 on compatible glibc distributions with systemd; CI currently publishes x64. Linux remains a BETA build target until native clean-install, service-start, and reboot verification pass.
 
-## Build
+## Install from a Debian package
 
-On Linux, run `node scripts/package-linux.mjs dist-linux`. To reuse an existing standalone runtime, supply its directory as a second argument. CI packages both roles into the same two client/server release assets as macOS. No production bundle is built merely by installing this source code.
+The CI release publishes separate `engram-client-linux-x64-SHA.deb` and `engram-server-linux-x64-SHA.deb` installers. Install either app directly:
 
-Extract each platform archive to a stable directory accessible to its service account, such as `/opt/engram-client` or `/opt/engram-server`. Each bundle contains its role launcher, `backend/`, and `install-service.mjs`. The bundled `backend/runtime/bin/node` runs the installer; no global Node installation is required.
+```sh
+sudo apt install ./engram-client-linux-x64-SHA.deb
+sudo apt install ./engram-server-linux-x64-SHA.deb
+```
+
+The package installs its standalone runtime and launcher under `/opt/engram-client` or `/opt/engram-server`, and places `engram-client` / `engram-server` launch commands on `PATH`. The service installers are `engram-client-service` and `engram-server-service`. Package installation does not enable a background service; configure its protected environment file first, then explicitly run the service installer below.
+
+## Build from source
+
+On Linux, run `node scripts/package-linux.mjs dist-linux`. To reuse an existing standalone runtime, supply its directory as a second argument. CI publishes separate Debian installers for the client and server. No production bundle is built merely by installing this source code.
+
+Each bundle contains its role launcher, `backend/`, and `install-service.mjs`. The bundled `backend/runtime/bin/node` runs the installer; no global Node installation is required.
 
 ## Configure
 
@@ -27,8 +38,8 @@ Project reconciliation still requires an existing trusted binding. Server config
 Run these commands after creating the configuration for `SERVICE_USER`:
 
 ```sh
-sudo /opt/engram-client/backend/runtime/bin/node /opt/engram-client/install-service.mjs install system SERVICE_USER
-sudo /opt/engram-server/backend/runtime/bin/node /opt/engram-server/install-service.mjs install system SERVICE_USER
+sudo engram-client-service install system SERVICE_USER
+sudo engram-server-service install system SERVICE_USER
 ```
 
 The installer enables and starts `engram-client.service` / `engram-server.service` as the specified non-root account. They restart automatically, survive logout, and start before login at subsequent boots. systemd supervises the worker directly; no window or tray application is needed.
@@ -38,8 +49,8 @@ The installer enables and starts `engram-client.service` / `engram-server.servic
 For per-user startup without sudo:
 
 ```sh
-/opt/engram-client/backend/runtime/bin/node /opt/engram-client/install-service.mjs install user
-/opt/engram-server/backend/runtime/bin/node /opt/engram-server/install-service.mjs install user
+engram-client-service install user
+engram-server-service install user
 ```
 
 User services start at login. To also start them at boot and keep them running after logout, an administrator can enable lingering with `sudo loginctl enable-linger SERVICE_USER`. The installer does not change this account-wide setting. Choose either system or user mode for each role; it refuses existing conflicting unit files and the legacy `engram-mcp.service` server unit.

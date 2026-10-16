@@ -13,8 +13,21 @@ export interface InsightEval { verdict: 'accept' | 'reject' | 'review_required';
 const KEY = /^[a-z0-9][a-z0-9_.-]{0,60}$/;
 const FREE_TEXT_CORRECTION = /\b(?:actually|correction|i meant|i was wrong|i changed my mind|from now on|going forward|no longer|not anymore|instead of|rather than)\b/i;
 const NO_INSIGHT_CLAIM = /^\s*(?:no\s+(?:(?:enduring|lasting|user)\s+)*(?:insight|preference|proposal)|no\s+insight\s+(?:is\s+)?proposed|no\s+proposal\b)/i;
-const STOP_TERMS = new Set(['user', 'prefers', 'prefer', 'likes', 'wants', 'needs', 'using', 'rather', 'instead', 'changed', 'actually', 'explicitly', 'earlier', 'having', 'would', 'should', 'could', 'from', 'with', 'that', 'this', 'their', 'about', 'when', 'then', 'only', 'also', 'than']);
+const MULTIPLE_INSIGHTS = /\b(?:and|;)\s+(?:the\s+user\s+)?(?:prefers?|likes?|wants?|needs?|can|is\s+interested|has\s+experience|plans?|aims?)\b/i;
+const USER_OPTOUT = /\bforget\s+this\b|\b(?:do not|don't|never)\s+(?:(?:want|wish)\s+(?:you\s+to\s+)?)?(?:save|store|remember|retain|infer|derive)\s+(?:it|this(?:\s+conversation)?|that|anything|anywhere|a\s+(?:lasting|long[- ]term)\s+(?:preference|memory))\b/i;
+const BROAD_USER_OPTOUT = /\bforget\s+this\b|\b(?:do not|don't|never)\s+(?:(?:want|wish)\s+(?:you\s+to\s+)?)?(?:save|store|remember|retain|infer|derive)\s+(?:anything|everything|this(?:\s+conversation)?|it\s+anywhere|it\s+at\s+all|a\s+(?:lasting|long[- ]term)\s+(?:preference|memory)|anywhere)\b|\b(?:do not|don't|never)\s+want\s+(?:a\s+)?(?:lasting|long[- ]term)\s+(?:preference|memory)\s+(?:inferred|derived|remembered|stored)\b/i;
+const HYPOTHETICAL = /\b(?:hypothetically|say\s+(?:if\s+)?i\s+(?:had|were|was|could)|if\s+i\s+(?:had|were|was|could))\b/i;
+const TEMPORARY = /\b(?:this\s+once|just\s+this\s+time|only\s+this\s+time|for\s+now|temporarily|one[- ]time|this\s+time\s+only|in\s+a\s+hurry)\b/i;
+const NO_PERSONAL_STANCE = /\b(?:i\s+(?:do not|don't|have no|haven't (?:formed|made))\s+(?:(?:have|any|a)\s+)*(?:preference|view|opinion)|i\s+have\s+no\s+(?:view|opinion)|no\s+(?:personal\s+)?preference\s+(?:about|on|for)|not\s+decided\s+whether\s+i\s+prefer|undecided\s+whether\s+i\s+prefer|i\s+haven't\b[^.!?\n]{0,80}\b(?:formed|made)\s+(?:an?\s+)?(?:preference|view|opinion))\b/i;
+const TOPIC_EXPOSURE = /\b(?:read|heard|saw|watched|skimmed|came across|learned about|looked at)\b.{0,120}\b(?:article|talk|video|post|paper|about|on)\b/i;
+const THIRD_PARTY_ONLY = /\b(?:vendor|teammate|colleague|coworker|friend|customer|client|manager|partner|someone else)\b.{0,240}\b(?:nothing to do with my|not my (?:own )?(?:preference|habit|choice)|does not reflect my|doesn't reflect my)\b/i;
+const STOP_TERMS = new Set(['user', 'prefers', 'prefer', 'likes', 'wants', 'needs', 'using', 'rather', 'instead', 'changed', 'actually', 'explicitly', 'earlier', 'having', 'would', 'should', 'could', 'from', 'with', 'that', 'this', 'their', 'about', 'when', 'then', 'only', 'also', 'than', 'the', 'a', 'an', 'and', 'or', 'but', 'are', 'is', 'was', 'were', 'has', 'have', 'had', 'do', 'does', 'did', 'of', 'to', 'in', 'on', 'as', 'by', 'at', 'me', 'my', 'i', 'we', 'our', 'be', 'been', 'being', 'assistant']);
 const salientTerms = (text: string): Set<string> => new Set(normalize(text).split(' ').filter(word => word.length >= 4 && !STOP_TERMS.has(word)));
+const markerTargetsClaim = (body: string, marker: RegExp, key: string, claim: string): boolean => {
+  const claimTerms = normalize(`${key.replace(/[-_.]/g, ' ')} ${claim}`).split(' ').filter(word => word.length >= 3 && !STOP_TERMS.has(word));
+  return body.split(/(?<=[.!?;])\s+|\n+/).some(part => marker.test(part) && normalize(part).split(' ').some(term => term.length >= 3 && claimTerms.includes(term)));
+};
+const optedOut = (body: string, key: string, claim: string): boolean => BROAD_USER_OPTOUT.test(body) || markerTargetsClaim(body, USER_OPTOUT, key, claim);
 const correctionApplies = (text: string, key: string, claim: string): boolean => {
   const marker = FREE_TEXT_CORRECTION.exec(text); if (!marker || marker.index === undefined) return false;
   const tail = normalize(text.slice(marker.index, marker.index + 240));
@@ -22,7 +35,12 @@ const correctionApplies = (text: string, key: string, claim: string): boolean =>
   return terms.some(term => tail.includes(term));
 };
 export const normalize = (text: string): string => text.toLowerCase().replace(/[\s\p{P}]+/gu, ' ').trim();
-const spanFound = (body: string, span: string): boolean => span.length >= 4 && normalize(body).includes(normalize(span));
+const spanFound = (body: string, span: string): boolean => {
+  if (span.length < 4) return false;
+  const sourceWords = normalize(body).split(' '); const spanWords = normalize(span).split(' ');
+  if (!spanWords.length || spanWords.some(word => !word)) return false;
+  return sourceWords.some((_, start) => spanWords.every((word, offset) => sourceWords[start + offset] === word));
+};
 const reject = (rationale: string, ...flags: string[]): InsightEval => ({ verdict: 'reject', rationale, flags, patch: {}, supersede: [] });
 /** Where an insight applies: its scopeLabel, or the storage scope for legacy objects. */
 export const applicability = (d: Pick<Document, 'scope' | 'metadata'>): string => (typeof d.metadata.scopeLabel === 'string' ? d.metadata.scopeLabel : d.scope.type === 'global' ? 'global' : d.scope.workspaceId);
@@ -40,6 +58,12 @@ export async function evaluateInsight(vault: Vault, input: PutInput): Promise<In
   if (!KEY.test(key)) return reject('Insight needs a preferenceKey (lowercase slug) so it can be reconciled with later statements.', 'missing_preference_key');
   const claim = input.body.trim(); if (!claim || claim.length > 500) return reject('The claim must be one concise statement.', 'invalid_claim');
   if (NO_INSIGHT_CLAIM.test(claim)) return reject('The model abstained; an abstention must not be stored as a user insight.', 'model_abstained');
+  const compoundMarker = MULTIPLE_INSIGHTS.exec(claim);
+  const compoundTail = compoundMarker ? claim.slice((compoundMarker.index ?? 0) + compoundMarker[0].length) : '';
+  const leftTopics = compoundMarker ? normalize(claim.slice(0, compoundMarker.index)).split(' ').filter(word => word.length >= 4 && !STOP_TERMS.has(word)) : [];
+  const rightTopics = compoundMarker ? new Set(normalize(compoundTail).split(' ').filter(word => word.length >= 4 && !STOP_TERMS.has(word))) : new Set<string>();
+  const sameDomainCapability = category === 'capability' && leftTopics.some(word => rightTopics.has(word));
+  if (compoundMarker && !/\b(?:it|them|this|that)\b/i.test(compoundTail) && !sameDomainCapability) return reject('A user insight must express exactly one independently reviewable preference, goal, interest, capability or working style.', 'multiple_insights');
 
   const sources: InsightSource[] = []; const docs: Document[] = [];
   for (const ref of input.evidence ?? []) {
@@ -50,6 +74,13 @@ export async function evaluateInsight(vault: Vault, input: PutInput): Promise<In
       if (!ref.span) return reject('Each non-explicit source must carry a verbatim span.', 'span_missing');
       if (!spanFound(doc.body, ref.span)) return reject('A cited span does not occur in its source.', 'span_not_in_source');
     } else if (ref.span && !spanFound(doc.body, ref.span)) return reject('A cited span does not occur in its source.', 'span_not_in_source');
+    const citedText = ref.span ?? doc.body;
+    if ((cls === 'user_conversation' || cls === 'explicit') && optedOut(doc.body, key, claim)) return reject('The user explicitly asked not to retain this information.', 'user_opt_out');
+    if ((cls === 'user_conversation' || cls === 'explicit') && markerTargetsClaim(doc.body, TEMPORARY, key, claim)) return reject('The cited instruction is explicitly temporary rather than an enduring user preference.', 'temporary_evidence');
+    if ((cls === 'user_conversation' || cls === 'explicit') && markerTargetsClaim(doc.body, HYPOTHETICAL, key, claim) && !/\b(?:want|would like|plan|intend|goal)\b/i.test(citedText)) return reject('The cited information is conditional or hypothetical rather than a stated user goal.', 'hypothetical_evidence');
+    if (category === 'interest' && (cls === 'user_conversation' || cls === 'explicit') && markerTargetsClaim(doc.body, TOPIC_EXPOSURE, key, claim)) return reject('The source records exposure to this topic without stating personal interest.', 'exposure_not_interest');
+    if (category === 'interest' && (cls === 'user_conversation' || cls === 'explicit') && TOPIC_EXPOSURE.test(doc.body) && NO_PERSONAL_STANCE.test(doc.body)) return reject('The source records topic exposure alongside an explicit lack of personal interest or stance.', 'exposure_without_interest');
+    if ((cls === 'user_conversation' || cls === 'explicit') && (NO_PERSONAL_STANCE.test(citedText) || THIRD_PARTY_ONLY.test(citedText) || THIRD_PARTY_ONLY.test(doc.body))) return reject('The cited words express no personal stance or describe another person, so they cannot support this user insight.', 'negative_or_attributed_evidence');
     sources.push({ uri: doc.uri, revisionId: doc.revisionId, class: cls, ...(typeof doc.metadata.speaker === 'string' ? { speaker: doc.metadata.speaker } : {}), ...(ref.span ? { span: ref.span } : {}) });
     docs.push(doc);
   }

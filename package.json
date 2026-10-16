@@ -37,6 +37,7 @@
     "verify:memory": "npm run build && node dist/scripts/verify-memory.js",
     "verify:profile": "npm run build && node dist/scripts/verify-profile.js",
     "eval:profile": "npm run build && node dist/scripts/evaluate-profile.js",
+    "eval:profile:holdout": "npm run build && MDB_PROFILE_CORPUS=profile/holdout-corpus.json node dist/scripts/evaluate-profile.js",
     "package:client": "npm run build && node scripts/package-client.mjs",
     "verify:scheduler-ollama": "npm run build && node dist/scripts/verify-scheduler-ollama.js",
     "eval:profile-multi": "npm run build && node dist/scripts/evaluate-profile-multi.js",
