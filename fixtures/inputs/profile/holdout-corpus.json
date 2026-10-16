@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "description": "Independent synthetic holdout drafted separately from the original Preferences gold corpus; includes direction, explicit opt-out, hypothetical and third-party cases.",
+  "thresholds": {
+    "precision": 0.9,
+    "recall": 0.8,
+    "falsePositiveRate": 0.1,
+    "jobSuccessRate": 0.9,
+    "scopeAccuracy": 1.0,
+    "evidenceGrounding": 1.0
+  },
+  "cases": [
+    { "id": "holdout-explicit-polarity", "scope": "global", "text": "I prefer Go over Rust for small command-line utilities.", "expected": { "category": "preference", "key": "language-for-cli", "terms": ["go", "over", "rust"], "relation": { "left": "go", "operator": "over", "right": "rust" } } },
+    { "id": "holdout-explicit-tool", "scope": "global", "text": "For database migrations, I prefer small reversible steps with a rollback plan.", "expected": { "category": "preference", "key": "migration-style", "terms": ["reversible", "rollback"] } },
+    { "id": "holdout-workspace", "scope": "project:orion", "text": "For Orion only, keep deployment scripts compatible with the current staging runner.", "expected": { "category": "preference", "key": "orion-staging-compatibility", "terms": ["orion", "staging"] } },
+    { "id": "holdout-opt-out", "scope": "global", "text": "I am not asking you to remember this conversation and do not want a lasting preference inferred from it.", "expected": null },
+    { "id": "holdout-hypothetical", "scope": "global", "text": "If I ran a research lab, I might choose a four-day week, but that is only hypothetical.", "expected": null },
+    { "id": "holdout-third-party", "scope": "global", "text": "My teammate prefers all reports in spreadsheets; that is not my own preference.", "expected": null },
+    { "id": "holdout-question", "scope": "global", "text": "Would you rather use a monolith or microservices for this example?", "expected": null },
+    { "id": "holdout-temporary", "scope": "global", "text": "Just this once, send the long version because I have time today.", "expected": null }
+  ]
+}

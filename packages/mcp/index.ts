@@ -257,7 +257,11 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   const peerFiltered = !['127.0.0.1', '::1', 'localhost'].includes(host) && bindAllowedWithoutTls(host, env);
   const server = createServer(async (request, response) => {
     if (peerFiltered && !peerAllowed(request.socket.remoteAddress)) { request.socket.destroy(); return; } // only tailnet and loopback peers are served in the no-TLS mode
-    const endpoint = new URL(request.url ?? '/', 'http://localhost');
+    // `IncomingMessage.url` is untrusted. A malformed absolute-form target such as
+    // `http://[` makes URL throw; keep that request local to this connection.
+    let endpoint: URL;
+    try { endpoint = new URL(request.url ?? '/', 'http://localhost'); }
+    catch { jsonResponse(response, 400, { error: 'Invalid request target' }); return; }
     if (oauthMetadata && (endpoint.pathname === '/.well-known/oauth-protected-resource' || endpoint.pathname === protectedResourcePath)) { jsonResponse(response, 200, oauthMetadata); return; }
     const allowedHosts = (env.MDB_MCP_HTTP_ALLOWED_HOSTS ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
     if (allowedHosts.length && !allowedHosts.includes((request.headers.host ?? '').toLowerCase())) { jsonResponse(response, 403, { error: 'Host not allowed' }); return; }

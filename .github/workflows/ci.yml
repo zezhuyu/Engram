@@ -60,27 +60,8 @@ jobs:
       - run: npm ci && npm run verify && npm run verify:unix && npm run verify:query
       - run: node --test tests/macos-packaging.test.mjs
 
-  package-client:
-    name: Package client
-    if: github.event_name == 'push'
-    needs: [linux-gnu, linux-reliability, macos]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
-      - run: npm run build
-      - run: node scripts/package-client.mjs release/client
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-client-portable
-          path: release/client/*.tgz
-          if-no-files-found: error
-          retention-days: 1
-
-  package-server:
-    name: Package server (${{ matrix.target }})
+  package-apps:
+    name: Package client and server (${{ matrix.target }})
     if: github.event_name == 'push'
     needs: [linux-gnu, linux-reliability, macos]
     strategy:
@@ -108,57 +89,52 @@ jobs:
       - name: Package Linux client and server daemons
         if: matrix.os == 'linux'
         run: node scripts/package-linux.mjs dist-linux "dist-standalone/engram-${{ matrix.os }}-${{ matrix.arch }}"
-      - name: Archive client and server packages
+      - name: Build direct Linux installer assets
+        if: matrix.os == 'linux'
         run: |
-          mkdir -p release/server release/client
-          if [ "${{ matrix.os }}" = "darwin" ]; then
-            tar -czf "release/server/engram-server-${{ matrix.target }}.tar.gz" -C dist-macos "Engram Server.app" install-macos-boot.mjs README.md
-            tar -czf "release/client/engram-client-${{ matrix.target }}.tar.gz" -C dist-macos "Engram Client.app" install-macos-boot.mjs README.md
-          else
-            tar -czf "release/server/engram-server-${{ matrix.target }}.tar.gz" -C dist-linux/engram-server .
-            tar -czf "release/client/engram-client-${{ matrix.target }}.tar.gz" -C dist-linux/engram-client .
-          fi
-      - uses: actions/upload-artifact@v4
+          set -euo pipefail
+          for role in client server; do
+            node scripts/package-linux-deb.mjs "dist-linux/engram-${role}" release "${role}"
+            mv "release/engram-${role}_"*"_amd64.deb" "release/engram-${role}-${{ matrix.target }}-${GITHUB_SHA::12}.deb"
+          done
+      - name: Build direct macOS disk image installer assets
+        if: matrix.os == 'darwin'
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for role in client server; do
+            if [ "$role" = client ]; then display="Client"; else display="Server"; fi
+            name="Engram ${display}"
+            package="release/engram-${role}-${{ matrix.target }}-${GITHUB_SHA::12}"
+            mkdir -p "$package"
+            ditto "dist-macos/${name}.app" "$package/${name}.app"
+            cp dist-macos/install-macos-boot.mjs dist-macos/README.md "$package/"
+            hdiutil create -quiet -ov -format UDZO -volname "$name" -srcfolder "$package" "${package}.dmg"
+            rm -rf "$package"
+          done
+      - name: Upload installable app assets
+        uses: actions/upload-artifact@v4
         with:
-          name: release-client-${{ matrix.target }}
-          path: release/client/*.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-server-${{ matrix.target }}
-          path: release/server/*.tar.gz
+          name: release-${{ matrix.target }}
+          path: release/engram-*
           if-no-files-found: error
           retention-days: 1
 
   publish-release:
-    name: Publish combined client and server release
+    name: Publish client and server installers as direct release assets
     if: github.event_name == 'push'
-    needs: [package-client, package-server]
+    needs: [package-apps]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-client-*
-          path: release/client
+          pattern: release-*
+          path: release/assets
           merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-server-*
-          path: release/servers
-          merge-multiple: true
-      - name: Assemble the two release packages
-        env:
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          mkdir -p release/payload/server release/payload/client
-          cp release/client/*.tgz release/client/*.tar.gz release/payload/client/
-          tar -czf "release/payload/engram-client-${GITHUB_SHA::12}.tar.gz" -C release/payload/client .
-          cp release/servers/*.tar.gz release/payload/server/
-          tar -czf "release/payload/engram-server-${GITHUB_SHA::12}.tar.gz" -C release/payload/server .
+      - name: Write checksums for the individual app assets
+        run: sha256sum release/assets/engram-* > release/assets/SHA256SUMS
       - name: Create one prerelease for this push
         env:
           GH_TOKEN: ${{ github.token }}
@@ -167,11 +143,9 @@ jobs:
         run: |
           set -euo pipefail
           tag="ci-${GITHUB_RUN_ID}"
-          gh release create "$tag" \
-            "release/payload/engram-client-${GITHUB_SHA::12}.tar.gz" \
-            "release/payload/engram-server-${GITHUB_SHA::12}.tar.gz" \
+          gh release create "$tag" release/assets/engram-* release/assets/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Engram build ${GITHUB_SHA::12}" \
-            --notes "Automated client and server packages for commit ${GITHUB_SHA}. Both include Linux x64 daemon bundles and macOS arm64 apps with background startup support. Client also includes portable CLI/SDK." \
+            --notes "Automated installable Engram client and server apps for commit ${GITHUB_SHA}. Linux x64 assets are Debian installers (.deb); macOS arm64 assets are disk image installers (.dmg) containing the app and startup installer. Linux services can be enabled for startup with the included engram-client-service and engram-server-service installers. No service is enabled automatically by installing the package." \
             --prerelease

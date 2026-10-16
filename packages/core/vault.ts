@@ -7,6 +7,7 @@ import { atomicWrite, atomicWriteVolatile, flushKeys, LocalObjectStore, mkdirDur
 import { createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 import { describeModel } from '../models/factory.js';
 import { profileAsync, profileBytes } from '../bench/instrumentation.js';
+import { isSensitive } from './sensitivity.js';
 import { MDBError, OWNER, type ActorContext, type Collection, type CommitEvent, type CommitJournalStore, type Document, type ObjectStore, type PatchInput, type PutInput, type Scope, type VaultConfig, type Workspace } from './types.js';
 
 const defaults: VaultConfig = { schemaVersion: 1, sqlite: { enabled: false }, postgres: { enabled: false }, capture: { enabled: false, allowedSources: [] }, model: { provider: 'auto', allowNetwork: false }, dream: { enabled: false, maxCandidates: 20 } };
@@ -215,9 +216,35 @@ export class Vault {
     try{return await this.documentForEvent(event);}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')throw inaccessible();throw e;}
   }
   private async resolveReference(uri:string,revisionId?:string):Promise<Document> {const doc=await this.rawDocument(objectIdFromUri(uri),revisionId);if(uri!==doc.uri&&uri!==doc.id)throw inaccessible();return doc;}
-  private async visible(doc:Document):Promise<Document> { const result=structuredClone(doc);const offset=documentBodyLineOffset(doc);if(offset!==undefined)documentBodyLineOffsets.set(result,offset);const links:Document['links']=[],evidence:Document['evidence']=[];for(const l of doc.links){try{await this.resolveReference(l.target,l.revisionId);links.push(l);}catch{/* inaccessible references disclose nothing */}}for(const e of doc.evidence){try{await this.resolveReference(e.uri,e.revisionId);evidence.push(e);}catch{/* inaccessible references disclose nothing */}}result.links=links;result.evidence=evidence;if(!this.owner())for(const key of Object.keys(result.metadata))if(key.startsWith('_'))delete result.metadata[key];return result; }
+  private async visible(doc:Document):Promise<Document> {
+    const result=structuredClone(doc);const offset=documentBodyLineOffset(doc);if(offset!==undefined)documentBodyLineOffsets.set(result,offset);
+    const links:Document['links']=[],evidence:Document['evidence']=[];
+    for(const l of doc.links){try{await this.resolveReference(l.target,l.revisionId);links.push(l);}catch{/* inaccessible references disclose nothing */}}
+    for(const e of doc.evidence){try{await this.resolveReference(e.uri,e.revisionId);evidence.push(e);}catch{/* inaccessible references disclose nothing */}}
+    // Model-derived profile text is sensitive to changes in the source ACL after approval.
+    // Do not return the claim with merely stripped references: callers commonly serialize its body.
+    const derivedInsight=doc.kind==='user_insight'&&(doc.evidence.length>0||doc.metadata.insightSchema===1||typeof doc.metadata.modelProvider==='string'||Array.isArray(doc.metadata.sources));
+    if(derivedInsight){
+      // The vault owner can inspect sensitive claims directly. Other actors must
+      // not receive a claim that its conservative sensitivity screen marks private,
+      // even when the stored metadata was not upgraded at the same time.
+      if(!this.owner()&&isSensitive(`${doc.title}\n${doc.body}`))throw inaccessible();
+      const refs=new Map<string,{uri:string;revisionId:string}>();
+      for(const ref of doc.evidence)refs.set(`${ref.uri}\0${ref.revisionId}`,{uri:ref.uri,revisionId:ref.revisionId});
+      if(Array.isArray(doc.metadata.sources))for(const value of doc.metadata.sources){
+        if(!value||typeof value!=='object')throw inaccessible();const ref=value as {uri?:unknown;revisionId?:unknown};
+        if(typeof ref.uri!=='string'||typeof ref.revisionId!=='string')throw inaccessible();refs.set(`${ref.uri}\0${ref.revisionId}`,{uri:ref.uri,revisionId:ref.revisionId});
+      }
+      if(!this.owner()&&!refs.size&&!(doc.metadata.evidenceClass==='explicit'&&doc.metadata.origin==='user_statement'))throw inaccessible();
+      for(const ref of refs.values())try{
+        const id=objectIdFromUri(ref.uri),current=await this.rawDocument(id),cited=await this.rawDocument(id,ref.revisionId);
+        if(current.uri!==ref.uri||cited.uri!==ref.uri||current.status==='deleted'||cited.status==='deleted'||current.metadata.sensitivity==='sensitive'||cited.metadata.sensitivity==='sensitive'||!this.owner()&&(isSensitive(`${current.title}\n${current.body}`)||isSensitive(`${cited.title}\n${cited.body}`)))throw inaccessible();
+      }catch{throw inaccessible();}
+    }
+    result.links=links;result.evidence=evidence;if(!this.owner())for(const key of Object.keys(result.metadata))if(key.startsWith('_'))delete result.metadata[key];return result;
+  }
   async get(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.get', async () => this.visible(await this.rawDocument(objectId,revisionId))); }
-  async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[]}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||s.collectionId===e.scope.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)result.push(await this.visible(d));}}return result;}
+  async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[]}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||e.scope.collectionId===s.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)try{result.push(await this.visible(d));}catch(error){if(!(error instanceof MDBError)||error.code!=='NOT_FOUND_OR_FORBIDDEN')throw error;}}}return result;}
   private async commit(input:PutInput,previous?:Document,operation='put',idempotencyPayloadHash?:string):Promise<Document> {
     validateInput(input);if(input.metadata?.profileRole)this.requireOwner();await this.requireAccess(input.scope,'write');const events=await this.repairJournal();await this.reconcileProjectionTail(events);this.options.fault?.('commit.before_revision');
     const payload = { ...input, idempotencyKey: undefined };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Engram, OWNER, refreshRelevance, readRanking, relevanceStatus, clearRanking, type ModelProvider, type ModelRequest } from '../../packages/sdk/index.js';
@@ -93,6 +93,31 @@ test('another actor without access to the workspace cannot read its ranking', as
   await refreshRelevance(client, WS, fake(ids => ({ relevant: ids, irrelevant: [] })).provider, await config(client));
   const stranger = new Engram(client.vault.root, { actorId: 'stranger', permissions: [] });
   assert.equal(await readRanking(stranger, WS).catch(() => undefined), undefined);
+});
+
+test('derived insight is hidden from direct reads and every projection after current source access changes', async t => {
+  for (const change of ['collection revoke', 'workspace revoke', 'source deletion', 'sensitivity upgrade'] as const) await t.test(change, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mdb-rel-acl-')); t.after(() => rm(root, { recursive: true, force: true }));
+    const owner = new Engram(root, OWNER); await owner.init({ sqlite: false });
+    await owner.createWorkspace(WS, '', { alice: ['read', 'write'] });
+    await owner.createCollection(WS, 'private', '', { alice: ['read', 'write'] });
+    const source = await owner.put({ scope: { type: 'workspace', workspaceId: WS, collectionId: 'private' }, kind: 'observation', title: 'Private source', body: 'I prefer REVOKED-RELEVANCE-CANARY tea.' });
+    const alice = new Engram(root, { actorId: 'alice', permissions: ['global:profile:read', 'global:profile:write'] });
+    const insight = await alice.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Tea preference', body: 'The user prefers REVOKED-RELEVANCE-CANARY tea.', status: 'accepted', evidence: [{ uri: source.uri, revisionId: source.revisionId }], metadata: { insightSchema: 1, modelProvider: 'local-test', category: 'preference', preferenceKey: 'tea', scopeLabel: WS, sensitivity: 'none', sources: [{ uri: source.uri, revisionId: source.revisionId, span: source.body }] } });
+    if (change === 'collection revoke') await writeFile(path.join(root, `workspaces/${WS}/collections/private/.mdb/collection.json`), JSON.stringify({ id: 'private', workspaceId: WS, description: '', grants: {} }));
+    else if (change === 'workspace revoke') await owner.vault.grant(WS, 'alice', []);
+    else if (change === 'source deletion') await owner.vault.delete(source.id, source.revisionId);
+    else await owner.vault.patch({ objectId: source.id, expectedRevisionId: source.revisionId, metadataPatch: { sensitivity: 'sensitive' } });
+
+    assert.equal(await alice.vault.get(insight.id).then(() => true, () => false), false, 'direct vault read does not reveal the derived body');
+    const recalled = await alice.memory.insights({ status: 'accepted', scopeLabel: WS, limit: 100 });
+    assert.doesNotMatch(JSON.stringify(recalled), /REVOKED-RELEVANCE-CANARY/, 'recall omits claim and source span');
+    const { provider, calls } = fake(ids => ({ relevant: ids, irrelevant: [] }), 'remote');
+    const refreshed = await refreshRelevance(alice, WS, provider, await config(alice, true));
+    assert.notEqual(refreshed.status, 'model'); assert.equal(calls.length, 0, 'neither local nor remote provider receives the claim');
+    const context = JSON.stringify(await buildSessionContext(alice, { workspaceId: WS }));
+    assert.doesNotMatch(context, /REVOKED-RELEVANCE-CANARY/, 'stored ranking cannot reintroduce the hidden insight');
+  });
 });
 
 /** A remote session whose calls run the server's own tools in-process and record which tools the client asked for. */

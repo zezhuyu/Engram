@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir, platform } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -48,7 +48,7 @@ test('server worker runs the bundled server with HTTP and loopback defaults', ma
     assert.equal(await readFile(f.env.STATE, 'utf8'), 'http|127.0.0.1');
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
-test('native packaging fixture creates both signed app bundles with supplied icons and independent workers', macOnly, async () => {
+test('native packaging fixture creates both signed app bundles and directly mountable app installers', macOnly, async () => {
   const root = await mkdtemp(join(tmpdir(), 'engram app fixture '));
   try {
     const backend = join(root, 'backend'); await mkdir(backend);
@@ -61,6 +61,25 @@ test('native packaging fixture creates both signed app bundles with supplied ico
       assert.match(plist, /LSUIElement/);
       assert.match(plist, new RegExp(`<key>EngramRole</key><string>${role.toLowerCase()}</string>`));
       assert.equal(spawnSync('codesign', ['--verify', '--deep', join(root, 'output', `Engram ${role}.app`)]).status, 0);
+    }
+    for (const role of ['Client', 'Server']) {
+      const lower = role.toLowerCase(); const name = `Engram ${role}`;
+      const packageDir = join(root, `release/engram-${lower}-darwin-arm64-test`);
+      const app = join(root, 'output', `${name}.app`);
+      await mkdir(packageDir, { recursive: true });
+      await cp(app, join(packageDir, `${name}.app`), { recursive: true });
+      await cp(join(root, 'output/install-macos-boot.mjs'), join(packageDir, 'install-macos-boot.mjs'));
+      await cp(join(root, 'output/README.md'), join(packageDir, 'README.md'));
+      const image = `${packageDir}.dmg`;
+      assert.equal(spawnSync('hdiutil', ['create', '-quiet', '-ov', '-format', 'UDZO', '-volname', name, '-srcfolder', packageDir, image]).status, 0);
+      const mount = join(root, `mount-${lower}`); await mkdir(mount);
+      const attached = spawnSync('hdiutil', ['attach', '-quiet', '-readonly', '-nobrowse', '-noverify', '-mountpoint', mount, image]);
+      assert.equal(attached.status, 0, attached.stderr?.toString());
+      try {
+        await access(join(mount, `${name}.app`, 'Contents/Info.plist'));
+        await access(join(mount, 'install-macos-boot.mjs'));
+        await access(join(mount, 'README.md'));
+      } finally { spawnSync('hdiutil', ['detach', '-quiet', mount]); }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { packageLinuxBundles } from '../scripts/package-linux.mjs';
+import { buildDeb, createDebRoot } from '../scripts/package-linux-deb.mjs';
 import { manageService, serviceDefinition } from '../scripts/install-linux-service.mjs';
 
 async function fixture() {
@@ -26,6 +27,42 @@ test('Linux fixture packages both role launchers, private runtime, installer and
       for (const path of [`engram-${role}`, 'backend/runtime/bin/node', 'install-service.mjs', 'README.md']) await access(join(bundle, path));
       assert.equal(JSON.parse(await readFile(join(bundle, 'role.json'), 'utf8')).role, role);
       assert.equal(spawnSync('/bin/sh', ['-n', join(bundle, `engram-${role}`)]).status, 0);
+    }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+test('Debian installer layout installs a direct app command and explicit systemd installer without enabling services', async () => {
+  const f = await fixture();
+  try {
+    for (const role of ['client', 'server']) {
+      const root = join(f.root, `deb-${role}`);
+      const { packageName } = await createDebRoot({ destination: root, bundle: f.options(role).bundle, role, version: '0.1.0-ci.abcdef123456' });
+      assert.equal(packageName, `engram-${role}`);
+      await access(join(root, 'opt', packageName, `engram-${role}`));
+      assert.equal(await readFile(join(root, 'usr', 'bin', packageName), 'utf8'), `#!/bin/sh\nexec /opt/${packageName}/${packageName} "$@"\n`);
+      assert.equal(await readFile(join(root, 'usr', 'bin', `engram-${role}-service`), 'utf8'), `#!/bin/sh\nexec /opt/${packageName}/backend/runtime/bin/node /opt/${packageName}/install-service.mjs "$@"\n`);
+      const control = await readFile(join(root, 'DEBIAN/control'), 'utf8');
+      assert.match(control, new RegExp(`^Package: ${packageName}$`, 'm'));
+      assert.match(control, /^Architecture: amd64$/m);
+      assert.doesNotMatch(control, /^postinst:/m);
+    }
+    await assert.rejects(createDebRoot({ destination: join(f.root, 'bad'), bundle: f.options('client').bundle, role: 'client', version: 'latest' }), /Invalid Debian package version/);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+test('Linux build emits valid directly installable Debian packages for client and server', { skip: process.platform !== 'linux' }, async t => {
+  if (spawnSync('dpkg-deb', ['--version']).status !== 0) { t.skip('dpkg-deb unavailable'); return; }
+  const f = await fixture();
+  try {
+    for (const role of ['client', 'server']) {
+      const file = await buildDeb({ destination: join(f.root, 'release'), bundle: f.options(role).bundle, role, version: '0.1.0-ci.abcdef123456' });
+      assert.match(file, new RegExp(`/engram-${role}_0\\.1\\.0-ci\\.abcdef123456_amd64\\.deb$`));
+      const info = spawnSync('dpkg-deb', ['--info', file], { encoding: 'utf8' });
+      assert.equal(info.status, 0, info.stderr);
+      assert.match(info.stdout, new RegExp(`Package: engram-${role}`));
+      assert.match(info.stdout, /Architecture: amd64/);
+      const contents = spawnSync('dpkg-deb', ['--contents', file], { encoding: 'utf8' });
+      assert.equal(contents.status, 0, contents.stderr);
+      assert.match(contents.stdout, new RegExp(`opt/engram-${role}/engram-${role}`));
+      assert.match(contents.stdout, new RegExp(`usr/bin/engram-${role}-service`));
     }
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });

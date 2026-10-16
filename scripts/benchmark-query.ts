@@ -9,6 +9,7 @@ import { buildFsIndex, fsIndexStatus } from '../packages/search-files/postings.j
 import { QueryApi } from '../packages/query/index.js';
 import { Prng } from '../tests/helpers/prng.js';
 import type { Scope } from '../packages/core/types.js';
+import { currentSourceEvidence } from './lib/source-evidence.js';
 
 /**
  * Usage: node dist/scripts/benchmark-query.js [documents=1000] [runs=15] [seed=20261007]
@@ -87,9 +88,12 @@ async function measure(mode: 'filesystem' | 'sqlite') {
 }
 result.filesystem = await measure('filesystem'); result.sqlite = await measure('sqlite');
 const indexBytes = async (dir: string): Promise<number> => { let n = 0; for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) { const p = path.join(dir, e.name); n += e.isDirectory() ? await indexBytes(p) : (await fs.stat(p)).size; } return n; };
+const source = await currentSourceEvidence();
+const sourceBinding = { fingerprint: source.fingerprint, workingTreeSourceFingerprint: source.fingerprint, fullSourceFileCount: Object.keys(source.files).length, files: source.files };
 const report = { label, documents: size, runs, seed, node: process.version, platform: `${os.platform()} ${os.arch()}`, cpu: os.cpus()[0]?.model, memGiB: Math.round(os.totalmem() / 2 ** 30), run_at: new Date().toISOString(), cacheState: 'warm (no privileged purge): cold cache NOT_RUN',
+  sourceBinding,
   build: { buildMs: Math.round(buildMs), fsIndexBuild, reused: built, durableCommit: commits.length ? { p50Ms: +pct(commits, 0.5).toFixed(1), p95Ms: +pct(commits, 0.95).toFixed(1), p99Ms: +pct(commits, 0.99).toFixed(1) } : null }, indexBytes: await indexBytes(path.join(root, '.mdb/indexes')), peakRssMB: rssMB(), failures, ...result };
-const dir = path.resolve('verification/query/benchmarks'); await fs.mkdir(dir, { recursive: true }); await fs.writeFile(path.join(dir, `${label}.json`), JSON.stringify(report, null, 2) + '\n');
+const dir = path.resolve(process.env.BENCH_QUERY_REPORT_DIR ?? 'verification/query/benchmarks'); await fs.mkdir(dir, { recursive: true }); await fs.writeFile(path.join(dir, `${label}.json`), JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify({ label, failures, peakRssMB: report.peakRssMB, build: report.build }, null, 1));
 for (const m of ['filesystem', 'sqlite'] as const) for (const [k, v] of Object.entries(result[m] as Record<string, { p50Ms: number; documentsMaterialized: number; backend: string }>)) if (!k.startsWith('_')) console.log(`${m}/${k}: p50 ${v.p50Ms} ms, docs materialized ${v.documentsMaterialized}, ${v.backend}`);
 if (!keep) await fs.rm(root, { recursive: true, force: true });

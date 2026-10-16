@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { currentSourceEvidence, type SourceEvidence } from './source-evidence.js';
 
 /** Verification INPUT fixtures (not generated reports) live in the tracked fixtures/inputs/ tree; verification/ itself is generated output and is not tracked. */
 export function inputPath(relative: string): string { return existsSync(`fixtures/inputs/${relative}`) ? `fixtures/inputs/${relative}` : `verification/${relative}`; }
@@ -54,7 +55,8 @@ export interface Gap { item: string; status: 'NOT_RUN' | 'UNSUPPORTED' | 'FAIL';
 export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; allowedSkips?: string[]; env?: Record<string, string>; concurrency?: number }
 export interface TestResult { name: string; status: Status; /** for a failed test: the TAP diagnostic block (assertion message, expected/actual, stack head), so a CI log shows why it failed */ detail?: string }
 export interface SuiteReport {
-  suite: string; git_commit: string; status: Status; run_at: string; command: string; durationMs: number;
+  suite: string; git_commit: string; status: Status; exitCode: number | null; run_at: string; command: string; durationMs: number;
+  evidenceSource: SourceEvidence;
   environment: Record<string, unknown>; counts: { pass: number; fail: number; skipped: number; total: number };
   tests: TestResult[]; cases: number; caseFailures: unknown[]; seeds: number[]; invariantAssertions: number | null;
   gaps: Gap[]; limitations: string[]; repro: string; caseDetails: { name: string; status: string; detail?: unknown }[];
@@ -91,8 +93,9 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   let status: Status = counts.total === 0 ? 'NOT_RUN' : counts.fail > 0 || run.status !== 0 ? 'FAIL' : unapprovedSkips.length ? 'SKIPPED' : 'PASS';
   const caseFailures = caseLines.filter(c => c.status === 'FAIL'); if (caseFailures.length) status = 'FAIL';
   const command = `node ${args.join(' ')}`;
+  const evidenceSource = await currentSourceEvidence();
   const report: SuiteReport = {
-    suite: spec.name, git_commit: gitCommit(), status, run_at: new Date().toISOString(), command, durationMs, environment: environment(), counts, tests,
+    suite: spec.name, git_commit: gitCommit(), status, exitCode: run.status, run_at: new Date().toISOString(), command, durationMs, evidenceSource, environment: environment(), counts, tests,
     cases: caseLines.length, caseFailures, seeds: [...new Set(caseLines.map(c => c.seed).filter((s): s is number => typeof s === 'number'))], invariantAssertions: null,
     gaps: spec.gaps, limitations: spec.limitations, repro: `npm run build && ${command}`, caseDetails: caseLines.map(c => ({ name: `${c.suite}/${c.name}`, status: c.status, ...(c.detail ? { detail: c.detail } : {}) }))
   };
@@ -102,7 +105,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   return report;
 }
 function markdown(spec: SuiteSpec, r: SuiteReport): string {
-  const lines = [`# ${spec.title}`, '', `**Status: ${r.status}** — ${r.counts.pass}/${r.counts.total} tests passed, ${r.counts.fail} failed, ${r.counts.skipped} skipped; ${r.cases} recorded cases, ${r.caseFailures.length} case failures.`, '', `Run at ${r.run_at}, ${(r.durationMs / 1000).toFixed(1)} s. Commit: ${r.git_commit}.`, `Environment: ${r.environment.os} (${r.environment.arch}), tmp filesystem ${r.environment.tmpFilesystem}, Node ${r.environment.node}, SQLite ${r.environment.sqlite}, ${r.environment.cpu}.`, `Seeds: ${r.seeds.length ? r.seeds.join(', ') : 'none (deterministic)'}`, '', `Reproduce: \`${r.repro}\``, '', '## Tests', '', '| Status | Test |', '|---|---|', ...r.tests.map(t => `| ${t.status} | ${t.name.replace(/\|/g, '\\|')} |`), '', '## Not verified', '', '| Status | Item | Reason |', '|---|---|---|', ...spec.gaps.map(g => `| ${g.status} | ${g.item} | ${g.reason} |`), '', '## Limitations', '', ...spec.limitations.map(l => `- ${l}`)];
+  const lines = [`# ${spec.title}`, '', `**Status: ${r.status}** — ${r.counts.pass}/${r.counts.total} tests passed, ${r.counts.fail} failed, ${r.counts.skipped} skipped; ${r.cases} recorded cases, ${r.caseFailures.length} case failures.`, '', `Run at ${r.run_at}, ${(r.durationMs / 1000).toFixed(1)} s. Commit: ${r.git_commit}.`, `Source fingerprint: SHA-256 ${r.evidenceSource.fingerprint} (${Object.keys(r.evidenceSource.files).length} files).`, `Environment: ${r.environment.os} (${r.environment.arch}), tmp filesystem ${r.environment.tmpFilesystem}, Node ${r.environment.node}, SQLite ${r.environment.sqlite}, ${r.environment.cpu}.`, `Seeds: ${r.seeds.length ? r.seeds.join(', ') : 'none (deterministic)'}`, '', `Reproduce: \`${r.repro}\``, '', '## Tests', '', '| Status | Test |', '|---|---|', ...r.tests.map(t => `| ${t.status} | ${t.name.replace(/\|/g, '\\|')} |`), '', '## Not verified', '', '| Status | Item | Reason |', '|---|---|---|', ...spec.gaps.map(g => `| ${g.status} | ${g.item} | ${g.reason} |`), '', '## Limitations', '', ...spec.limitations.map(l => `- ${l}`)];
   return lines.join('\n');
 }
 export function summarize(report: SuiteReport): void {

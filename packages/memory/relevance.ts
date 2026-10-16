@@ -4,6 +4,8 @@ import { MDBError, type Document, type ModelProvider, type VaultConfig } from '.
 import { parseModelProposal } from '../models/schema.js';
 import { redactText } from './redact.js';
 import { upsertNote } from './workspace-ops.js';
+import { insightCurrentlyAccessible } from './insight-access.js';
+import { isSensitive } from '../core/sensitivity.js';
 
 /**
  * Model-assisted relevance of already-accepted, non-sensitive user insights for ONE project (workspace).
@@ -48,7 +50,11 @@ export interface RefreshResult { status: 'model' | 'skipped_private' | 'unavaila
 /** Collects the accepted non-sensitive insights for a project (global + workspace-labelled) exactly as injection does. */
 export async function relevanceRows(client: Engram, workspaceId: string): Promise<RelevanceItem[]> {
   const rows: RelevanceItem[] = [];
-  for (const scopeLabel of ['global', workspaceId]) for (const item of (await client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights as Array<{ id: string; claim: string; category?: string; sensitivity?: string }>) rows.push({ id: item.id, scope: scopeLabel, claim: item.claim, ...(item.category ? { category: item.category } : {}), ...(item.sensitivity === 'sensitive' ? { sensitive: true } : {}) });
+  for (const scopeLabel of ['global', workspaceId]) for (const item of (await client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights as Array<{ id: string; claim: string; category?: string; sensitivity?: string }>) {
+    const doc = await client.vault.get(item.id).catch(() => undefined);
+    if (!doc || doc.metadata.sensitivity === 'sensitive' || isSensitive(`${doc.title}\n${doc.body}`) || !await insightCurrentlyAccessible(client.vault, doc, scopeLabel)) continue;
+    rows.push({ id: item.id, scope: scopeLabel, claim: item.claim, ...(item.category ? { category: item.category } : {}), ...(item.sensitivity === 'sensitive' ? { sensitive: true } : {}) });
+  }
   return rows.filter(row => !row.sensitive);
 }
 

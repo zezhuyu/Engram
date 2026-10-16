@@ -10,7 +10,11 @@ test('profile and relevance prompts exclude other projects, denied actors, candi
   for (const id of ['project-a', 'project-b']) await vault.createWorkspace(id, '', { alice: ['read', 'write'], bob: ['read', 'write'] });
   await vault.createCollection('project-a', 'bob-private', '', { bob: ['read', 'write'] });
   const global: Scope = { type: 'global', area: 'profile' };
-  const insight = (body: string, scopeLabel: string, status = 'accepted', sensitivity = 'none', scope: Scope = global) => vault.put({ scope, kind: 'user_insight', title: body, body, status, metadata: { insightSchema: 1, category: 'preference', preferenceKey: body, evidenceClass: 'explicit', visibility: 'user_private', scopeLabel, sensitivity } });
+  const insight = async (body: string, scopeLabel: string, status = 'accepted', sensitivity = 'none', scope: Scope = global) => {
+    const evidenceScope: Scope = scope.type === 'workspace' ? scope : { type: 'workspace', workspaceId: 'project-a' };
+    const source = await vault.put({ scope: evidenceScope, kind: 'observation', title: `Evidence for ${body}`, body, metadata: { speaker: 'user', evidenceClass: 'user_authored' } });
+    return vault.put({ scope, kind: 'user_insight', title: body, body, status, evidence: [{ uri: source.uri, revisionId: source.revisionId }], metadata: { insightSchema: 1, category: 'preference', preferenceKey: body, evidenceClass: 'explicit', visibility: 'user_private', scopeLabel, sensitivity } });
+  };
   await insight('ALLOW_GLOBAL_CANARY', 'global'); await insight('ALLOW_PROJECT_A_CANARY', 'project-a');
   await insight('DENY_PROJECT_B_INSIGHT_CANARY', 'project-b');
   await insight('DENY_CANDIDATE_CANARY', 'project-a', 'candidate');
