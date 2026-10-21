@@ -48,7 +48,7 @@ test('telemetry counts every provider invocation (first generation, schema repai
 test('a spent budget stops BEFORE the call that would exceed it, keeps the validated proposals, persists an incomplete state and leaves the cursor; the next batch finishes without duplicates', async t => {
   const w = await world(t, 3); const m = await w.said(TEXT); const [a, b, c] = THREE(m);
   const provider = counting([a!, b!, c!, NOTHING]); const engine = new IntelligenceEngine(w.vault, provider); const job = await run(engine);
-  assert.equal(job.status, 'complete'); const tele = job.telemetry!;
+  assert.equal(job.status, 'pending', 'a call-budget pause remains resumable'); const tele = job.telemetry!;
   assert.equal(provider.generated.length + provider.critiqued, 3, 'the provider was never called more than the budget allows');
   assert.deepEqual(tele.calls, { generate: 2, repair: 0, critic: 1 }); assert.equal(tele.terminal, 'budget_exhausted'); assert.equal(tele.budget?.exhausted, true); assert.equal(tele.complete, false); assert.equal(tele.outcome, 'partial'); assert.match(tele.partialReason!, /MODEL_BUDGET_EXHAUSTED/);
   assert.equal(tele.proposals, 2); assert.equal((await pending(engine)).length, 2, 'validated proposals are preserved'); assert.match(job.result!, /,/, 'the job result lists the proposals it made');
@@ -63,7 +63,7 @@ test('a spent budget stops BEFORE the call that would exceed it, keeps the valid
 
 test('a budget spent before ANY proposal exists is an incomplete batch (not an error, not dead-lettered): nothing stored, cursor kept, the terminal state says why', async t => {
   const w = await world(t, 2); const m = await w.said(TEXT); const provider = counting([BROKEN, BROKEN, BROKEN, THREE(m)[0]!]); const engine = new IntelligenceEngine(w.vault, provider); const job = await run(engine);
-  assert.equal(provider.generated.length, 2, 'the budget stopped the repair loop at 2 calls'); assert.equal(job.status, 'complete'); assert.equal(job.telemetry?.terminal, 'budget_exhausted'); assert.equal(job.telemetry?.proposals, 0); assert.equal(job.telemetry?.complete, false); assert.equal(job.result, 'incomplete:budget_exhausted'); assert.equal((await engine.proposals()).length, 0);
+  assert.equal(provider.generated.length, 2, 'the budget stopped the repair loop at 2 calls'); assert.equal(job.status, 'pending', 'an exhausted budget does not report terminal completion'); assert.equal(job.telemetry?.terminal, 'budget_exhausted'); assert.equal(job.telemetry?.proposals, 0); assert.equal(job.telemetry?.complete, false); assert.equal(job.result, 'incomplete:budget_exhausted'); assert.equal((await engine.proposals()).length, 0);
   const again = counting([THREE(m)[0]!, NOTHING]); await w.setBudget(5); await run(new IntelligenceEngine(w.vault, again), { instruction: 'retry' }); assert.ok(again.generated[0]!.documents.some(d => d.id === m.id), 'the cursor stayed, so the evidence is processed next time');
 });
 

@@ -116,6 +116,22 @@ test('filesystem and SQLite give the same rows for the same queries (and the fil
   queries.forEach((q, i) => assert.deepEqual(files[i], sql[i], JSON.stringify(q)));
   rec('files-sqlite-parity');
 });
+test('SQLite BM25 ties use deterministic object-id ordering across repeated queries', async t => {
+  const w = await world(t, true);
+  const expected: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    expected.push((await w.vault.put({ scope: app, kind: 'note', title: 'BM25 tie fixture', body: 'bm25 deterministic tie token' })).id);
+  }
+  await setSqlite(w.vault, true); await new SearchEngine(w.vault).rebuild();
+  const engine = new SearchEngine(w.vault);
+  const first = await engine.query({ query: '"bm25 deterministic tie token"', mode: 'keyword', limit: 100 });
+  const second = await engine.query({ query: '"bm25 deterministic tie token"', mode: 'keyword', limit: 100 });
+  assert.equal(first.ranking, 'bm25');
+  assert.deepEqual(first.hits.map(hit => hit.objectId), [...expected].sort((a, b) => a.localeCompare(b)));
+  assert.deepEqual(second.hits.map(hit => hit.objectId), first.hits.map(hit => hit.objectId));
+  assert.equal(new Set(first.hits.map(hit => hit.score)).size, 1, 'identical indexed text has an actual BM25 tie');
+  rec('sqlite-bm25-deterministic-ties');
+});
 test('ACL: an agent sees only its workspace and wiki; a stranger sees nothing; no counts, scores, snippets or edges leak', async t => {
   const w = await world(t);
   const agentIds = idsOf(await rowsOf(w.agent, { from: 'documents' })); assert.ok(!agentIds.includes(w.d.secret!) && !agentIds.includes(w.d.secretNote!)); assert.ok(agentIds.includes(w.d.deploy!) && agentIds.includes(w.d.page!));

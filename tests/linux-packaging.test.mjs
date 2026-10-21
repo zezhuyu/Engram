@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,10 @@ async function fixture() {
   const backend = join(root, 'input'); const home = join(root, 'home');
   await mkdir(join(backend, 'runtime/bin'), { recursive: true });
   await writeFile(join(backend, 'runtime/bin/node'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\nprintf "%s|%s" "${MDB_MCP_TRANSPORT:-}" "${MDB_MCP_HTTP_HOST:-}" > "$STATE"\n', { mode: 0o755 });
+  await mkdir(join(backend, 'app/node_modules/.bin'), { recursive: true });
+  await mkdir(join(backend, 'app/node_modules/yaml'), { recursive: true });
+  await writeFile(join(backend, 'app/node_modules/yaml/bin.mjs'), '#!/usr/bin/env node\n');
+  await symlink('../yaml/bin.mjs', join(backend, 'app/node_modules/.bin/yaml'));
   await packageLinuxBundles(join(root, 'output'), backend);
   await mkdir(join(home, '.config/engram'), { recursive: true });
   for (const role of ['client', 'server']) await writeFile(join(home, `.config/engram/${role}.env`), role === 'client' ? 'ENGRAM_MCP_URL=https://memory.example/mcp\nENGRAM_MCP_TOKEN=fake-secret\nENGRAM_WORKSPACE="a project"\nENGRAM_PROJECT_DIR="/a path/project"\n' : '', { mode: 0o600 });
@@ -28,6 +32,14 @@ test('Linux fixture packages both role launchers, private runtime, installer and
       assert.equal(JSON.parse(await readFile(join(bundle, 'role.json'), 'utf8')).role, role);
       assert.equal(spawnSync('/bin/sh', ['-n', join(bundle, `engram-${role}`)]).status, 0);
     }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+test('Linux bundle copy preserves npm bin symlinks without recursively copying their targets', async () => {
+  const f = await fixture();
+  try {
+    const copiedLink = join(f.root, 'output/engram-server/backend/app/node_modules/.bin/yaml');
+    assert.equal((await lstat(copiedLink)).isSymbolicLink(), true);
+    assert.equal(await readFile(copiedLink, 'utf8'), '#!/usr/bin/env node\n');
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 test('Debian installer layout installs a direct app command and explicit systemd installer without enabling services', async () => {

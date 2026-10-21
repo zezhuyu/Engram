@@ -18,6 +18,37 @@ export function predictionTermsMatch(claim: string, terms: string[]): boolean {
   return terms.length > 0 && terms.every(term => normalizedClaim.includes(normalizePredictionText(term)));
 }
 
+export interface LabeledProfileClaim {
+  category: string;
+  terms: string[];
+  relation?: { left: string; operator: string; right: string };
+}
+
+/** Apply the same case, term, category, and directional-relation rule to every retained candidate. */
+export function profileClaimMatches(claim: string, category: unknown, expected: LabeledProfileClaim): boolean {
+  if (category !== expected.category || !predictionTermsMatch(claim, expected.terms)) return false;
+  if (!expected.relation) return true;
+  const normalized = normalizePredictionText(claim);
+  const left = normalizePredictionText(expected.relation.left);
+  const operator = normalizePredictionText(expected.relation.operator);
+  const right = normalizePredictionText(expected.relation.right);
+  const leftAt = normalized.indexOf(left);
+  const operatorAt = normalized.indexOf(operator, leftAt + left.length);
+  const rightAt = normalized.indexOf(right, operatorAt + operator.length);
+  return leftAt >= 0 && operatorAt >= 0 && rightAt >= 0;
+}
+
+/** Accept only canonical, exact source citations; legacy metadata or matching text alone is insufficient. */
+export function hasExactSourceEvidence(references: unknown, source: { uri: string; revisionId: string; body: string }): boolean {
+  if (!Array.isArray(references)) return false;
+  return references.some(reference => {
+    if (!reference || typeof reference !== 'object') return false;
+    const item = reference as { uri?: unknown; revisionId?: unknown; span?: unknown };
+    return item.uri === source.uri && item.revisionId === source.revisionId
+      && typeof item.span === 'string' && item.span.length > 0 && source.body.includes(item.span);
+  });
+}
+
 export interface ProfilePrediction { expected: 'insight' | 'none'; extracted: boolean; match: boolean }
 /** Counts retained wrong claims as false positives, even when the source case was a positive example. */
 export function predictionCounts(rows: ProfilePrediction[]): { positives: number; negatives: number; truePositive: number; falseNegative: number; falsePositive: number; predicted: number } {

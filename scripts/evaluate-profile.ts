@@ -6,7 +6,7 @@ import { createProviderFromConfig } from '../packages/models/factory.js';
 import { IntelligenceEngine } from '../packages/intelligence/index.js';
 import { inputPath } from './lib/suite.js';
 import { currentSourceEvidence } from './lib/source-evidence.js';
-import { predictionCountsByCase, predictionTermsMatch } from './lib/profile-metrics.js';
+import { hasExactSourceEvidence, predictionCountsByCase, profileClaimMatches } from './lib/profile-metrics.js';
 
 type Case = { id: string; scope: 'global' | 'project:orion'; text: string; expected: null | { category: string; key: string; terms: string[]; relation?: { left: string; operator: string; right: string } }; supersedes?: string };
 const corpusPath = process.env.MDB_PROFILE_CORPUS ?? 'profile/labeled-corpus.json';
@@ -54,21 +54,17 @@ try {
     const proposals = (await engine.proposals()).filter(p => p.input.kind === 'user_insight' && p.input.evidence?.some(e => e.uri === source.uri && e.revisionId === source.revisionId));
     const proposal = proposals.at(-1);
     const expected = item.expected;
-    const claim = proposal ? `${proposal.input.title} ${proposal.input.body}`.toLowerCase() : '';
+    const claim = proposal ? `${proposal.input.title} ${proposal.input.body}` : '';
     const candidateGenerated = !!proposal;
     const extracted = !!proposal && proposal.status !== 'rejected';
-    const relationMatches = !expected?.relation || claim.indexOf(expected.relation.left.toLowerCase()) >= 0 && claim.indexOf(expected.relation.left.toLowerCase()) < claim.indexOf(expected.relation.operator.toLowerCase()) && claim.indexOf(expected.relation.operator.toLowerCase()) < claim.indexOf(expected.relation.right.toLowerCase());
-    const matches = extracted && !!expected && proposal!.input.metadata?.category === expected.category && predictionTermsMatch(claim, expected.terms) && relationMatches;
+    const matches = extracted && !!expected && profileClaimMatches(claim, proposal!.input.metadata?.category, expected);
     const scored = proposals.filter(p => p.status !== 'rejected').map(p => {
       const text = `${p.input.title} ${p.input.body}`;
-      const rel = !expected?.relation || text.indexOf(expected.relation.left.toLowerCase()) >= 0 && text.indexOf(expected.relation.left.toLowerCase()) < text.indexOf(expected.relation.operator.toLowerCase()) && text.indexOf(expected.relation.operator.toLowerCase()) < text.indexOf(expected.relation.right.toLowerCase());
-      const valid = p.input.metadata?.category === expected?.category && !!expected && predictionTermsMatch(text, expected.terms) && rel;
-      const refs = p.input.metadata?.sources;
-      const grounded = Array.isArray(refs) && refs.some(s => s && typeof s === 'object' && (s as { uri?: string }).uri === source.uri && (s as { revisionId?: string }).revisionId === source.revisionId && typeof (s as { span?: string }).span === 'string' && item.text.includes((s as { span: string }).span));
+      const valid = !!expected && profileClaimMatches(text, p.input.metadata?.category, expected);
+      const grounded = hasExactSourceEvidence(p.input.evidence, { uri: source.uri, revisionId: source.revisionId, body: item.text });
       return { id: p.id, category: p.input.metadata?.category ?? null, claim: p.input.body, match: valid, sourceValid: grounded, scopeCorrect: p.input.metadata?.scopeLabel === (item.scope === 'global' ? 'global' : 'orion'), status: p.status };
     });
-    const sourceRef = proposal?.input.metadata?.sources;
-    const sourceValid = Array.isArray(sourceRef) && sourceRef.some(s => s && typeof s === 'object' && (s as { uri?: string }).uri === source.uri && (s as { revisionId?: string }).revisionId === source.revisionId && typeof (s as { span?: string }).span === 'string' && item.text.includes((s as { span: string }).span));
+    const sourceValid = hasExactSourceEvidence(proposal?.input.evidence, { uri: source.uri, revisionId: source.revisionId, body: item.text });
     const wantedScope = item.scope === 'global' ? 'global' : 'orion';
     const scopeCorrect = !!proposal && proposal.input.metadata?.scopeLabel === wantedScope;
     const correctionOverride = !prior || (!!proposal && proposal.input.metadata?.evidenceClass === 'explicit' && (proposal.flags ?? []).includes('supersedes_earlier'));

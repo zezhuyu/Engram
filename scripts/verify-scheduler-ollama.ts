@@ -24,12 +24,15 @@ let worker: ChildProcess | undefined;
 try {
   await run(['init']); const vault = new Vault(root); await vault.createWorkspace('alpha', 'synthetic scheduler evaluation');
   await run(['model', 'set', '--api', baseUrl, '--model', modelName, '--max-output-tokens', '8000']);
+  await vault.setConfig(config => { config.dream.enabled = true; config.dream.eventDriven = false; config.dream.modes = ['micro']; config.dream.maxProposalsPerRun = 2; });
   const say = (body: string, at: string) => vault.put({ scope: { type: 'workspace', workspaceId: 'alpha' }, kind: 'observation', title: 'User message', body, metadata: { speaker: 'user', evidenceClass: 'user_authored', eventType: 'user.message', eventTime: at } });
   await say('From now on write commit messages in the imperative mood. Always run the linter before committing.', '2026-10-07T10:00:00.000Z');
   await say('I prefer small pull requests, and I want TODO comments to carry a ticket id.', '2026-10-07T10:05:00.000Z');
+  await vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Python metrics API', body: 'Python services expose JSON metrics over HTTP.', tags: ['domain:python-api', 'api', 'dashboard', 'provides:json'] });
+  await vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Browser metrics dashboard', body: 'Browser dashboards fetch JSON metrics and render widgets.', tags: ['domain:js-frontend', 'dashboard', 'consumes:json'] });
   const store = new AdaptiveStore(root);
   await run(['intelligence', 'schedule', 'configure', '--enable', '--mode', 'fixed', '--time', formatHHMM(localParts(new Date(Date.now() + 75_000), tz).minutes), '--timezone', tz, '--quiet-start', '00:00', '--quiet-end', '23:59', '--inactivity-minutes', '0', '--auto-accept', 'none']);
-  await store.setConfig({ resources: { maxLoadAverage: 0.0001 } } as never); // simulated pressure: any real load is above this ceiling
+  await store.setConfig({ resources: { maxLoadAverage: 0.0001 }, dreamMode: 'micro' } as never); // simulated pressure: any real load is above this ceiling
   const before = (await store.cycles()).length;
   worker = spawn(process.execPath, [CLI, '--root', root, 'intelligence', 'schedule', 'worker', '--interval-s', '5'], { stdio: ['ignore', 'ignore', 'ignore'] });
   const pressureDeadline = Date.now() + 5 * 60_000; let skipped = false;
@@ -41,6 +44,8 @@ try {
   const releasedAt = Date.now(); const doneDeadline = releasedAt + 12 * 60_000; let completed: Awaited<ReturnType<typeof store.cycles>>[number] | undefined;
   while (Date.now() < doneDeadline) { await sleep(5000); completed = (await store.cycles()).find(c => c.state === 'COMPLETED'); if (completed) break; }
   const allCycles = await store.cycles(); check('after the pressure subsides the deferred cycle runs by itself and COMPLETES (real worker, real clock, local Ollama)', !!completed, { waitedMs: Date.now() - releasedAt, states: allCycles.map(c => c.state), errors: allCycles.map(c => c.error), dream: allCycles.map(c => ({ status: c.dream.status, skipped: c.dream.skipped })) });
+  const dreamTrace = completed?.dream.trace as { clusters?: unknown[] } | undefined;
+  check('the unattended cycle executes the explicitly enabled Micro-Dream against a real candidate cluster and records model output', !!completed && completed.dream.status === 'SUCCEEDED' && completed.dream.skipped === undefined && (dreamTrace?.clusters?.length ?? 0) > 0 && completed.dream.proposals.length > 0, { dream: completed?.dream, modelCallsUsed: completed?.budgets.modelCallsUsed, modelProvider: completed?.modelProvider });
   const engine = new (await import('../packages/intelligence/index.js')).IntelligenceEngine(vault, undefined); const proposals = (await engine.proposals()).filter(p => p.input.kind === 'user_insight');
   check('the cycle produced reviewable insight proposals from the workspace conversation, each with evidence from alpha', proposals.length >= 2 && proposals.every(p => (p.input.evidence?.length ?? 0) >= 1), { proposals: proposals.map(p => ({ claim: p.input.body, status: p.status, spans: p.input.evidence?.map(e => e.span) })) });
   check('nothing was accepted automatically (autoAccept none)', proposals.every(p => p.status === 'pending' || p.status === 'rejected') && (await vault.listDocuments()).filter(d => d.kind === 'user_insight' && d.status === 'accepted').length === 0);

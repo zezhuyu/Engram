@@ -95,9 +95,9 @@ export async function runWorkspaceStage(ctx: StageContext, workspaceId: string, 
         const tag = createHash('sha256').update(key).digest('hex').slice(0, 8); if (done.has(tag)) continue;
         const run = await runEngineJob(ctx, 'profile', { scope: group.scope, objectIds: group.ids, instruction: `adaptive:${cycle.id}:${workspaceId}:${tag}:profile`, snapshot: { cycleId: cycle.id, watermark: view.watermark } });
         if (run.status === 'blocked') throw new StageBlocked(err('MODEL_UNAVAILABLE', run.error ?? 'profile extraction blocked'));
-        if (run.status !== 'complete') throw new Error(`profile extraction ${run.status}: ${run.error ?? ''}`);
+        if (run.status !== 'complete' && !(run.status === 'pending' && run.incomplete && !run.error)) throw new Error(`profile extraction ${run.status}: ${run.error ?? ''}`);
         await settleProposals(ctx, run.proposals, 'user_insight', 'WORKSPACE_INSIGHT', rec);
-        if (run.incomplete) { if (run.budgetExhausted) throw new PauseSignal('RESOURCE_PRESSURE', 'profile batch model-call budget exhausted: validated proposals kept, the cursor did not move, resume continues'); throw new Error(`profile extraction incomplete (${run.incomplete}): validated proposals were kept, the workspace cursor did not move, the next run continues without repeating them`); }
+        if (run.incomplete && run.status === 'pending' && !run.error) throw new PauseSignal('RESOURCE_PRESSURE', `profile extraction incomplete (${run.incomplete}); validated proposals kept and the workspace cursor did not move`);
         done.add(tag); rec.insights.jobKey = [...done].join(','); await ctx.checkpoint();
       }
       rec.insights.status = 'COMPLETED';
@@ -138,9 +138,9 @@ export async function runGlobalStage(ctx: StageContext, globalCursor: number): P
     else if (rec.extraction !== 'COMPLETED') {
       const run = await runEngineJob(ctx, 'profile', { scope: { type: 'global', area: 'profile' }, objectIds: rec.evidenceIds, instruction: `adaptive:${cycle.id}:global:profile`, snapshot: { cycleId: cycle.id, watermark: view.watermark } });
       if (run.status === 'blocked') throw new StageBlocked(err('MODEL_UNAVAILABLE', run.error ?? 'global extraction blocked'));
-      if (run.status !== 'complete') throw new Error(`global extraction ${run.status}: ${run.error ?? ''}`);
+      if (run.status !== 'complete' && !(run.status === 'pending' && run.incomplete && !run.error)) throw new Error(`global extraction ${run.status}: ${run.error ?? ''}`);
       await settleProposals(ctx, run.proposals, 'user_insight', 'GLOBAL_INSIGHT', rec);
-      if (run.incomplete) { if (run.budgetExhausted) throw new PauseSignal('RESOURCE_PRESSURE', 'global profile batch model-call budget exhausted: validated proposals kept, the cursor did not move, resume continues'); throw new Error(`global extraction incomplete (${run.incomplete}): validated proposals were kept and the cursor did not move`); }
+      if (run.incomplete && run.status === 'pending' && !run.error) throw new PauseSignal('RESOURCE_PRESSURE', `global profile extraction incomplete (${run.incomplete}); validated proposals kept and the cursor did not move`);
       rec.extraction = 'COMPLETED';
     }
     // 2. cross-context promotion: only identical, non-sensitive, authorized preferences supported in at least two workspaces; conflicts stay scoped

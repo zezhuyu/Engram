@@ -8,7 +8,7 @@ import { recordCase } from '../helpers/report.js';
 import { Vault } from '../../packages/core/vault.js';
 import { MDBError } from '../../packages/core/types.js';
 import { IntelligenceEngine } from '../../packages/intelligence/index.js';
-import { evaluateInsight } from '../../packages/intelligence/insights.js';
+import { evaluateInsight, repairTerminalCitationPunctuation } from '../../packages/intelligence/insights.js';
 import { generationMessages } from '../../packages/models/prompts.js';
 import { Engram, ingestRecord, eventFromHostPayload, readRegistration, createAdapter, type Document, type ModelProposal, type ModelProvider, type ModelRequest, type Scope } from '../../packages/sdk/index.js';
 import { tempDir, claudePayloads } from '../helpers/host.js';
@@ -40,9 +40,25 @@ test('profile prompt distinguishes project outcome preferences, assistant workfl
   const systemPrompt = generationMessages(calls[0]!)[0]!.content;
   assert.match(systemPrompt, /desired system outcome[\s\S]*?is a preference/);
   assert.match(systemPrompt, /Preserve polarity/);
+  assert.match(calls[0]!.instruction, /state both sides and the direction explicitly/);
   assert.match(systemPrompt, /not the user's own/);
   assert.match(systemPrompt, /"I prefer bullet lists instead of long paragraphs" -> preference/);
   assert.match(systemPrompt, /"Answer this one in French, then return to my usual language" -> abstain/);
+});
+
+test('profile repairs only a model-added terminal period and keeps every persisted evidence span verbatim', async t => {
+  const body = 'When you propose a refactor, list the files you would touch before changing anything.';
+  assert.equal(repairTerminalCitationPunctuation(body, 'When you propose a refactor, list the files you would touch.'), 'When you propose a refactor, list the files you would touch');
+  assert.equal(repairTerminalCitationPunctuation('The client requests authorization.', 'The client request.'), 'The client request.', 'a partial-word citation is not repaired');
+  const w = await world(t); const source = await w.userSaid(body);
+  const engine = new IntelligenceEngine(w.vault, fakeProvider(() => ({ body: 'The user wants the assistant to list files before refactoring.', category: 'working_style', key: 'list-files-before-refactor', evidence: [{ doc: source, span: 'When you propose a refactor, list the files you would touch.' }] })));
+  await engine.enqueue('profile', { scope: proj, objectIds: [source.id] });
+  const result = await engine.run({ job: 'profile', limit: 1 });
+  assert.equal(result[0]?.status, 'complete');
+  const proposal = await last(engine);
+  assert.equal(proposal.status, 'pending');
+  assert.equal(proposal.input.evidence?.[0]?.span, 'When you propose a refactor, list the files you would touch');
+  assert.equal((await evaluateInsight(w.vault, proposal.input)).verdict, 'accept');
 });
 
 test('a direct correction supersedes an earlier inferred preference: linked evidence, preserved history, regenerated projection', async t => {
@@ -161,7 +177,7 @@ test('profile extraction repairs one schema-invalid model abstention and keeps i
   const provider: ModelProvider = { id: 'repair-profile', async generate(request) { calls.push(request); if (calls.length === 1) return { kind: 'user_insight', title: 'No insight proposed', body: 'No insight proposed because the preference is undecided.', metadata: { category: 'preference', preferenceKey: 'indentation' } } as unknown as ModelProposal; return { kind: 'user_insight', title: 'No insight proposed', body: 'No insight proposed because the preference is undecided.', evidence: [ref(message, 'not decided whether I prefer tabs or spaces')], metadata: { category: 'preference', preferenceKey: 'no-user-insight' } }; } };
   const engine = new IntelligenceEngine(w.vault, provider); await engine.enqueue('profile', { scope: proj, objectIds: [message.id] });
   const [job] = await engine.run({ job: 'profile', limit: 1 }); const proposal = await last(engine);
-  assert.equal(job!.status, 'complete'); assert.equal(calls.length, 2); assert.match(calls[1]!.instruction, /failed schema validation/);
+  assert.equal(job!.status, 'complete'); assert.equal(calls.length, 2); assert.match(calls[1]!.instruction, /failed profile validation/);
   assert.equal(proposal.status, 'rejected'); assert.ok(proposal.flags!.includes('model_abstained'));
   recordCase({ suite: 'profile', name: 'profile-invalid-abstention-schema-repair', status: 'PASS' });
 });
@@ -256,10 +272,10 @@ test('evidence must be real, authorized, content-consistent and correctly attrib
   const dream = await w.vault.put({ scope: { type: 'global', area: 'discoveries' }, kind: 'discovery', title: 'Idea', body: 'The user could love pair programming.', status: 'hypothesis', metadata: { testPlan: ['x'], counterarguments: ['y'] } });
   const attempt = async (spec: Spec, jobScope: Scope = proj) => { const e = new IntelligenceEngine(w.vault, fakeProvider(() => spec)); await e.enqueue('profile', { scope: jobScope, objectIds: spec.evidence.map(x => x.doc.id) }); const jobs = await e.run({ job: 'profile', limit: 3 }); return { e, jobs, proposals: await e.proposals() }; };
   const fabricated = await attempt({ body: 'The user likes huge pull requests.', key: 'pr-size', evidence: [{ doc: said, span: 'I love gigantic pull requests' }], explicit: true });
-  assert.equal(fabricated.proposals.at(-1)!.status, 'rejected'); assert.ok(fabricated.proposals.at(-1)!.flags!.includes('span_not_in_source'), 'a quote that is not in the source is rejected');
+  assert.equal(fabricated.jobs[0]!.status, 'dead_letter', JSON.stringify({ job: fabricated.jobs[0], proposals: fabricated.proposals })); assert.equal(fabricated.proposals.length, 0, 'a quote that is not in the source is rejected before persistence');
   const truncated = await attempt({ body: 'The user likes small pull requests.', key: 'pr-size-truncated', evidence: [{ doc: said, span: 'I like small pull request' }], explicit: true });
-  assert.equal(truncated.proposals.at(-1)!.status, 'rejected'); assert.ok(truncated.proposals.at(-1)!.flags!.includes('span_not_in_source'), 'a near-match that truncates a source word is rejected');
-  const noSpan = await attempt({ body: 'The user likes small pull requests.', key: 'pr-size2', evidence: [{ doc: said, span: '' }] }); assert.ok(noSpan.proposals.at(-1)!.flags!.includes('span_missing'));
+  assert.equal(truncated.jobs[0]!.status, 'dead_letter', JSON.stringify({ job: truncated.jobs[0], proposals: truncated.proposals })); assert.equal(truncated.proposals.length, 0, 'a truncated near-match is rejected before persistence');
+  const noSpan = await attempt({ body: 'The user likes small pull requests.', key: 'pr-size2', evidence: [{ doc: said, span: '' }] }); assert.equal(noSpan.jobs[0]!.status, 'dead_letter'); assert.equal(noSpan.proposals.length, 0);
   const dreamEvidence = await attempt({ body: 'The user loves pair programming.', key: 'pairing', evidence: [{ doc: dream, span: 'love pair programming' }] }, { type: 'global', area: 'discoveries' });
   assert.ok(dreamEvidence.proposals.at(-1)?.flags?.includes('dream_not_evidence') || dreamEvidence.jobs[0]!.status !== 'complete', 'dream hypotheses are never evidence about the user');
   const attributed = await attempt({ body: 'The user loves huge pull requests.', key: 'pr-size3', evidence: [{ doc: agent, span: 'love huge pull requests' }], explicit: true });
@@ -286,14 +302,17 @@ test('passively captured user messages feed profile extraction incrementally, ah
   const provider = fakeProvider(() => ({ body: 'The user wants code split into small modules.', key: 'module-size', evidence: [{ doc: (provider.calls.at(-1)!.documents.find(d => d.metadata.speaker === 'user') as Document), span: 'split the code into small modules' }], explicit: true }));
   const engine = new IntelligenceEngine(vault, provider);
   await engine.run({ limit: 10 });
-  assert.equal((await engine.jobs()).filter(j => j.kind === 'profile' && j.status === 'complete').length, 1, 'the user\'s message triggered exactly one incremental extraction job'); assert.equal(provider.calls.length, 2, 'one call for the insight and one confirming call (the model repeats the claim, so nothing more remains)');
+  const profileJobs = (await engine.jobs()).filter(j => j.kind === 'profile');
+  assert.equal(profileJobs.length, 1, 'the user\'s message triggered exactly one incremental extraction job');
+  assert.equal(profileJobs[0]!.status, 'pending'); assert.equal(profileJobs[0]!.telemetry?.complete, false, 'a repeated claim cannot prove the remaining evidence is exhausted');
+  assert.equal(provider.calls.length, 2, 'one call proposes the insight and one repeated output leaves the input resumable');
   const order = provider.calls[0]!.documents.map(d => (d.metadata.speaker as string | undefined) ?? d.scope.type + ':' + d.kind);
   assert.ok(order.indexOf('user') < order.indexOf('assistant'), `user words come before agent output: ${order}`); assert.ok(order.indexOf('user') < order.indexOf('global:wiki_page'));
   const proposal = await last(engine); assert.equal(proposal.status, 'pending'); assert.equal(proposal.input.metadata!.scopeLabel, 'proj'); assert.equal(proposal.input.scope.type, 'global');
-  const afterFirst = provider.calls.length; await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst, 'nothing new since the cursor: no further model call');
+  const afterFirst = provider.calls.length; await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 1, 'the resumable job gets one bounded retry per run call, never a tight loop');
   await feed('UserPromptSubmit', { prompt: 'Also keep functions under thirty lines.', prompt_id: 'b' });
-  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 1, 'a new user message triggers one more extraction; the model repeats a claim that is already pending, so it is dropped as a duplicate and the batch is complete'); assert.equal((await engine.proposals()).filter(p => p.input.kind === 'user_insight').length, 1, 'no duplicate proposal across consecutive jobs'); void wikiNote;
-  const sourcesSeen = provider.calls[afterFirst]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(sourcesSeen.some(b => /giant files/.test(b)), 'a repeated known claim keeps the whole eligible batch unconsumed until explicit abstention');
+  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 2, 'new evidence remains reachable by a bounded retry; a repeated output leaves the job incomplete rather than consuming the cursor'); assert.equal((await engine.proposals()).filter(p => p.input.kind === 'user_insight').length, 1, 'no duplicate proposal across consecutive jobs'); void wikiNote;
+  const sourcesSeen = provider.calls[afterFirst + 1]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(sourcesSeen.some(b => /giant files/.test(b)), 'a repeated known claim keeps the whole eligible batch unconsumed until explicit abstention');
   recordCase({ suite: 'profile', name: 'passive-capture-to-profile', status: 'PASS' });
 });
 
@@ -406,7 +425,7 @@ test('malformed profile output is repaired within a bounded budget and never inv
   const engine = new IntelligenceEngine(w.vault, { id: 'flaky', async generate(r) { n++; notes.push(r.instruction); if (n === 1) return { kind: 'user_insight', title: 'x', body: 'y', evidence: [] } as ModelProposal; if (n === 2) return { kind: 'preference_note', title: 'x', body: 'y', evidence: [ref(message, 'command first')] } as ModelProposal; return { kind: 'user_insight', title: 'Command first', body: 'The user wants the command first and the explanation after.', evidence: [ref(message, 'give me the command first')], metadata: { category: 'working_style', preferenceKey: 'answer-order', sensitivity: 'none', explicitStatement: true } }; } });
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
   assert.equal(job!.status, 'complete'); assert.deepEqual({ ...job!.telemetry }, { modelCalls: 4, malformed: 2, repairs: 2, outcome: 'proposed', proposals: 1, complete: true, duplicates: 1, calls: { generate: 2, repair: 2, critic: 0 }, retries: 0, tokens: { input: 0, output: 0, reported: false }, budget: { max: 5, exhausted: false }, terminal: 'proposed' });
-  assert.match(notes[1]!, /failed schema validation \(Model output invalid at proposal\.evidence/); assert.ok(!notes[1]!.includes('give me the command'), 'repair note never echoes values');
+  assert.match(notes[1]!, /failed profile validation \(Model output invalid at proposal\.evidence/); assert.ok(!notes[1]!.includes('give me the command'), 'repair note never echoes values');
   const proposal = await last(engine); assert.equal(proposal.input.evidence![0]!.span, 'give me the command first');
   recordCase({ suite: 'profile', name: 'profile-bounded-schema-repair', status: 'PASS' });
 });
@@ -416,6 +435,54 @@ test('persistent malformed profile output dead-letters after the repair budget a
   await engine.enqueue('profile', { scope: proj, objectIds: [message.id] }); const [job] = await engine.run({ job: 'profile', limit: 1 });
   assert.equal(job!.status, 'dead_letter'); assert.equal(n, 3); assert.equal(job!.telemetry!.outcome, 'malformed'); assert.equal(job!.telemetry!.malformed, 3);
   recordCase({ suite: 'profile', name: 'profile-repair-budget-exhausted', status: 'PASS' });
+});
+
+test('profile evidence span errors are repaired before persistence and cannot count as rejected proposals', async t => {
+  const w = await world(t); const message = await w.userSaid('I want you to run the relevant tests and explain important tradeoffs before you finish coding tasks.');
+  const calls: ModelRequest[] = [];
+  const provider: ModelProvider = { id: 'repair-profile-citation', async generate(request) {
+    calls.push(request);
+    if (calls.length === 1) return { kind: 'user_insight', title: 'Run tests and explain tradeoffs', body: 'The user wants the assistant to run relevant tests and explain tradeoffs before finishing coding tasks.', evidence: [ref(message, 'run relevant tests and explain tradeoffs before finishing coding tasks.')], metadata: { category: 'working_style', preferenceKey: 'run-tests' } };
+    if (calls.length === 2) return { kind: 'user_insight', title: 'Run tests and explain tradeoffs', body: 'The user wants the assistant to run relevant tests and explain tradeoffs before finishing coding tasks.', evidence: [ref(message, 'run the relevant tests and explain important tradeoffs before you finish coding tasks.')], metadata: { category: 'working_style', preferenceKey: 'run-tests' } };
+    return { kind: 'no_insight', title: 'No insight', body: 'No additional insight.', evidence: [] };
+  } };
+  const engine = new IntelligenceEngine(w.vault, provider); await engine.enqueue('profile', { scope: proj, objectIds: [message.id] });
+  const [job] = await engine.run({ job: 'profile', limit: 1 });
+  const proposals = await engine.proposals();
+  assert.equal(calls.length, 3, 'one repair, then a separate exhaustion check');
+  assert.match(calls[1]!.instruction, /copied character-for-character/);
+  assert.equal(job!.status, 'complete'); assert.equal(job!.telemetry!.calls!.repair, 1);
+  assert.equal(proposals.length, 1); assert.equal(proposals[0]!.status, 'pending');
+  assert.equal(proposals[0]!.input.evidence![0]!.span, 'run the relevant tests and explain important tradeoffs before you finish coding tasks.');
+  recordCase({ suite: 'profile', name: 'profile-repair-inexact-evidence-span', status: 'PASS' });
+});
+
+test('evidence punctuation is character-exact; a model-added terminal period is removed only when the remainder is an exact span', async t => {
+  const w = await world(t); const sourceText = 'When you propose a refactor, list the files you would touch before changing anything.'; const message = await w.userSaid(sourceText);
+  const calls: ModelRequest[] = [];
+  const provider: ModelProvider = { id: 'repair-punctuation-citation', async generate(request) {
+    calls.push(request);
+    const evidenceSpan = calls.length === 1 ? 'list the files you would touch.' : 'list the files you would touch before';
+    return { kind: 'user_insight', title: 'List files before a refactor', body: 'The user wants the files listed before a refactor.', evidence: [ref(message, evidenceSpan)], metadata: { category: 'working_style', preferenceKey: 'refactor-files' } };
+  } };
+  const engine = new IntelligenceEngine(w.vault, provider); await engine.enqueue('profile', { scope: proj, objectIds: [message.id] });
+  const [job] = await engine.run({ job: 'profile', limit: 1 }); const proposals = await engine.proposals();
+  assert.equal(calls.length, 2, 'the exact-span correction avoids a provider repair call and duplicate extraction stops the batch');
+  assert.doesNotMatch(calls[1]!.instruction, /previous response failed/);
+  assert.equal(job!.status, 'complete'); assert.equal(proposals.length, 1); assert.equal(proposals[0]!.status, 'pending');
+  assert.equal(proposals[0]!.input.evidence![0]!.span, 'list the files you would touch');
+  recordCase({ suite: 'profile', name: 'profile-punctuation-exact-evidence-repair', status: 'PASS' });
+});
+
+test('persistently fabricated profile spans exhaust bounded repair without storing a proposal', async t => {
+  const w = await world(t); const message = await w.userSaid('I prefer compact command output.'); let calls = 0;
+  const provider: ModelProvider = { id: 'invalid-profile-citation', async generate() { calls++; return { kind: 'user_insight', title: 'Compact output', body: 'The user prefers compact command output.', evidence: [ref(message, 'compact command output that was never said')], metadata: { category: 'preference', preferenceKey: 'output' } }; } };
+  const engine = new IntelligenceEngine(w.vault, provider); await engine.enqueue('profile', { scope: proj, objectIds: [message.id] });
+  const [job] = await engine.run({ job: 'profile', limit: 1 });
+  assert.equal(calls, 3, 'repair count is bounded by the existing profile repair limit');
+  assert.equal(job!.status, 'dead_letter'); assert.equal(job!.telemetry!.complete, false);
+  assert.equal((await engine.proposals()).length, 0, 'no unsupported output was persisted');
+  recordCase({ suite: 'profile', name: 'profile-inexact-evidence-span-bounded-failure', status: 'PASS' });
 });
 test('no_insight is only valid for the profile stage', async t => {
   const w = await world(t); const note = await w.vault.put({ scope: wiki, kind: 'source', title: 'S', body: 'Some source text.' });

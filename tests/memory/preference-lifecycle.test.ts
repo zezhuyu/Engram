@@ -86,12 +86,22 @@ test('ambiguous statements, invented traits and sensitive items are never told t
   const s = await setup(t);
   await s.say('alpha', 'Maybe I would like tabs? Not sure yet. [key:indent]'); await s.cycle('amb');
   await s.say('alpha', 'I am working on the billing module this week. [key:trait]'); await s.cycle('trait');
-  await s.say('alpha', 'I prefer to avoid late meetings because of my medical treatment. [key:health]'); await s.cycle('sens');
-  const ctx = await s.context('alpha'); assert.doesNotMatch(ctx, /tabs/); assert.doesNotMatch(ctx, /Kubernetes/); assert.doesNotMatch(ctx, /medical|late meetings/);
+  const ctx = await s.context('alpha'); assert.doesNotMatch(ctx, /tabs/); assert.doesNotMatch(ctx, /Kubernetes/);
   const all = await s.insights(); assert.equal(all.filter(d => d.status === 'accepted').length, 0, JSON.stringify(all.map(d => [d.metadata.preferenceKey, d.status])));
   assert.ok(!all.some(d => /Kubernetes/.test(d.body)), 'a claim whose cited words are not in the source is rejected, never stored');
-  const pending = await s.engine.proposals(); assert.ok(pending.some(p => p.status === 'pending' && /tabs/.test(p.input.body)), 'the ambiguous one waits for the user, as a proposal'); assert.ok(pending.some(p => p.status === 'pending' && p.input.metadata?.sensitivity === 'sensitive'), 'the sensitive one waits for explicit confirmation');
+  const pending = await s.engine.proposals(); assert.ok(pending.some(p => p.status === 'pending' && /tabs/.test(p.input.body)), 'the ambiguous one waits for the user, as a proposal');
   recordCase({ suite: 'memory', name: 'preference-lifecycle-no-false-promotion', status: 'PASS' });
+});
+
+test('sensitive preferences remain private until explicit owner review', async t => {
+  const s = await setup(t);
+  await s.say('alpha', 'I prefer to avoid late meetings because of my medical treatment. [key:health]');
+  const c = await s.cycle('sensitive'); assert.equal(c.state, 'COMPLETED', JSON.stringify(c.error));
+  const ctx = await s.context('alpha'); assert.doesNotMatch(ctx, /medical|late meetings/);
+  const accepted = (await s.insights()).filter(d => d.status === 'accepted'); assert.equal(accepted.length, 0);
+  const pending = (await s.engine.proposals()).filter(p => p.status === 'pending' && p.input.kind === 'user_insight');
+  assert.equal(pending.length, 1); assert.equal(pending[0]!.input.metadata?.sensitivity, 'sensitive');
+  recordCase({ suite: 'memory', name: 'sensitive-preference-pending-review', status: 'PASS' });
 });
 
 test('a model failure mid-extraction and a late, replayed delivery still end with exactly one accepted insight', async t => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { predictionCounts, predictionCountsByCase, predictionTermsMatch } from '../../scripts/lib/profile-metrics.js';
+import { hasExactSourceEvidence, predictionCounts, predictionCountsByCase, predictionTermsMatch, profileClaimMatches } from '../../scripts/lib/profile-metrics.js';
 
 test('Preferences precision counts wrong-category retained outputs as false positives', () => {
   const counts = predictionCounts([
@@ -27,4 +27,21 @@ test('profile evaluation normalizes Unicode dashes without erasing polarity or r
   assert.equal(predictionTermsMatch('The user prefers configurable values rather than hard‑coded environment values.', ['configurable', 'hard-coded']), true);
   assert.equal(predictionTermsMatch('The user prefers Rust over Python.', ['Python over Rust']), false);
   assert.equal(predictionTermsMatch('The user does not prefer Python.', ['prefers Python']), false);
+});
+
+test('every retained profile candidate uses case-insensitive directional relation scoring', () => {
+  const expected = { category: 'preference', terms: ['go', 'over', 'rust'], relation: { left: 'go', operator: 'over', right: 'rust' } };
+  assert.equal(profileClaimMatches('Preference for Go over Rust: I prefer Go over Rust.', 'preference', expected), true);
+  assert.equal(profileClaimMatches('Preference for Rust over Go: I prefer Rust over Go.', 'preference', expected), false);
+  assert.equal(profileClaimMatches('Preference for Go over Rust', 'goal', expected), false);
+});
+
+test('profile grounding scores canonical evidence only when URI, revision and exact span match', () => {
+  const source = { uri: 'mdb://profile/objects/one', revisionId: 'rev-one', body: 'I prefer exact citations in every review.' };
+  assert.equal(hasExactSourceEvidence([{ ...source, span: 'exact citations' }], source), true);
+  assert.equal(hasExactSourceEvidence([{ ...source, uri: 'mdb://profile/objects/other', span: 'exact citations' }], source), false);
+  assert.equal(hasExactSourceEvidence([{ ...source, revisionId: 'rev-old', span: 'exact citations' }], source), false);
+  assert.equal(hasExactSourceEvidence([{ ...source, span: 'exact citations, roughly' }], source), false);
+  assert.equal(hasExactSourceEvidence([{ ...source, span: '' }], source), false);
+  assert.equal(hasExactSourceEvidence(undefined, source), false);
 });

@@ -13,13 +13,13 @@ export function modelEvidenceMatches(record: { status?: string; evidenceSource?:
   return record?.status === 'PASS' && sourceEvidenceMatches(record, current);
 }
 
-export function currentQualityStatus(base: string, record: { status?: string; runAt?: string; evidenceSource?: { files?: Record<string, string> } } | undefined, current: Record<string, string>, now = Date.now()): string {
+export function currentQualityStatus(base: string | undefined, record: { status?: string; runAt?: string; evidenceSource?: { files?: Record<string, string> } } | undefined, current: Record<string, string>, now = Date.now()): string {
   const at = typeof record?.runAt === 'string' ? Date.parse(record.runAt) : NaN;
   const age = now - at;
   const currentEvidence = Number.isFinite(at) && age >= 0 && age <= 30 * 24 * 3600_000 && sourceEvidenceMatches(record, current);
   if (currentEvidence && record?.status === 'FAIL') return 'FAIL';
   if (base === 'PASS' && currentEvidence && record?.status === 'PASS' && modelEvidenceMatches(record, current)) return 'PASS';
-  return base === 'PASS' ? 'INCOMPLETE' : base;
+  return base === 'PASS' ? 'INCOMPLETE' : base ?? 'NOT_RUN';
 }
 
 /** Evidence is current only when it binds every source required by the consumer to the exact current bytes. */
@@ -37,7 +37,12 @@ export interface PolicyResult {
 
 export interface SuiteEvidenceLike { status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[] }
 export interface SuiteInventory { minimumTests: number; requiredTests: string[]; requiredCases: string[] }
-export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inventory?: SuiteInventory): boolean {
+export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined): boolean {
+  // Arithmetic consistency alone cannot establish suite completeness: an
+  // attacker (or accidental partial run) can shrink tests and totals together.
+  if (!inventory || !Number.isInteger(inventory.minimumTests) || inventory.minimumTests < 1
+    || !Array.isArray(inventory.requiredTests) || !Array.isArray(inventory.requiredCases)
+    || inventory.requiredTests.length === 0 || inventory.requiredCases.length === 0) return false;
   if (!report || !Array.isArray(report.tests) || !Array.isArray(report.caseDetails) || !Array.isArray(report.caseFailures) || !report.counts) return false;
   const counts = report.counts;
   const actual = { pass: report.tests.filter(t => t.status === 'PASS').length, fail: report.tests.filter(t => t.status === 'FAIL').length, skipped: report.tests.filter(t => t.status === 'SKIPPED').length, total: report.tests.length };
@@ -48,8 +53,8 @@ export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inv
   const caseNames = report.caseDetails.map(c => c.name);
   if (testNames.some(n => typeof n !== 'string' || !n) || new Set(testNames).size !== testNames.length || caseNames.some(n => typeof n !== 'string' || !n) || new Set(caseNames).size !== caseNames.length) return false;
   const validCaseNames = caseNames.filter((n): n is string => typeof n === 'string');
-  if (inventory && (report.tests.length < inventory.minimumTests || inventory.requiredTests.some(n => !testNames.includes(n))
-    || inventory.requiredCases.some(n => !validCaseNames.includes(n)) || validCaseNames.some(n => !inventory.requiredCases.includes(n)))) return false;
+  if (report.tests.length < inventory.minimumTests || inventory.requiredTests.some(n => !testNames.includes(n))
+    || inventory.requiredCases.some(n => !validCaseNames.includes(n)) || validCaseNames.some(n => !inventory.requiredCases.includes(n))) return false;
   if (report.status === 'PASS') return report.exitCode === 0 && actual.fail === 0 && report.caseFailures.length === 0 && actual.total > 0;
   if (report.status === 'FAIL') return report.exitCode !== 0 || actual.fail > 0 || report.caseFailures.length > 0;
   if (report.status === 'SKIPPED') return report.exitCode === 0 && actual.total > 0;

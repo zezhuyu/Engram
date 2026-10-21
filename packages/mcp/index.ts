@@ -108,11 +108,11 @@ function webToolsFor(client: Engram): Tool[] {
     { name: 'engram_history', description: 'Read authorized immutable revision lineage as bounded metadata without returning older document bodies.', inputSchema: object({ objectId: string }, ['objectId']), execute: async a => (await vault.history(String(a.objectId))).slice(-50).map(({ id, revisionId, previousRevisionId, revisionNumber, title, kind, status, updatedAt, uri }) => ({ id, revisionId, previousRevisionId, revisionNumber, title, kind, status, updatedAt, uri })) },
     { name: 'engram_propose_insight', description: 'Stage evidence-backed content for review. This does not commit or promote it.', inputSchema: object({ scope, title: string, body: string, evidence, tags: array(string) }, ['scope', 'title', 'body', 'evidence']), execute: async a => safe(await client.intelligence.propose({ ...a, kind: 'insight' } as unknown as PutInput) as unknown as Record<string, unknown>) },
   ];
-  return tools;
+  const durableClientTools = standardToolsFor(client).filter(tool => ['engram_note_upsert', 'engram_task_upsert', 'engram_handoff_write'].includes(tool.name));
+  return [...tools, ...durableClientTools];
 }
 
-export function toolsFor(client: Engram, toolset = process.env.MDB_MCP_TOOLSET): Tool[] {
-  if (toolset === 'remote-web') return webToolsFor(client);
+function standardToolsFor(client: Engram): Tool[] {
   const v = client.vault;
   return [
     { name: 'mdb_search', description: 'Search authorized Markdown with citations and revision IDs.', inputSchema: object(searchProperties, ['query']), execute: async a => client.query(a as unknown as SearchInput) },
@@ -160,6 +160,10 @@ export function toolsFor(client: Engram, toolset = process.env.MDB_MCP_TOOLSET):
     { name: 'mdb_skill_show', description: 'Read skill instructions, provenance and execution status.', inputSchema: object({ name: string }, ['name']), execute: async a => client.skill(String(a.name)) },
     { name: 'mdb_skill_run', description: 'Run an internal skill through actor-bound Vault APIs; imported scripts are never auto-executed.', inputSchema: object({ name: string, input: { type: 'object', additionalProperties: true } }, ['name']), execute: async a => client.runSkill(String(a.name), a.input as Record<string, unknown> | undefined) },
   ];
+}
+
+export function toolsFor(client: Engram, toolset = process.env.MDB_MCP_TOOLSET): Tool[] {
+  return toolset === 'remote-web' ? webToolsFor(client) : standardToolsFor(client);
 }
 
 type RpcRequest = { jsonrpc?: string; id?: unknown; method?: string; params?: Record<string, unknown> };

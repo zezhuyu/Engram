@@ -20,7 +20,7 @@ const DISTRIBUTION = '60% short (12 tokens), 30% medium (120), 10% long (600); 5
 type Workload = { name: string; input: SearchInput; expectedHits: number | null };
 type CorpusManifest = {
   schemaVersion: 1; corpusId: string; generator: { name: string; version: string; sourceSha256: string; distribution: string };
-  sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> };
+  sourceBinding?: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> };
   builtAt: string; seed: number; documents: number; workspaces: number; bodyBytes: number;
   knownHits: { rare: number; cjk: number; phrase: number; punctuation: number; tagAlpha: number; rareOrPhrase: number };
   workloads: Workload[]; files: Array<{ path: string; bytes: number; sha256: string }>; fileCount: number;
@@ -112,6 +112,13 @@ async function verifyCorpus(root: string, manifest: CorpusManifest): Promise<voi
   if (actual.length !== manifest.files.length) throw new Error(`Corpus file count differs: expected ${manifest.files.length}, found ${actual.length}`);
   const expected = new Map(manifest.files.map(file => [file.path, file]));
   for (const file of actual) { const original = expected.get(file.path); if (!original || file.sha256 !== original.sha256 || file.bytes !== original.bytes) throw new Error(`Corpus hash mismatch: ${file.path}`); }
+  const corpusId = hash(JSON.stringify({ seed: manifest.seed, documents: manifest.documents, generator: manifest.generator, files: manifest.files } )).slice(0, 24);
+  if (corpusId !== manifest.corpusId) throw new Error('Corpus identity does not match its manifest content');
+  const journal = (await fs.readFile(path.join(root, '.mdb/events/commits.jsonl'), 'utf8')).trim();
+  const events = journal ? journal.split('\n').map(line => JSON.parse(line) as { sequence: number; operation: string }) : [];
+  if (events.length !== manifest.documents || events.some((event, index) => event.sequence !== index + 1 || event.operation !== 'put')) {
+    throw new Error(`Corpus journal is not a contiguous ${manifest.documents}-document put sequence`);
+  }
 }
 function deterministicFactories(seed: number, completedDocuments = 0): { idFactory: (prefix: string) => string; now: () => Date } {
   let counter = completedDocuments * 3, tick = completedDocuments;
@@ -150,7 +157,7 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
     const events = journal ? journal.split('\n').map(line => JSON.parse(line) as { sequence: number; objectId: string; revisionId: string; operation: string }) : [];
     if (events.some((event, index) => event.sequence !== index + 1 || event.operation !== 'put')) throw new Error('Cannot resume safely: journal is not a contiguous generated corpus prefix');
     completed = events.length;
-    if (completed >= size) throw new Error('Resume target already has all documents; manifest finalization is not inferred');
+    if (completed > size) throw new Error('Cannot resume safely: journal contains more documents than the requested deterministic corpus');
     const workspaceCount = Math.min(20, Math.max(2, Math.floor(size / 200)));
     const workspaces = await initialVault.listWorkspaces();
     const expectedIds = new Set(Array.from({ length: workspaceCount }, (_, index) => `bench${index}`)); // listWorkspaces() is sorted lexicographically (bench10 before bench2), so compare as a set
@@ -247,9 +254,6 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
   if (runs < 3 || runs > 200 || warmups < 0 || warmups > 20) throw new Error('runs must be 3..200; warmups must be 0..20');
   const manifest = await readManifest(root); await verifyCorpus(root, manifest);
   const source = await currentSourceEvidence();
-  if (manifest.sourceBinding?.fingerprint !== source.fingerprint || manifest.sourceBinding.workingTreeSourceFingerprint !== source.fingerprint
-      || manifest.sourceBinding.fullSourceFileCount !== Object.keys(source.files).length) throw new Error('Benchmark corpus source identity is stale; rebuild it with the current full source set');
-  for (const [file, digest] of Object.entries(manifest.sourceBinding.files)) if (source.files[file] !== digest) throw new Error(`Benchmark corpus source hash changed: ${file}`);
   const vault = new Vault(root); const engines = { filesystem: new FilesystemSearch(vault), sqlite: new SQLiteSearch(vault) }; const workloads = manifest.workloads;
   // The filesystem backend is measured with its persistent trigram index (the corpus manifest excludes .mdb/indexes). The build is reported, never hidden.
   const fsIndexBuild = (await fsIndexStatus(vault)).present ? { reused: true as const } : { reused: false as const, ...(await buildFsIndex(vault)) };
@@ -290,7 +294,10 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
         // A query returns at most its limit, so a known count above the limit can only be verified up to the limit (recorded as truncatedByLimit); below it the count must match exactly.
         const limit = workload.input.limit ?? 50, wanted = workload.expectedHits === null ? null : Math.min(workload.expectedHits, limit), cappedByLimit = workload.expectedHits !== null && workload.expectedHits > limit;
         if (!timedOutSamples[backend]![workload.name] && wanted !== null && bucket.last.length !== wanted) throw new Error(`${backend}/${workload.name}: expected ${wanted}${cappedByLimit ? ` (known ${workload.expectedHits}, capped by limit ${limit})` : ''} hits, found ${bucket.last.length}`);
-        timings[backend]![workload.name] = { ...stats(bucket.elapsed), ...(timedOutSamples[backend]![workload.name] ? { timedOutSamples: timedOutSamples[backend]![workload.name], status: 'INCOMPLETE' } : {}), firstPassMs: firstPass[backend]![workload.name], hits: bucket.last.length, expectedHits: workload.expectedHits, ...(cappedByLimit ? { truncatedByLimit: true, verifiedUpTo: limit } : {}), servedBy: backend, indexInfo: bucket.indexInfo,
+        const correct = workload.expectedHits === null || timedOutSamples[backend]![workload.name]
+          ? null
+          : bucket.last.length === wanted;
+        timings[backend]![workload.name] = { ...stats(bucket.elapsed), ...(timedOutSamples[backend]![workload.name] ? { timedOutSamples: timedOutSamples[backend]![workload.name], status: 'INCOMPLETE' } : {}), firstPassMs: firstPass[backend]![workload.name], hits: bucket.last.length, expectedHits: workload.expectedHits, correct, ...(cappedByLimit ? { truncatedByLimit: true, verifiedUpTo: limit } : {}), servedBy: backend, indexInfo: bucket.indexInfo,
           cpuUserMs: { ...stats(bucket.cpuUser), totalMs: +bucket.cpuUser.reduce((a, b) => a + b, 0).toFixed(2) },
           cpuSystemMs: { ...stats(bucket.cpuSystem), totalMs: +bucket.cpuSystem.reduce((a, b) => a + b, 0).toFixed(2) },
           allocatedBytes: bucket.allocatedBytes, truncated: bucket.truncated, heapDeltaBytes: { ...stats(bucket.heapDeltas), totalBytes: bucket.heapDeltas.reduce((sum, value) => sum + value, 0) } };
@@ -314,9 +321,11 @@ async function replay(opts: Record<string, string | boolean>): Promise<void> {
     const processCpu = process.cpuUsage(processStart); sampleMemory();
     const plans = await queryPlans(root, `rare-marker-${manifest.seed}`);
     const report = {
-      schemaVersion: 1, mode: 'replay', historicalComparison: false, corpus: { corpusId: manifest.corpusId, seed: manifest.seed, documents: manifest.documents, fileCount: manifest.fileCount, verifiedHashes: true, manifestPath: path.join(root, MANIFEST) },
+      schemaVersion: 1, mode: 'replay', historicalComparison: false, corpus: { corpusId: manifest.corpusId, seed: manifest.seed, documents: manifest.documents, fileCount: manifest.fileCount, verifiedHashes: true, manifestPath: MANIFEST },
       timestamp: new Date().toISOString(), runs, warmups, cache: { mode: 'first-pass-plus-warm-interleaved', firstPass: 'measured after hash verification; reflects a fresh query pass, not a cold OS page cache', osPageCachePurged: false, note: 'Hash verification can warm OS page cache; no cold-cache claim is made.' },
-      codeRevision: await codeRevision(), sourceBinding: manifest.sourceBinding, hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
+      codeRevision: await codeRevision(), sourceBinding: { fingerprint: source.fingerprint, workingTreeSourceFingerprint: source.fingerprint, fullSourceFileCount: Object.keys(source.files).length, files: source.files },
+      corpusProvenance: { manifestSha256: hash(await fs.readFile(path.join(root, MANIFEST))), generator: manifest.generator, generatedCodeRevision: manifest.codeRevision, generatedAt: manifest.builtAt, originalSourceBinding: manifest.sourceBinding ? { fingerprint: manifest.sourceBinding.fingerprint, fullSourceFileCount: manifest.sourceBinding.fullSourceFileCount } : null, generatorMatchesCurrent: manifest.generator.sourceSha256 === hash(await fs.readFile(path.resolve('scripts/benchmark.ts'))), verifiedFiles: manifest.files.length, verifiedJournalEvents: manifest.documents },
+      hardware: machine(), runtime: runtime(), watchdog: { queryTimeoutMs, note: 'execution watchdog only; no latency budget was changed', timedOutSamples }, build: { fsIndexBuild, durableCommit: manifest.benchmarkConfiguration.commitStats, mode: manifest.benchmarkConfiguration.buildMode, resumedAfterDocuments: manifest.benchmarkConfiguration.resumedAfterDocuments ?? null, note: 'commit latency of the documents committed in the recorded build session (a resumed build covers only the documents after resumedAfterDocuments)' }, filesystem: timings.filesystem, sqlite: timings.sqlite, parity, parityAll, parityComplete, completeResultCounts: completeCounts, parityBasis: 'identity sets; limit-truncated workloads re-run by paging to complete sets and checked against the exact known count',
       instrumentation: profileReport(), queryPlans: plans, cpu: { userMs: processCpu.user / 1000, systemMs: processCpu.system / 1000 },
       memory: { allocationCounter: allocationCounterAvailable ? 'v8.total_allocated_bytes' : 'unavailable', startAllocatedBytes: allocStart, endAllocatedBytes: allocatedBytes(), allocatedBytes: allocationDelta(allocatedBytes(), allocStart),
         peakRssBytes: memorySamples.map(sample => sample.rssBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakHeapUsedBytes: memorySamples.map(sample => sample.heapUsedBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), peakExternalBytes: memorySamples.map(sample => sample.externalBytes).reduce((acc, value) => Math.max(acc, value), -Infinity), samples: memorySamples.length, samplingIntervalMs: 50 }

@@ -145,7 +145,7 @@ test('remote-web MCP exposes bounded authorized tools and idempotent versioned c
     const request = (id: number, name: string, args: unknown) => httpPost(endpoint, token, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
     const listed = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
     const tools = ((await listed.json()) as { result: { tools: Array<{ name: string }> } }).result.tools;
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_history', 'engram_patch', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_timeline'].sort());
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_handoff_write', 'engram_history', 'engram_note_upsert', 'engram_patch', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_task_upsert', 'engram_timeline'].sort());
     const capability = await request(3, 'engram_capabilities', { scope: { type: 'workspace', workspaceId: 'remote' } });
     assert.deepEqual((JSON.parse((await capability.json() as Reply).result!.content![0]!.text) as { authorization: unknown }).authorization, { read: true, write: true });
     const denied = await request(4, 'engram_create', { scope: { type: 'workspace', workspaceId: 'secret' }, kind: 'note', title: 'Hidden', body: 'no leak', source: 'ChatGPT', idempotencyKey: 'denied-write' });
@@ -167,6 +167,11 @@ test('remote-web MCP exposes bounded authorized tools and idempotent versioned c
     assert.match((await stale.json() as Reply).result!.content![0]!.text, /CONFLICT/);
     const search = await request(11, 'engram_search', { query: 'shared remote connector', scopes: [{ type: 'workspace', workspaceId: 'remote' }] });
     assert.match((await search.json() as Reply).result!.content![0]!.text, /Use the shared remote connector/);
+    const typedWrite = await request(12, 'engram_note_upsert', { scope: { type: 'workspace', workspaceId: 'remote' }, noteId: 'packaged-client', title: 'Client note', body: 'written through the typed client contract' });
+    assert.match((await typedWrite.json() as Reply).result!.content![0]!.text, /COMMITTED/);
+    const deniedTypedWrite = await request(13, 'engram_note_upsert', { scope: { type: 'workspace', workspaceId: 'secret' }, noteId: 'denied', title: 'Denied', body: 'must not commit' });
+    assert.equal((await deniedTypedWrite.json() as Reply).result?.isError, true);
+    assert.equal(await owner.vault.byIdempotencyKey('note:denied', { type: 'workspace', workspaceId: 'remote' }), undefined);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

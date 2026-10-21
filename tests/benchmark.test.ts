@@ -22,8 +22,13 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   await assert.rejects(stat(path.join(partial, '.engram-benchmark-manifest.json')));
   const resumed = JSON.parse(run('build', '--size', '10', '--seed', '17', '--root', partial, '--resume')) as { corpusId: string };
   assert.equal(resumed.corpusId, a.corpusId, 'resuming a verified deterministic prefix yields the same corpus hash as a clean build');
+  const interruptedFinalization = path.join(temp, 'finalization');
+  const completedBuild = JSON.parse(run('build', '--size', '10', '--seed', '17', '--root', interruptedFinalization, '--retain')) as { corpusId: string };
+  await rm(path.join(interruptedFinalization, '.engram-benchmark-manifest.json'));
+  const finalized = JSON.parse(run('build', '--size', '10', '--seed', '17', '--root', interruptedFinalization, '--resume')) as { corpusId: string };
+  assert.equal(finalized.corpusId, completedBuild.corpusId, 'a full committed deterministic journal can safely recover an interrupted manifest finalization');
   const manifestPath = path.join(first, '.engram-benchmark-manifest.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { files: Array<{ path: string; sha256: string }>; workloads: unknown[]; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> } };
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { documents: number; files: Array<{ path: string; sha256: string }>; workloads: unknown[]; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> } };
   assert.ok(manifest.files.length > 10);
   assert.equal(manifest.workloads.length, 12);
   assert.equal(manifest.sourceBinding.fingerprint, manifest.sourceBinding.workingTreeSourceFingerprint);
@@ -33,17 +38,25 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   const replayOutput = JSON.parse(run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir)) as { parityAll: boolean; parityComplete: boolean; corpusId: string };
   assert.equal(replayOutput.parityAll, true); assert.equal(replayOutput.parityComplete, true);
   assert.equal(replayOutput.corpusId, a.corpusId);
-  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number | null; startAllocatedBytes: number | null; endAllocatedBytes: number | null; allocationCounter: string }; parity: Record<string, boolean | null>; parityComplete: boolean; sourceBinding: { fingerprint: string } };
+  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number | null; startAllocatedBytes: number | null; endAllocatedBytes: number | null; allocationCounter: string }; parity: Record<string, boolean | null>; parityComplete: boolean; filesystem: Record<string, { hits: number; expectedHits: number | null; correct: boolean | null }>; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number }; corpusProvenance: { generatorMatchesCurrent: boolean; verifiedFiles: number; verifiedJournalEvents: number; manifestSha256: string } };
   assert.ok(Object.keys(report.instrumentation).some(key => key.includes('candidate.discovery')));
   assert.ok(report.queryPlans.length > 0);
   // V8's allocation counter does not exist on every Node line (it is absent on Node 22): the report must then say so and carry no allocation numbers at all.
   if (report.memory.allocationCounter === 'v8.total_allocated_bytes') { assert.ok(Number.isFinite(report.memory.allocatedBytes) && report.memory.allocatedBytes! > 0); assert.ok(report.memory.endAllocatedBytes! > report.memory.startAllocatedBytes!); }
   else { assert.equal(report.memory.allocationCounter, 'unavailable'); assert.equal(report.memory.allocatedBytes, null); assert.equal(report.memory.startAllocatedBytes, null); assert.equal(report.memory.endAllocatedBytes, null); assert.equal('v8' in process.versions && 'total_allocated_bytes' in v8.getHeapStatistics(), false, 'unavailable is only valid when this Node really lacks the counter'); }
   assert.ok(Object.values(report.parity).every(value => value === true)); assert.equal(report.parityComplete, true);
+  assert.equal(report.filesystem['grep-rare']!.correct, true, 'known-count results are checked against the deterministic oracle');
+  assert.equal(report.filesystem['grep-common']!.correct, null, 'an unknown expected count stays unverified instead of inheriting a pass boolean');
   assert.equal(report.sourceBinding.fingerprint, manifest.sourceBinding.fingerprint);
-  const tamperedManifest = { ...manifest, sourceBinding: { ...manifest.sourceBinding, fingerprint: '0'.repeat(64) } };
+  assert.equal(report.sourceBinding.fingerprint, report.sourceBinding.workingTreeSourceFingerprint);
+  assert.ok(report.sourceBinding.fullSourceFileCount > 100);
+  assert.equal(report.corpusProvenance.generatorMatchesCurrent, true);
+  assert.equal(report.corpusProvenance.verifiedFiles, manifest.files.length);
+  assert.equal(report.corpusProvenance.verifiedJournalEvents, manifest.documents);
+  assert.match(report.corpusProvenance.manifestSha256, /^[a-f0-9]{64}$/);
+  const tamperedManifest = structuredClone(manifest); tamperedManifest.files[0]!.sha256 = '0'.repeat(64);
   await writeFile(manifestPath, `${JSON.stringify(tamperedManifest)}\n`);
-  assert.throws(() => run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir), /source identity is stale/);
+  assert.throws(() => run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir), /Corpus hash mismatch/);
   assert.throws(() => run('cleanup', '--root', first, '--confirm-id', 'wrong'), /Refusing cleanup/);
   // Restore the manifest source binding so the explicit cleanup validates this generated corpus.
   await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);

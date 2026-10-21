@@ -197,17 +197,21 @@ export class Vault {
     return doc;
   }
   private async documentsForEvents(events:CommitEvent[]):Promise<Document[]> {
-    const missing=events.filter(event=>!this.revisionCache.has(`${event.objectId}/${event.revisionId}`));
+    // Retain this batch independently of the bounded LRU. Loading missing
+    // revisions can evict cache hits that belong to the same batch.
+    const resolved=new Map<string,Document>();
+    for(const event of events){const key=`${event.objectId}/${event.revisionId}`,doc=this.revisionCache.get(key);if(!doc)continue;this.revisionCache.delete(key);this.revisionCache.set(key,doc);resolved.set(key,doc);}
+    const missing=events.filter(event=>!resolved.has(`${event.objectId}/${event.revisionId}`));
     if(missing.length){
       const keys=missing.map(event=>`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`);
       const bytes=this.store.readMany?await this.store.readMany(keys,8):await Promise.all(keys.map(key=>this.store.read(key)));
       for(let i=0;i<missing.length;i++){
         const event=missing[i]!,key=`${event.objectId}/${event.revisionId}`,doc=parseDocument(Buffer.from(bytes[i]!).toString('utf8'));
         if(doc.id!==event.objectId||doc.revisionId!==event.revisionId||doc.path!==event.path||scopeKey(doc.scope)!==scopeKey(event.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
-        this.cacheRevision(key,doc);
+        resolved.set(key,doc);this.cacheRevision(key,doc);
       }
     }
-    return events.map(event=>{const key=`${event.objectId}/${event.revisionId}`,doc=this.revisionCache.get(key);if(!doc)throw new MDBError('INTERNAL','Revision batch read did not return an object');this.revisionCache.delete(key);this.revisionCache.set(key,doc);return doc;});
+    return events.map(event=>{const doc=resolved.get(`${event.objectId}/${event.revisionId}`);if(!doc)throw new MDBError('INTERNAL','Revision batch read did not return an object');return doc;});
   }
   private async rawDocument(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.raw_document', () => this.rawDocumentUnprofiled(objectId, revisionId)); }
   private async rawDocumentUnprofiled(objectId:string,revisionId?:string):Promise<Document> {

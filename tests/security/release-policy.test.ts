@@ -58,11 +58,13 @@ test('current-source evidence requires every consumer source hash; a partial or 
 
 test('release aggregation rejects inconsistent suite totals, missing cases and contradictory status fields', () => {
   const valid = { status: 'PASS', exitCode: 0, counts: { pass: 1, fail: 0, skipped: 0, total: 1 }, tests: [{ name: 'suite case', status: 'PASS' }], cases: 1, caseDetails: [{ name: 'suite case', status: 'PASS' }], caseFailures: [] };
-  assert.equal(suiteReportConsistent(valid), true);
-  assert.equal(suiteReportConsistent({ ...valid, counts: { ...valid.counts, total: 2 } }), false);
-  assert.equal(suiteReportConsistent({ ...valid, cases: 0 }), false);
-  assert.equal(suiteReportConsistent({ ...valid, status: 'FAIL' }), false);
-  assert.equal(suiteReportConsistent({ ...valid, status: 'PASS', tests: [], counts: { pass: 0, fail: 0, skipped: 0, total: 0 }, cases: 0, caseDetails: [] }), false);
+  const inventory = { minimumTests: 1, requiredTests: ['suite case'], requiredCases: ['suite case'] };
+  assert.equal(suiteReportConsistent(valid, inventory), true);
+  assert.equal(suiteReportConsistent(valid, undefined), false, 'reports without a declared required-case inventory are not admissible');
+  assert.equal(suiteReportConsistent({ ...valid, counts: { ...valid.counts, total: 2 } }, inventory), false);
+  assert.equal(suiteReportConsistent({ ...valid, cases: 0 }, inventory), false);
+  assert.equal(suiteReportConsistent({ ...valid, status: 'FAIL' }, inventory), false);
+  assert.equal(suiteReportConsistent({ ...valid, status: 'PASS', tests: [], counts: { pass: 0, fail: 0, skipped: 0, total: 0 }, cases: 0, caseDetails: [] }, inventory), false);
 });
 
 test('mandatory suite inventory prevents reduced totals, unknown substitutions and duplicate case ids', () => {
@@ -78,6 +80,7 @@ test('current source quality FAIL dominates base PASS, INCOMPLETE, NOT_RUN and m
   const current = { 'engine.ts': 'sha-current' };
   const fail = { status: 'FAIL', runAt: new Date().toISOString(), evidenceSource: { files: current } };
   for (const base of ['PASS', 'INCOMPLETE', 'NOT_RUN']) assert.equal(currentQualityStatus(base, fail, current), 'FAIL', `base=${base}`);
+  assert.equal(currentQualityStatus(undefined, fail, current), 'FAIL', 'a missing historical/base gate cannot mask current-source quality failure');
   assert.equal(currentQualityStatus('PASS', undefined, current), 'INCOMPLETE');
   assert.equal(currentQualityStatus('PASS', { ...fail, runAt: '2000-01-01T00:00:00Z' }, current), 'INCOMPLETE');
   assert.equal(currentQualityStatus('PASS', { ...fail, evidenceSource: { files: { 'engine.ts': 'stale' } } }, current), 'INCOMPLETE');

@@ -13,7 +13,10 @@ export async function packageLinuxBundles(destination, backend) {
   for (const role of ['client', 'server']) {
     const bundle = join(output, `engram-${role}`);
     await mkdir(bundle, { recursive: true });
-    await cp(resolve(backend), join(bundle, 'backend'), { recursive: true });
+    // Preserve npm's .bin and other runtime symlinks. Following them while copying
+    // can make a link target resolve back inside the source bundle and fail with
+    // EINVAL (or duplicate the target under the link name).
+    await cp(resolve(backend), join(bundle, 'backend'), { recursive: true, verbatimSymlinks: true });
     await writeFile(join(bundle, `engram-${role}`), workerLauncher(role, 'linux'), { mode: 0o755 });
     await cp(join(root, 'scripts/install-linux-service.mjs'), join(bundle, 'install-service.mjs'));
     await cp(join(root, 'linux/README.md'), join(bundle, 'README.md'));

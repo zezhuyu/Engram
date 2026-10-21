@@ -37,10 +37,26 @@ const correctionApplies = (text: string, key: string, claim: string): boolean =>
 export const normalize = (text: string): string => text.toLowerCase().replace(/[\s\p{P}]+/gu, ' ').trim();
 const spanFound = (body: string, span: string): boolean => {
   if (span.length < 4) return false;
-  const sourceWords = normalize(body).split(' '); const spanWords = normalize(span).split(' ');
-  if (!spanWords.length || spanWords.some(word => !word)) return false;
-  return sourceWords.some((_, start) => spanWords.every((word, offset) => sourceWords[start + offset] === word));
+  // Exact substring matching still accepts a quote cut off mid-word (for
+  // example, "request" from "requests"). Require word boundaries at both
+  // ends while preserving punctuation and casing inside the cited phrase.
+  const word = /[\p{L}\p{N}_]/u;
+  let from = 0;
+  while (true) {
+    const at = body.indexOf(span, from);
+    if (at < 0) return false;
+    const before = at > 0 ? body[at - 1] : undefined;
+    const after = body[at + span.length];
+    if ((!before || !word.test(before)) && (!after || !word.test(after))) return true;
+    from = at + 1;
+  }
 };
+/** Repair only a model-added sentence terminator when the remaining quote is an exact, word-bounded source span. */
+export function repairTerminalCitationPunctuation(body: string, span: string): string {
+  if (spanFound(body, span)) return span;
+  const repaired = span.replace(/[.!?]+$/u, '');
+  return repaired.length >= 4 && spanFound(body, repaired) ? repaired : span;
+}
 const reject = (rationale: string, ...flags: string[]): InsightEval => ({ verdict: 'reject', rationale, flags, patch: {}, supersede: [] });
 /** Where an insight applies: its scopeLabel, or the storage scope for legacy objects. */
 export const applicability = (d: Pick<Document, 'scope' | 'metadata'>): string => (typeof d.metadata.scopeLabel === 'string' ? d.metadata.scopeLabel : d.scope.type === 'global' ? 'global' : d.scope.workspaceId);

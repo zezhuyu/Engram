@@ -154,7 +154,7 @@ test('the observed four-preference batch yields four independent, separately cit
   const w = await world(t); const message = await w.said(FOUR);
   const provider = scripted(four(message)); const engine = new IntelligenceEngine(w.vault, provider);
   const job1 = await run(engine);
-  assert.equal(job1.status, 'complete'); assert.equal(PROFILE_MAX_INSIGHTS, 4);
+  assert.equal(job1.status, 'pending', 'hitting the proposal cap is resumable, not complete'); assert.equal(PROFILE_MAX_INSIGHTS, 4);
   const proposals = await pendingInsights(engine); assert.equal(proposals.length, 4);
   for (const [i, p] of proposals.entries()) { assert.equal(p.status, 'pending', 'every proposal needs human review'); assert.equal(p.input.evidence?.length, 1); assert.equal(p.input.evidence![0]!.span, four(message)[i] && (four(message)[i] as { span: string }).span); assert.ok(FOUR.includes(p.input.evidence![0]!.span!), 'span is verbatim source text'); }
   assert.equal(job1.telemetry?.proposals, 4); assert.equal(job1.telemetry?.complete, false, 'the cap was reached: more might remain');
@@ -173,7 +173,7 @@ test('a truncated or failed later call keeps the earlier proposals, reports part
   const w = await world(t); const message = await w.said(FOUR); const steps = four(message);
   const provider = scripted([steps[0]!, steps[1]!, new MDBError('INVALID_MODEL_OUTPUT', 'Model output was truncated by the token limit'), new MDBError('INVALID_MODEL_OUTPUT', 'Model output was truncated by the token limit'), new MDBError('INVALID_MODEL_OUTPUT', 'Model output was truncated by the token limit')]);
   const engine = new IntelligenceEngine(w.vault, provider); const job = await run(engine);
-  assert.equal(job.status, 'complete'); assert.equal(job.telemetry?.outcome, 'partial'); assert.match(job.telemetry!.partialReason!, /truncated/); assert.equal((await pendingInsights(engine)).length, 2);
+  assert.equal(job.status, 'pending', 'partially processed evidence remains runnable'); assert.equal(job.telemetry?.outcome, 'partial'); assert.match(job.telemetry!.partialReason!, /truncated/); assert.equal((await pendingInsights(engine)).length, 2);
   const before = provider.calls.length; provider.calls.length = 0;
   const retry = scripted([steps[2]!, steps[3]!, 'abstain']); const engine2 = new IntelligenceEngine(w.vault, retry); await run(engine2);
   assert.ok(retry.calls[0]!.documents.some(d => d.id === message.id), 'the evidence that was not fully processed is offered again'); void before;
@@ -262,7 +262,7 @@ test('duplicates are exact-repeat only: a repeat is dropped, a correction that s
   await run(engine); assert.equal((await pendingInsights(engine)).length, 1);
   const second = await w.said('Still true: I prefer concise code review feedback.', proj, '2026-10-07T11:00:00.000Z');
   const again = new IntelligenceEngine(w.vault, scripted([{ claim: 'The user prefers concise code review feedback.', key: 'review', doc: second, span: 'I prefer concise code review feedback' }]));
-  const repeat = await run(again); assert.equal(repeat.status, 'complete'); assert.equal((await pendingInsights(again)).length, 1, 'the exact repeat is not a second proposal'); assert.equal(repeat.telemetry?.duplicates, 1);
+  const repeat = await run(again); assert.equal(repeat.status, 'pending', 'a repeated claim does not prove the source is exhausted'); assert.equal((await pendingInsights(again)).length, 1, 'the exact repeat is not a second proposal'); assert.equal(repeat.telemetry?.duplicates, 1);
   const third = await w.said('Actually I now prefer detailed code review feedback.', proj, '2026-10-07T12:00:00.000Z');
   const correction = new IntelligenceEngine(w.vault, scripted([{ claim: 'The user prefers detailed code review feedback.', key: 'review', doc: third, span: 'I now prefer detailed code review feedback' }, 'abstain']));
   await run(correction); assert.equal((await pendingInsights(correction)).length, 2, 'the correction was proposed for review, not dropped as a near-duplicate');
