@@ -1,8 +1,9 @@
 import { ensureWatcher } from './outbox-watch.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { ensureStorageDirectory, resolveStoragePath } from '../core/root.js';
+import { assertAvailableStorage, assertStorageQuota } from '../core/storage-lifecycle.js';
 import { findTrustedBinding } from '../core/project-trust.js';
 import { Engram } from '../sdk/index.js';
 import { buildSessionContext } from './session-context.js';
@@ -21,13 +22,13 @@ export type ContextOutcome = 'fresh' | 'stale' | 'none' | 'revoked' | 'disabled'
 export interface ContextHookResult { outcome: ContextOutcome; output: string; workspaceId?: string; reason?: string }
 export interface ContextHookOptions { host: string; stdin: string; projectRoot?: string; user?: boolean; root?: string; format?: 'claude' | 'text'; env?: NodeJS.ProcessEnv; now?: Date; timeoutMs?: number; cacheTtlMs?: number }
 
-export const cacheDir = (env: NodeJS.ProcessEnv = process.env): string => env.ENGRAM_CACHE_DIR ?? path.join(env.XDG_CACHE_HOME ?? path.join(os.homedir(), '.cache'), 'engram');
+export const cacheDir = (env: NodeJS.ProcessEnv = process.env): string => resolveStoragePath('cache', env);
 const cacheFile = (env: NodeJS.ProcessEnv, url: string, workspace: string) => path.join(cacheDir(env), 'context', `${createHash('sha256').update(`${url}\0${workspace}`).digest('hex').slice(0, 24)}.json`);
 async function writePrivate(file: string, content: string): Promise<void> { await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 }); const temp = `${file}.${process.pid}.${randomUUID()}.tmp`; try { await fs.writeFile(temp, content, { mode: 0o600, flag: 'wx' }); await fs.rename(temp, file); } finally { await fs.rm(temp, { force: true }); } }
 export interface ContextState { host: string; at: string; outcome: ContextOutcome; workspaceId?: string; reason?: string }
-export const contextStateFile = (env: NodeJS.ProcessEnv = process.env): string => path.join(cacheDir(env), 'context-state.json');
+export const contextStateFile = (env: NodeJS.ProcessEnv = process.env): string => path.join(resolveStoragePath('state', env), 'context-state.json');
 async function recordState(env: NodeJS.ProcessEnv, state: ContextState): Promise<void> {
-  try { let all: Record<string, ContextState> = {}; try { all = JSON.parse(await fs.readFile(contextStateFile(env), 'utf8')); } catch { /* first run */ } all[`${state.host}:${state.workspaceId ?? '-'}`] = state; await writePrivate(contextStateFile(env), JSON.stringify(all, null, 2)); } catch { /* diagnostics only */ }
+  try { await ensureStorageDirectory('state', env); let all: Record<string, ContextState> = {}; try { all = JSON.parse(await fs.readFile(contextStateFile(env), 'utf8')); } catch { /* first run */ } all[`${state.host}:${state.workspaceId ?? '-'}`] = state; await writePrivate(contextStateFile(env), JSON.stringify(all, null, 2)); } catch { /* diagnostics only */ }
 }
 const render = (host: string, text: string, format: 'claude' | 'text'): string => format === 'claude' ? `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } })}\n` : `${text}\n`;
 
@@ -65,13 +66,17 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     const token = tokenEnv ? env[tokenEnv] : undefined; if (!token) return finish({ outcome: 'none', output: '', workspaceId, reason: `$${tokenEnv} is not set; no context without authentication` });
     // Writes this machine kept while the server was unreachable are sent now that a session is starting (bounded: the hook has a few seconds). Failure here never affects the context.
     await drainWaitingWrites(serverUrl, token, workspaceId, env);
+    await ensureStorageDirectory('cache', env);
     const file = cacheFile(env, serverUrl, workspaceId); const credential = createHash('sha256').update(`engram-credential\0${token}`).digest('hex').slice(0, 24); // identity of the credential, never the credential
     try {
       const session = await openRemoteSession({ url: serverUrl, token, workspaceId, timeoutMs: options.timeoutMs ?? 1500 });
       const reply = await session.call('engram_session_context', { maxTokens });
       const value = reply.value as { text?: string; revision?: string } | undefined;
       if (reply.isError || !value?.text) { if (/NOT_FOUND_OR_FORBIDDEN/.test(JSON.stringify(reply.value))) throw new RemoteError('workspace', 'access refused'); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the server returned no context' }); }
-      await writePrivate(file, JSON.stringify({ workspaceId, serverUrl, credential, fetchedAt: now.toISOString(), revision: value.revision, text: value.text }));
+      const cachedContent = JSON.stringify({ workspaceId, serverUrl, credential, fetchedAt: now.toISOString(), revision: value.revision, text: value.text });
+      await assertAvailableStorage(cacheDir(env), env, Buffer.byteLength(cachedContent));
+      await assertStorageQuota('cache', cacheDir(env), Buffer.byteLength(cachedContent), env);
+      await writePrivate(file, cachedContent);
       return finish({ outcome: 'fresh', output: render(options.host, value.text, format), workspaceId });
     } catch (error) {
       if (error instanceof RemoteError && (error.kind === 'auth' || error.kind === 'workspace')) { await fs.rm(file, { force: true }); return finish({ outcome: 'revoked', output: '', workspaceId, reason: error.message }); }

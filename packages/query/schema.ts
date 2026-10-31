@@ -144,9 +144,10 @@ export function normalize(raw: unknown, depth = 0, budget = new Budget(), where 
   const ast: QueryAst = { version: 1, from };
   if (from === 'saved') { if (raw.saved === undefined) bad('from "saved" needs a saved query name'); ast.saved = str(raw.saved, 'saved', 128); } else if (raw.saved !== undefined) bad('"saved" is only valid with from "saved"');
   if (raw.scope !== undefined) {
-    if (!isObject(raw.scope)) bad('scope must be an object'); const s = raw.scope as Record<string, unknown>; only(s, ['workspace', 'collection', 'includeShared'], 'scope');
-    ast.scope = { ...(s.workspace !== undefined ? { workspace: str(s.workspace, 'scope.workspace', 128) } : {}), ...(s.collection !== undefined ? { collection: str(s.collection, 'scope.collection', 128) } : {}), ...(s.includeShared !== undefined ? { includeShared: bool(s.includeShared, 'scope.includeShared') } : {}) };
+    if (!isObject(raw.scope)) bad('scope must be an object'); const s = raw.scope as Record<string, unknown>; only(s, ['workspace', 'collection', 'includeShared', 'includeRejected'], 'scope');
+    ast.scope = { ...(s.workspace !== undefined ? { workspace: str(s.workspace, 'scope.workspace', 128) } : {}), ...(s.collection !== undefined ? { collection: str(s.collection, 'scope.collection', 128) } : {}), ...(s.includeShared !== undefined ? { includeShared: bool(s.includeShared, 'scope.includeShared') } : {}), ...(s.includeRejected !== undefined ? { includeRejected: bool(s.includeRejected, 'scope.includeRejected') } : {}) };
     if (ast.scope.collection && !ast.scope.workspace) bad('scope.collection needs scope.workspace');
+    if (ast.scope.includeRejected && from !== 'discoveries') bad('scope.includeRejected is only valid for the discoveries source');
   }
   if (raw.search !== undefined) ast.search = searchSpec(raw.search);
   let w = raw.where;

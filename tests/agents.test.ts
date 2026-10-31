@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import { Vault } from '../packages/core/vault.js';
+import { cleanupPreview } from '../packages/core/storage-lifecycle.js';
 import { IntelligenceEngine } from '../packages/intelligence/index.js';
 import { CliAgentProvider, cliArguments, createProviderFromConfig, describeModel, OpenAICompatibleProvider, type Document, type ModelRequest, type ModelConfig } from '../packages/sdk/index.js';
 
@@ -16,9 +18,9 @@ const doc: Document = { id: 'obj_1', revisionId: 'rev_1', revisionNumber: 1, sco
 const request: ModelRequest = { job: 'wiki', documents: [doc], goals: 'goal', instruction: 'be careful' };
 
 const FAKE = (name: string) => `#!/usr/bin/env node
-const fs=require('fs');let input='';process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
+const fs=require('fs');let input='';const launches=process.env.FAKE_AGENT_LAUNCHES;if(launches)fs.appendFileSync(launches,process.pid+'\\n');process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
  const log=process.env.FAKE_AGENT_LOG;
- if(log)fs.appendFileSync(log,JSON.stringify({name:${JSON.stringify(name)},argv:process.argv.slice(2),cwd:process.cwd(),stdin:input,dataDir:process.env.ENGRAM_DATA_DIR??null,mdbRoot:process.env.MDB_ROOT??null})+'\\n');
+ if(log)fs.appendFileSync(log,JSON.stringify({name:${JSON.stringify(name)},pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),cwdReal:fs.realpathSync(process.cwd()),tmpdir:process.env.TMPDIR??null,tmpdirReal:fs.realpathSync(process.env.TMPDIR),tmp:process.env.TMP??null,temp:process.env.TEMP??null,stdin:input,dataDir:process.env.ENGRAM_DATA_DIR??null,mdbRoot:process.env.MDB_ROOT??null})+'\\n');
  const mode=process.env.FAKE_MODE||'ok';
  const out=(t)=>{const i=process.argv.indexOf('-o');if(i>=0)fs.writeFileSync(process.argv[i+1],t);else process.stdout.write(t);};
  if(mode==='fail'){process.stderr.write('SECRET-STDERR '+input.slice(0,80));process.exit(3);}
@@ -34,9 +36,10 @@ const fs=require('fs');let input='';process.stdin.on('data',d=>input+=d);process
 async function fakeAgents(t: T, names = ['claude', 'codex']) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-fakebin-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
   for (const name of names) { const file = path.join(dir, name); await fs.writeFile(file, FAKE(name)); await fs.chmod(file, 0o755); }
-  const log = path.join(dir, 'calls.jsonl');
-  const calls = async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { name: string; argv: string[]; cwd: string; stdin: string; dataDir: string | null; mdbRoot: string | null });
-  return { dir, log, calls, env: (extra: Record<string, string> = {}) => ({ PATH: `${dir}:${process.env.PATH}`, HOME: process.env.HOME, FAKE_AGENT_LOG: log, ...extra }) };
+  const log = path.join(dir, 'calls.jsonl'); const launches = path.join(dir, 'launches.txt');
+  const calls = async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { name: string; pid: number; argv: string[]; cwd: string; cwdReal: string; tmpdir: string | null; tmpdirReal: string; tmp: string | null; temp: string | null; stdin: string; dataDir: string | null; mdbRoot: string | null });
+  const launchCount = async () => (await fs.readFile(launches, 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
+  return { dir, log, calls, launchCount, env: (extra: Record<string, string> = {}) => ({ PATH: `${dir}:${process.env.PATH}`, HOME: process.env.HOME, FAKE_AGENT_LOG: log, FAKE_AGENT_LAUNCHES: launches, ...extra }) };
 }
 const base = (over: Partial<ModelConfig> = {}): ModelConfig => ({ provider: 'auto', allowNetwork: false, ...over });
 async function vaultWithSource(t: T, scope: 'global' | 'workspace' = 'global') {
@@ -53,7 +56,8 @@ test('claude CLI adapter: tool-free non-interactive flags, prompt on stdin only,
   const agents = await fakeAgents(t);
   const provider = createProviderFromConfig(base({ provider: 'claude-cli', modelName: 'sonnet' }), { ...agents.env(), ENGRAM_DATA_DIR: '/secret/vault', MDB_ROOT: '/secret/vault2' });
   assert.equal(provider.id, 'claude-cli:sonnet'); assert.equal(provider.locality, 'remote');
-  const proposal = await provider.generate(request);
+  const remotePiiRequest = { ...request, goals: 'SSN 123-45-6789 card 4111 1111 1111 1111 email jane.doe@example.test', documents: [{ ...doc, body: `${doc.body} SSN 123-45-6789 card 4111 1111 1111 1111 email jane.doe@example.test` }] };
+  const proposal = await provider.generate(remotePiiRequest);
   assert.equal(proposal.title, 'From claude'); assert.equal(proposal.evidence[0]!.uri, doc.uri);
   const [call] = await agents.calls();
   assert.deepEqual(call!.argv, cliArguments('claude', { model: 'sonnet', cwd: call!.cwd }));
@@ -62,10 +66,76 @@ test('claude CLI adapter: tool-free non-interactive flags, prompt on stdin only,
   assert.ok(!call!.argv.join(' ').includes('SECRET-PROMPT-BODY'), 'prompt content never appears in argv');
   assert.match(call!.stdin, /<<<DOCUMENT uri=mdb:\/\/wiki\/objects\/obj_1 revision=rev_1/);
   assert.match(call!.stdin, /untrusted data/);
+  for (const pii of ['123-45-6789', '4111 1111 1111 1111', 'jane.doe@example.test']) assert.equal(call!.stdin.includes(pii), false, `remote CLI prompt contained PII: ${pii}`);
+  assert.match(call!.stdin, /REDACTED SSN/); assert.match(call!.stdin, /REDACTED CARD/); assert.match(call!.stdin, /REDACTED EMAIL/);
   assert.ok(call!.cwd.includes('engram-agent-') && !call!.cwd.includes('secret'), 'runs in a throwaway directory');
   await assert.rejects(fs.stat(call!.cwd), { code: 'ENOENT' }, 'throwaway directory removed');
   assert.equal(call!.dataDir, null); assert.equal(call!.mdbRoot, null);
 });
+
+test('explicit data root contains model CLI scratch even when OS TMPDIR is separate', async t => {
+  const agents = await fakeAgents(t); const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-model-root-')); const externalTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-model-os-tmp-'));
+  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(externalTmp, { recursive: true, force: true }); });
+  const oldRoot = process.env.ENGRAM_DATA_DIR, oldTmp = process.env.TMPDIR;
+  process.env.ENGRAM_DATA_DIR = root; process.env.TMPDIR = externalTmp;
+  t.after(() => { if (oldRoot === undefined) delete process.env.ENGRAM_DATA_DIR; else process.env.ENGRAM_DATA_DIR = oldRoot; if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp; });
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli' }), agents.env()); await provider.generate(request);
+  const [call] = await agents.calls(); const canonicalRoot = await fs.realpath(root);
+  assert.ok(call!.cwd.startsWith(path.join(canonicalRoot, '.engram-runtime/tmp/operations/engram-agent-')));
+  assert.equal(call!.tmpdirReal, call!.cwdReal); assert.equal(call!.tmpdir, call!.tmp); assert.equal(call!.tmpdir, call!.temp);
+  await assert.rejects(fs.stat(call!.cwd), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readdir(externalTmp), [], 'the provider wrapper did not write scratch into OS TMPDIR');
+});
+
+test('SIGKILL during model scratch leaves a marked orphan that restart reports without deleting', async t => {
+  const agents = await fakeAgents(t); const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-model-orphan-root-')); const externalTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-model-orphan-os-tmp-'));
+  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(externalTmp, { recursive: true, force: true }); });
+  const sdkUrl = new URL('../packages/sdk/index.js', import.meta.url).href;
+  const source = `import {createProviderFromConfig} from ${JSON.stringify(sdkUrl)};const p=createProviderFromConfig({provider:'claude-cli',allowNetwork:false,maxRetries:0,timeoutMs:30000,maxInputTokens:10000});await p.generate(${JSON.stringify(request)});`;
+  const harness = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...agents.env({ FAKE_MODE: 'hang' }), ENGRAM_DATA_DIR: root, TMPDIR: externalTmp }, stdio: 'ignore' });
+  let fakePid: number | undefined; let operationDir: string | undefined;
+  t.after(async () => {
+    if (harness.exitCode === null && harness.signalCode === null) harness.kill('SIGKILL');
+    if (fakePid && processIsAlive(fakePid)) { try { process.kill(fakePid, 'SIGTERM'); } catch { /* the owned fake provider already exited */ } }
+  });
+  for (let i = 0; i < 200; i++) {
+    const call = (await agents.calls())[0];
+    if (call) { fakePid = call.pid; operationDir = call.cwd; break; }
+    if (harness.exitCode !== null || harness.signalCode !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(fakePid && operationDir, 'the fake provider started inside an owned model operation');
+  const canonicalRoot = await fs.realpath(root);
+  assert.equal(path.relative(path.join(canonicalRoot, '.engram-runtime/tmp/operations'), operationDir!).startsWith('..'), false, `scratch path ${operationDir} should be under ${canonicalRoot}`);
+  const marker = JSON.parse(await fs.readFile(path.join(operationDir!, '.engram-operation.json'), 'utf8')) as { pid: number; state: string };
+  assert.equal(marker.pid, harness.pid); assert.equal(marker.state, 'active'); assert.deepEqual(await fs.readdir(externalTmp), []);
+  const harnessClosed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => harness.once('close', (code, signal) => resolve({ code, signal })));
+  harness.kill('SIGKILL'); assert.deepEqual(await harnessClosed, { code: null, signal: 'SIGKILL' });
+  try { process.kill(fakePid!, 'SIGTERM'); } catch { /* child exited with its parent */ }
+  for (let i = 0; i < 100 && processIsAlive(fakePid!); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(processIsAlive(fakePid!), false, 'the only terminated descendant is the PID recorded by this test fake');
+  const report = await cleanupPreview({ ENGRAM_DATA_DIR: root }); assert.equal(report.deleted, 0); assert.ok(report.candidates.some(candidate => candidate.directory === operationDir), 'restart reports the interrupted scratch as an orphan');
+  assert.ok(await fs.stat(path.join(operationDir!, '.engram-operation.json')), 'reporting an orphan does not delete recovery evidence');
+});
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    // On Linux, a terminated orphan can remain as a zombie until PID 1 reaps
+    // it. kill(pid, 0) still succeeds for that PID, but it cannot execute or
+    // write. Treat only a confirmed /proc zombie as exited; never infer exit
+    // from an unreadable procfs entry.
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const state = /^\d+ \(.*\) ([A-Z]) /.exec(stat)?.[1];
+      if (state === 'Z' || state === 'X') return false;
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    return true;
+  }
+}
 
 test('codex CLI adapter: read-only sandbox, ephemeral, last-message file, prompt on stdin', async t => {
   const agents = await fakeAgents(t);
@@ -88,16 +158,16 @@ test('agent CLI failures are sanitized, bounded and cancellable', async t => {
   await assert.rejects(make('empty').generate(request), { code: 'INVALID_MODEL_OUTPUT' });
   await assert.rejects(make('huge').generate(request), /size limit/);
   await assert.rejects(make('hang', { timeoutMs: 300 }).generate(request), /timed out/);
-  const controller = new AbortController(); const before = (await agents.calls()).length;
+  const controller = new AbortController(); const before = await agents.launchCount();
   const pending = make('hang', { timeoutMs: 20000 }).generate(request, { signal: controller.signal });
   setTimeout(() => controller.abort(), 300);
   const started = Date.now(); await assert.rejects(pending, { code: 'CANCELLED' }); assert.ok(Date.now() - started < 5000, 'child is killed promptly');
-  assert.equal((await agents.calls()).length, before + 1);
+  assert.equal(await agents.launchCount(), before + 1);
   await assert.rejects(make('ok').generate(request, { signal: AbortSignal.abort() }), { code: 'CANCELLED' });
   const retrying = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 1, timeoutMs: 1200 }), agents.env({ FAKE_MODE: 'hang' }));
-  const count = (await agents.calls()).length; await assert.rejects(retrying.generate(request), /retries exhausted/); assert.equal((await agents.calls()).length - count, 2, 'one retry after a timeout');
+  const count = await agents.launchCount(); await assert.rejects(retrying.generate(request), /retries exhausted/); assert.equal((await agents.launchCount()) - count, 2, 'one retry after a timeout');
   const tiny = createProviderFromConfig(base({ provider: 'claude-cli', maxInputTokens: 500 }), agents.env());
-  const calls = (await agents.calls()).length; await assert.rejects(tiny.generate({ ...request, documents: [{ ...doc, body: 'x'.repeat(5000) }] }), { code: 'CAPABILITY_UNAVAILABLE' }); assert.equal((await agents.calls()).length, calls, 'over-budget input never reaches the CLI');
+  const calls = await agents.launchCount(); await assert.rejects(tiny.generate({ ...request, documents: [{ ...doc, body: 'x'.repeat(5000) }] }), { code: 'CAPABILITY_UNAVAILABLE' }); assert.equal(await agents.launchCount(), calls, 'over-budget input never reaches the CLI');
 });
 
 test('backend selection: auto prefers claude then codex; env and config swap it; missing CLIs are reported, never executed by doctor', async t => {

@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { redactText } from './redact.js';
 import { remoteUrlAllowed } from '../core/private-network.js';
+import { ensureStorageDirectory, resolveStoragePath } from '../core/root.js';
 import { syncDirectory } from '../storage-local/index.js';
+import { assertAvailableStorage } from '../core/storage-lifecycle.js';
 
 type RemoteCapture = { url: string; registrationId: string; payload: Record<string, unknown>; queuedAt: string };
 const DEFAULT_CAP = 1000;
@@ -24,8 +25,9 @@ function minimized(payload: Record<string, unknown>): Record<string, unknown> {
   const scrub = (value: unknown): unknown => typeof value === 'string' ? redactText(value) : value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, scrub(item)])) : value;
   return scrub(result) as Record<string, unknown>;
 }
-export const defaultRemoteSpoolDirectory = () => process.env.ENGRAM_REMOTE_SPOOL ?? path.join(os.homedir(), '.Engram-remote-spool');
+export const defaultRemoteSpoolDirectory = (env: NodeJS.ProcessEnv = process.env) => resolveStoragePath('remote-spool', env);
 async function persist(directory: string, capture: RemoteCapture): Promise<void> {
+  await assertAvailableStorage(directory, process.env, Buffer.byteLength(JSON.stringify(capture)) + 4096);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   await syncDirectory(path.dirname(directory));
   const names = (await fs.readdir(directory)).filter(name => name.endsWith('.json'));
@@ -76,6 +78,7 @@ export async function queueRemoteCapture(options: { url: string; registrationId:
   if (url.pathname.endsWith('/mcp')) url.pathname = `${url.pathname.slice(0, -4)}/capture`;
   else if (!url.pathname.endsWith('/capture')) url.pathname = `${url.pathname.replace(/\/$/, '')}/capture`;
   const directory = options.directory ?? defaultRemoteSpoolDirectory();
+  if (!options.directory) await ensureStorageDirectory('remote-spool');
   await persist(directory, { url: url.toString(), registrationId: options.registrationId, payload: minimized(options.payload), queuedAt: new Date().toISOString() });
   return options.token ? drainRemoteCaptureSpool({ token: options.token, directory }) : { delivered: 0, queued: (await fs.readdir(directory)).filter(name => name.endsWith('.json')).length, rejected: 0 };
 }

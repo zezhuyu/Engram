@@ -25,7 +25,7 @@ export const skillCatalog = {
   },
   "wiki-maintenance": {
     "name": "wiki-maintenance",
-    "description": "Queue evidence-backed wiki synthesis for review.",
+    "description": "Resolve supplied deterministic lint findings on one targeted wiki page.",
     "mode": "wiki",
     "origin": "mdb-native"
   },

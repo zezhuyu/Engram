@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { runSuite, scrubDiagnostics, summarize } from '../../scripts/lib/suite.js';
+import { createHash } from 'node:crypto';
+import { loadSuiteReport, runSuite, scrubDiagnostics, summarize } from '../../scripts/lib/suite.js';
 
 const TOKEN = `engram_${'A'.repeat(43)}`;
 
@@ -93,6 +94,23 @@ test('output is scrubbed before it is cut to size, so a secret straddling the ca
   const stored = await readFile(path.join(dir, 'out/big/last-output.txt'), 'utf8'); const json = await readFile(path.join(dir, 'out/big/report.json'), 'utf8');
   assert.equal(stored.includes('abcdefghijklmnop'), false, 'no token or token fragment in the artifact'); assert.equal(json.includes('abcdefghijklmnop'), false);
   assert.ok(stored.length <= 100_000 + 10_000 + 64, `last-output.txt is bounded (${stored.length} chars)`); assert.ok(json.length < 60_000, `report.json is bounded (${json.length} chars)`);
+  const summary = JSON.parse(json) as { evidenceSource: { fingerprint: string; manifestPath: string; manifestSha256: string; fileCount: number } };
+  const evidenceBytes = await readFile(path.join(dir, 'out/big/source-evidence.json'));
+  assert.equal(summary.evidenceSource.manifestPath, 'source-evidence.json');
+  assert.equal(createHash('sha256').update(evidenceBytes).digest('hex'), summary.evidenceSource.manifestSha256, 'the compact report binds the complete source file map');
+  assert.equal((await loadSuiteReport(path.join(dir, 'out/big/report.json')))?.evidenceSource.fingerprint, summary.evidenceSource.fingerprint, 'release loading restores the complete source evidence');
+});
+
+test('release report loading fails closed when the source evidence sidecar is changed or absent', async t => {
+  const dir = await suiteDir(t); await writeFile(path.join(dir, 'ok.test.mjs'), `import test from 'node:test'; test('ok', () => {});\n`);
+  const out = path.join(dir, 'out'); await nested(() => runSuite({ name: 'ok', title: 'ok', files: [path.join(dir, 'ok.test.mjs')], gaps: [], limitations: [] }, out));
+  const reportPath = path.join(out, 'ok/report.json');
+  assert.ok(await loadSuiteReport(reportPath), 'unmodified report and evidence sidecar load');
+  await writeFile(path.join(out, 'ok/source-evidence.json'), '{"tampered":true}\n');
+  assert.equal(await loadSuiteReport(reportPath), undefined, 'edited evidence cannot be hydrated');
+  await writeFile(path.join(out, 'ok/source-evidence.json'), '{}\n');
+  const report = JSON.parse(await readFile(reportPath, 'utf8')); report.evidenceSource.manifestPath = '../outside.json'; await writeFile(reportPath, JSON.stringify(report));
+  assert.equal(await loadSuiteReport(reportPath), undefined, 'manifest path traversal is rejected');
 });
 
 test('details are kept for at most the first 25 failures and the report stays bounded', async t => {

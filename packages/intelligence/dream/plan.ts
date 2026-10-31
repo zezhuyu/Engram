@@ -7,6 +7,18 @@ export const domainOf = (e: ManifestEntry): string => e.dom ?? e.tags.find(t => 
 export const words = (text: string): string[] => (text.toLowerCase().match(/[\p{L}][\p{L}\p{N}-]{3,}/gu) ?? []).filter(w => !STOP.has(w));
 /** Shared vocabulary of an object: its plain tags and the distinctive words of its title. Bodies are only read for the few objects that reach the model. */
 export const conceptsOf = (e: ManifestEntry): Set<string> => new Set([...e.tags.filter(t => !t.includes(':')).map(t => t.toLowerCase()), ...words(e.title)]);
+/**
+ * A single body-word collision is a recall hint, not a relationship. Keep
+ * body-only bridges when at least two distinctive terms overlap; a shared
+ * explicit concept tag is sufficient because it is author-supplied structure.
+ * This deliberately errs toward abstention when evidence is ambiguous.
+ */
+export function hasLexicalEvidenceBridge(a: ManifestEntry, b: ManifestEntry, bodyTerms: Map<string, string[]>): boolean {
+  const tagsA = new Set(a.tags.filter(tag => !tag.includes(':')).map(tag => tag.toLowerCase()));
+  if (b.tags.some(tag => !tag.includes(':') && tagsA.has(tag.toLowerCase()))) return true;
+  const termsA = new Set(bodyTerms.get(a.id) ?? []);
+  return (bodyTerms.get(b.id) ?? []).filter(term => termsA.has(term)).length >= 2;
+}
 const tagValues = (e: ManifestEntry, prefix: string) => e.tags.filter(t => t.startsWith(prefix)).map(t => t.slice(prefix.length).toLowerCase());
 export const provides = (e: ManifestEntry) => new Set(tagValues(e, 'provides:')); export const consumes = (e: ManifestEntry) => new Set(tagValues(e, 'consumes:'));
 const intersect = <T>(a: Set<T>, b: Set<T>) => [...a].filter(x => b.has(x));
@@ -64,13 +76,21 @@ export function planDeep(ctx: PlanContext, cursor: number): { clusters: Cluster[
   const direct = new Set<string>(); for (const e of ctx.pool) for (const n of [...ctx.graph.out(e), ...ctx.graph.in(e)]) direct.add(pairKey(e.id, n.id));
   const consider = (a: ManifestEntry, b: ManifestEntry, via: string, distance: Distance, weight: number) => {
     if (a.id === b.id || domainOf(a) === domainOf(b)) return;
+    if (via.startsWith('bridge:') && !hasLexicalEvidenceBridge(a, b, ctx.bodyTerms ?? new Map())) return;
     const key = pairKey(a.id, b.id); if (via !== 'contradiction' && !via.startsWith('provides-consumes') && direct.has(key)) return; // direct neighbours are micro territory
     const family = `deep|${[domainOf(a), domainOf(b)].sort().join('+')}`; const age = (a.last > cursor ? 1 : 0) + (b.last > cursor ? 1 : 0); // one old and one new object is the most interesting mix
     const score = weight * (0.5 + ctx.success(family)) * (age === 1 ? 1.25 : 1);
     const hint = hintFor(a, b, via, distance, score); if (!pairs.has(key) || pairs.get(key)!.score < score) pairs.set(key, { ...hint, a, b });
   };
-  const index = new Map<string, ManifestEntry[]>(); for (const e of ctx.pool) for (const c of conceptsOf(e)) (index.get(c) ?? index.set(c, []).get(c)!).push(e);
-  const bridges = [...index.entries()].filter(([, list]) => new Set(list.map(domainOf)).size >= 2).sort((a, b) => a[1].length - b[1].length || a[0].localeCompare(b[0]));
+  const index = new Map<string, ManifestEntry[]>();
+  for (const e of ctx.pool) {
+    const terms = new Set([...conceptsOf(e), ...(ctx.bodyTerms?.get(e.id) ?? [])]);
+    for (const term of terms) (index.get(term) ?? index.set(term, []).get(term)!).push(e);
+  }
+  // Body terms are a bounded recall aid, not evidence of a relationship. Rare
+  // terms can bring untagged sources into a review cluster; the candidate path
+  // still applies source-level relation checks and preserves abstention.
+  const bridges = [...index.entries()].filter(([, list]) => list.length <= 64 && new Set(list.map(domainOf)).size >= 2).sort((a, b) => a[1].length - b[1].length || a[0].localeCompare(b[0]));
   for (const [term, list] of bridges.slice(0, 40)) {
     const byDomain = new Map<string, ManifestEntry[]>(); for (const e of list) (byDomain.get(domainOf(e)) ?? byDomain.set(domainOf(e), []).get(domainOf(e))!).push(e);
     const reps = [...byDomain.values()].map(group => group.sort((x, y) => (ctx.rng() < 0.5 ? 1 : -1) * (x.id < y.id ? 1 : -1))[0]!);
@@ -109,10 +129,17 @@ export function planStrategic(ctx: PlanContext, goals: GoalRef[]): { clusters: C
   trace.goalRefs = goals.map(g => g.entry.id); trace.gaps = [];
   for (const goal of goals.slice(0, ctx.budgets.maxClusters)) {
     const terms = goal.terms.filter(t => t.length >= 4);
-    const scored = ctx.pool.map(e => { const c = conceptsOf(e); return { e, hit: terms.filter(t => c.has(t) || [...c].some(x => x.startsWith(t.slice(0, 5)))) }; }).filter(x => x.hit.length).sort((a, b) => b.hit.length - a.hit.length || newest(a.e, b.e));
+    const scored = ctx.pool.map(e => {
+      const concepts = conceptsOf(e), body = new Set(ctx.bodyTerms?.get(e.id) ?? []);
+      const has = (values: Set<string>, term: string) => values.has(term) || [...values].some(value => value.startsWith(term.slice(0, 5)));
+      return { e, hit: terms.filter(term => has(concepts, term) || has(body, term)) };
+    }).filter(x => x.hit.length).sort((a, b) => b.hit.length - a.hit.length || newest(a.e, b.e));
     const covered = new Set(scored.flatMap(x => x.hit)); const gaps = terms.filter(t => !covered.has(t));
     if (gaps.length) trace.gaps.push({ goal: goal.entry.id, terms: gaps });
-    if (!scored.length) { trace.skipped.push({ reason: 'no_supporting_knowledge', detail: goal.entry.id }); continue; }
+    if (scored.length < 2) {
+      trace.skipped.push({ reason: scored.length === 0 ? 'no_supporting_knowledge' : 'no_eligible_cluster', detail: goal.entry.id });
+      continue;
+    }
     const picked: ManifestEntry[] = []; const doms = new Set<string>(); // diversity first: one capability per domain, then the strongest remaining
     for (const x of scored) if (!doms.has(domainOf(x.e)) && picked.length < ctx.budgets.maxPerCluster - 1) { picked.push(x.e); doms.add(domainOf(x.e)); }
     for (const x of scored) if (picked.length < ctx.budgets.maxPerCluster - 1 && !picked.includes(x.e)) picked.push(x.e);

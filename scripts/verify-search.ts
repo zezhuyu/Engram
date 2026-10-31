@@ -1,7 +1,7 @@
 import { runSuite, summarize } from './lib/suite.js';
 summarize(await runSuite({
   name: 'search', title: 'Search correctness, parity, staleness, index recovery, bounded retrieval, BM25 ranking, optional semantic/hybrid',
-  files: ['dist/tests/search.test.js', 'dist/tests/search/golden.test.js', 'dist/tests/search/fs-trigram.test.js', 'dist/tests/search/topk-exact.test.js', 'dist/tests/search/optimized.test.js', 'dist/tests/search/bounded.test.js', 'dist/tests/search/semantic.test.js', 'dist/tests/search/embedder.test.js'],
+  files: ['dist/tests/search.test.js', 'dist/tests/search/golden.test.js', 'dist/tests/search/fs-trigram.test.js', 'dist/tests/search/topk-exact.test.js', 'dist/tests/search/optimized.test.js', 'dist/tests/search/bounded.test.js', 'dist/tests/search/semantic.test.js', 'dist/tests/search/embedder.test.js', 'dist/tests/search/http-auto-index.test.js'],
   gaps: [
     { item: 'Index-backed retrieval at 100k documents', status: 'NOT_RUN', reason: 'Building 100k documents through the fsynced commit protocol takes hours; 1k and 10k are measured. Bounded evaluation (tests/search/bounded.test.ts) reads a small fraction of matches for small pages; its effect at 10k/100k has NOT been re-measured since the change.' },
     { item: 'Semantic and hybrid retrieval quality with a real embedding model', status: 'NOT_RUN', reason: 'Mechanics, ACLs, revision consistency, privacy and failure handling are tested with a deterministic concept embedder and a real local HTTP server speaking the OpenAI embeddings protocol. No real model was evaluated, so retrieval quality is not claimed. Semantic/hybrid exist only with SQLite enabled and a configured provider.' },

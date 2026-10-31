@@ -6,6 +6,12 @@ type SubjectGrant = { actorId: string; permissions: string[]; clients?: Record<s
 type OAuthConfig = { issuer: string; jwksUrl: string; resource: string; audience: string; clients: string[]; subjects: Record<string, SubjectGrant>; scopeMap: Record<string, string[]> };
 type Jwk = JsonWebKey & { kid?: string; alg?: string; use?: string };
 let jwksCache: { url: string; expires: number; keys: Jwk[] } | undefined;
+// Unknown `kid` values are attacker-controlled. Rate-limit forced JWKS refresh
+// per configured endpoint (one bounded cache entry), not per supplied `kid`.
+let unknownKidRefresh: { url: string; nextAllowedAt: number; pending?: Promise<Jwk[]> } | undefined;
+// Bound endpoint-wide amplification while allowing a legitimate signing-key
+// rotation to recover quickly after an attacker sends one unknown `kid`.
+const UNKNOWN_KID_REFRESH_INTERVAL_MS = 5_000;
 const fail = (): undefined => undefined;
 const parseConfig = (env: NodeJS.ProcessEnv): OAuthConfig | undefined => {
   const { MDB_MCP_OAUTH_ISSUER: issuer, MDB_MCP_OAUTH_JWKS_URL: jwksUrl, MDB_MCP_OAUTH_RESOURCE: resource, MDB_MCP_OAUTH_AUDIENCE: audience, MDB_MCP_OAUTH_CLIENT_IDS: rawClients, MDB_MCP_OAUTH_SUBJECTS_JSON: rawSubjects, MDB_MCP_OAUTH_SCOPE_MAP_JSON: rawScopeMap } = env;
@@ -68,13 +74,26 @@ export async function resolveOAuthActor(authorization: string | undefined, env: 
     const token = match[1]!; const parts = token.split('.'); if (parts.length !== 3) return fail();
     const header = decodePart(parts[0]!); const claims = decodePart(parts[1]!);
     const alg = header.alg; if (!['RS256', 'ES256'].includes(String(alg)) || typeof header.kid !== 'string') return fail();
-    let key = (await keysFor(config.jwksUrl)).find(item => item.kid === header.kid && (item.alg === undefined || item.alg === alg));
-    if (!key) key = (await keysFor(config.jwksUrl, true)).find(item => item.kid === header.kid && (item.alg === undefined || item.alg === alg));
+    const matchesAlgorithm = (item: Jwk) => item.kid === header.kid && (item.alg === undefined || item.alg === alg) &&
+      (alg === 'RS256' ? item.kty === 'RSA' : item.kty === 'EC' && item.crv === 'P-256');
+    let key = (await keysFor(config.jwksUrl)).find(matchesAlgorithm);
+    if (!key) {
+      const now = Date.now();
+      if (!unknownKidRefresh || unknownKidRefresh.url !== config.jwksUrl || now >= unknownKidRefresh.nextAllowedAt) {
+        const state: NonNullable<typeof unknownKidRefresh> = { url: config.jwksUrl, nextAllowedAt: now + UNKNOWN_KID_REFRESH_INTERVAL_MS };
+        unknownKidRefresh = state;
+        state.pending = keysFor(config.jwksUrl, true).finally(() => { if (unknownKidRefresh === state) delete state.pending; });
+      }
+      if (unknownKidRefresh.url === config.jwksUrl && unknownKidRefresh.pending) {
+        try { key = (await unknownKidRefresh.pending).find(matchesAlgorithm); } catch { return fail(); }
+      }
+    }
     if (!key) return fail();
     const publicKey = createPublicKey({ key: key as CryptoJsonWebKey, format: 'jwk' }); const signed = Buffer.from(`${parts[0]}.${parts[1]}`); const signature = Buffer.from(parts[2]!, 'base64url');
     const valid = alg === 'RS256' ? verifySignature('RSA-SHA256', signed, publicKey, signature) : verifySignature('sha256', signed, { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature);
-    const clientId = typeof claims.client_id === 'string' ? claims.client_id : claims.azp;
-    if (!valid || claims.iss !== config.issuer || !(claims.aud === config.audience || Array.isArray(claims.aud) && claims.aud.includes(config.audience)) || typeof clientId !== 'string' || !config.clients.includes(clientId)) return fail();
+    const clientId = claims.client_id;
+    const audienceMatches = claims.aud === config.audience || Array.isArray(claims.aud) && claims.aud.length === 1 && claims.aud[0] === config.audience;
+    if (!valid || claims.iss !== config.issuer || !audienceMatches || typeof clientId !== 'string' || !config.clients.includes(clientId) || claims.azp !== undefined && claims.azp !== clientId) return fail();
     const now = Math.floor(Date.now() / 1000); if (typeof claims.exp !== 'number' || !Number.isSafeInteger(claims.exp) || typeof claims.iat !== 'number' || !Number.isSafeInteger(claims.iat) || claims.iat > now + 30 || claims.exp <= now || claims.exp - claims.iat > 3600 || claims.nbf !== undefined && (typeof claims.nbf !== 'number' || !Number.isSafeInteger(claims.nbf) || claims.nbf > now + 30)) return fail();
     if (typeof claims.sub !== 'string') return fail();
     const subject = config.subjects[claims.sub]; if (!subject) return fail();

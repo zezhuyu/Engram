@@ -8,19 +8,27 @@ import { tmpdir } from 'node:os';
 import path, { resolve } from 'node:path';
 import { Engram } from '../packages/sdk/index.js';
 import { createHttpCredential } from '../packages/mcp/credentials.js';
-import { disposableVault } from './helpers/disposable-vault.js';
+import { assertDisposable } from './helpers/disposable-vault.js';
+import { stopOwnedChildProcess } from './helpers/owned-process.js';
+import { waitForDrainIdle } from '../packages/memory/capture.js';
 import { recordCase } from './helpers/report.js';
 
 type Cleanup = { after(fn: () => void | Promise<void>): void };
 const MCP = resolve('bin/mdb-mcp.js'), MDB = resolve('bin/mdb.js');
 const freePort = () => new Promise<number>(res => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as { port: number }).port; s.close(() => res(p)); }); });
 async function world(t: Cleanup) {
-  const { root } = await disposableVault(t); const owner = new Engram(root); await owner.createWorkspace('proj');
+  const root = await mkdtemp(path.join(tmpdir(), 'engram-cli-remote-root-'));
+  let child: ChildProcess | undefined;
+  const stop = async () => { const c = child; child = undefined; if (c) await stopOwnedChildProcess(c, 2_000); };
+  // The server must stop before its disposable vault is removed. Register the
+  // server cleanup first; node:test invokes after hooks in registration order.
+  t.after(stop);
+  t.after(async () => { assertDisposable(root); await waitForDrainIdle(root); await rm(root, { recursive: true, force: true }); });
+  const owner = new Engram(root); await owner.vault.init(); await owner.createWorkspace('proj');
   const cred = await createHttpCredential(owner.vault, 'agent-cli', ['workspace:proj:read', 'workspace:proj:write']); await owner.vault.grant('proj', 'agent-cli', ['read', 'write']);
-  const port = await freePort(); const url = `http://127.0.0.1:${port}/mcp`; let child: ChildProcess | undefined;
+  const port = await freePort(); const url = `http://127.0.0.1:${port}/mcp`;
   const start = async () => { const c = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: String(port) } }); child = c; let err = ''; await new Promise<void>((res, rej) => { c.stderr!.setEncoding('utf8'); c.stderr!.on('data', (d: string) => { err += d; if (/MCP HTTP listening/.test(err)) res(); }); c.once('exit', code => rej(new Error(`server exit ${code}`))); }); };
-  const stop = async () => { const c = child; child = undefined; if (c && c.exitCode === null && c.signalCode === null) { c.kill('SIGTERM'); await new Promise<void>(r => c.once('exit', () => r())); } };
-  t.after(stop); await start();
+  await start();
   const base = await mkdtemp(path.join(tmpdir(), 'engram-cli-remote-')); t.after(() => rm(base, { recursive: true, force: true }));
   const env = { ...process.env, TK: cred.token, ENGRAM_OUTBOX: path.join(base, 'outbox'), ENGRAM_TRUST_FILE: path.join(base, 'trust.json'), ENGRAM_USER_CONFIG: path.join(base, 'user.json'), ENGRAM_CACHE_DIR: path.join(base, 'cache'), ENGRAM_REMOTE_SPOOL: path.join(base, 'spool') } as NodeJS.ProcessEnv; delete env.ENGRAM_URL;
   const mdb = (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => { const r = spawnSync(process.execPath, [MDB, ...args], { cwd: options.cwd ?? base, env: options.env ?? env, encoding: 'utf8', timeout: 60000 }); let json: any; try { json = JSON.parse(r.stdout); } catch { /* not JSON */ } return { status: r.status, stdout: r.stdout, stderr: r.stderr, json }; };

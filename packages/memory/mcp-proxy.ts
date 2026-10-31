@@ -172,7 +172,16 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
   lines.on('line', line => { if (!line.trim()) return; let message: Rpc; try { message = JSON.parse(line) as Rpc; } catch { send(errorReply(null, 'Parse error', -32700)); return; }
     const job = handle(message).then(reply => { if (reply) send(reply); }).finally(() => inflight.delete(job)); inflight.add(job); });
   await new Promise<void>(resolve => lines.once('close', resolve));
-  await Promise.allSettled([...inflight]); await Promise.allSettled([...saves]); clearInterval(timer); await Promise.race([drain(), new Promise(r => setTimeout(r, options.drainWaitMs ?? 3000))]);
+  await Promise.allSettled([...inflight]); await Promise.allSettled([...saves]); clearInterval(timer);
+  // The timeout only bounds shutdown when a drain is stuck. Leaving its timer
+  // alive after a quick drain kept short-lived CLI/test processes open for the
+  // full waitMs (sometimes minutes), even though all work had finished.
+  let drainTimer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([drain(), new Promise<void>(resolve => { drainTimer = setTimeout(resolve, options.drainWaitMs ?? 3000); })]);
+  } finally {
+    if (drainTimer) clearTimeout(drainTimer);
+  }
 }
 
 /** Called by `init`: contacts the server once so the proxy can serve initialize and tools/list from its cache even on its very first offline start. */

@@ -39,21 +39,46 @@ export class MicroTrigger {
     if (!relevant.length) { await this.store.advanceCursors(c => { c.micro = to; }); return 'no relevant change'; }
     // every event of this tick carries the tick's own clock: the daily cap below compares these timestamps with `now`, so both must come from the same clock (they only differ when `now` is injected)
     const ids = { scheduleId: 'micro', trigger: 'micro' as const, fromSequence: from, toSequence: to, at: now.toISOString() };
+    const engine = new IntelligenceEngine(this.vault, this.provider); const jobInput = { mode: 'micro' as const, trigger: 'micro' as const, range: [from, to] as [number, number] };
+    // A completed engine job can outlive the worker that was about to record
+    // its outcome/cursor. Recover that exact bounded range instead of
+    // enqueueing a second job that would select the next clusters in the same
+    // range and exceed the original micro batch.
+    const completedJob = (await engine.jobs()).filter(job => job.kind === 'dream' && job.input.trigger === 'micro' && job.input.range?.[0] === from && job.input.range?.[1] === to && ['complete', 'dead_letter'].includes(job.status)).at(-1);
+    if (completedJob) {
+      const events = await this.store.events(500);
+      const started = events.filter(event => event.type === 'dream_started' && event.trigger === 'micro' && event.fromSequence === from && event.toSequence === to && (!event.jobId || event.jobId === completedJob.id)).at(-1);
+      const runId = started?.runId ?? randomUUID();
+      const terminalType = completedJob.status === 'complete' ? 'dream_completed' : 'dream_dead_letter';
+      const terminal = events.some(event => event.type === terminalType && event.runId === runId && (!event.jobId || event.jobId === completedJob.id));
+      if (!terminal) {
+        const recoveryIds = { ...ids, runId, jobId: completedJob.id };
+        if (!started) {
+          await this.store.appendEvent({ type: 'dream_scheduled', ...recoveryIds, reason: 'RECOVER_COMPLETED_JOB' });
+          await this.store.appendEvent({ type: 'dream_claimed', ...recoveryIds, reason: 'RECOVER_COMPLETED_JOB' });
+          await this.store.appendEvent({ type: 'dream_started', ...recoveryIds, reason: 'RECOVER_COMPLETED_JOB' });
+        }
+        await this.store.appendEvent({ type: terminalType, ...recoveryIds, durationMs: 0, attempts: completedJob.attempts, state: completedJob.status === 'complete' ? 'complete' : 'dead_letter', ...(completedJob.status === 'dead_letter' ? { reason: 'JOB_FAILED' } : {}) });
+      }
+      await this.store.advanceCursors(c => { c.micro = Math.max(c.micro ?? 0, to); });
+      return completedJob.status === 'complete' ? 'completed' : 'dead-lettered';
+    }
     const today = localParts(now, config.timezone).date;
     const ranToday = (await this.store.events(500)).filter(e => e.type === 'dream_started' && e.trigger === 'micro' && localParts(new Date(e.at), config.timezone).date === today).length;
     const skip = async (reason: string): Promise<string> => { const last = (await this.store.events(1))[0]; if (!(last?.type === 'dream_skipped' && last.reason === reason && last.trigger === 'micro')) await this.store.appendEvent({ type: 'dream_skipped', reason, ...ids }); return reason; };
     if (ranToday >= config.micro.maxPerDay) return skip('DAILY_CAP');
     if (!this.provider) return skip('MODEL_UNAVAILABLE');
     const lease = await this.store.lease(); if (lease && Date.parse(lease.expiresAt) > now.getTime()) return skip('DAILY_CYCLE_RUNNING');
-    const engine = new IntelligenceEngine(this.vault, this.provider); const runId = randomUUID(); const startedAt = Date.now();
-    const job = await engine.enqueue('dream', { mode: 'micro', trigger: 'micro', range: [from, to] }); // identical range => the same job, never a second one
-    await this.store.appendEvent({ type: 'dream_scheduled', runId, ...ids }); await this.store.appendEvent({ type: 'dream_claimed', runId, ...ids }); await this.store.appendEvent({ type: 'dream_started', runId, ...ids });
+    const runId = randomUUID(); const startedAt = Date.now();
+    const job = await engine.enqueue('dream', jobInput); // identical range => the same job, never a second one
+    const runIds = { runId, jobId: job.id, ...ids };
+    await this.store.appendEvent({ type: 'dream_scheduled', ...runIds }); await this.store.appendEvent({ type: 'dream_claimed', ...runIds }); await this.store.appendEvent({ type: 'dream_started', ...runIds });
     await engine.run({ jobId: job.id, limit: 1, ...(signal ? { signal } : {}) });
     const after = (await engine.jobs()).find(j => j.id === job.id); const durationMs = Date.now() - startedAt;
     // The outcome event is written BEFORE the cursor moves: a crash between the two replays the (idempotent) range and logs the completion again, never loses it.
-    if (after?.status === 'complete') { await this.store.appendEvent({ type: 'dream_completed', runId, ...ids, durationMs, attempts: after.attempts, state: 'complete' }); await this.store.advanceCursors(c => { c.micro = to; }); return 'completed'; }
-    if (after?.status === 'dead_letter') { await this.store.appendEvent({ type: 'dream_dead_letter', runId, ...ids, durationMs, attempts: after.attempts, ...(after.error ? { reason: 'JOB_FAILED' } : {}) }); await this.store.advanceCursors(c => { c.micro = to; }); return 'dead-lettered'; }
-    await this.store.appendEvent({ type: 'dream_retry', runId, ...ids, durationMs, attempts: after?.attempts ?? 0, state: after?.status ?? 'unknown', reason: after?.status === 'blocked' ? 'MODEL_UNAVAILABLE' : 'JOB_NOT_COMPLETE' });
+    if (after?.status === 'complete') { await this.store.appendEvent({ type: 'dream_completed', ...runIds, durationMs, attempts: after.attempts, state: 'complete' }); await this.store.advanceCursors(c => { c.micro = to; }); return 'completed'; }
+    if (after?.status === 'dead_letter') { await this.store.appendEvent({ type: 'dream_dead_letter', ...runIds, durationMs, attempts: after.attempts, ...(after.error ? { reason: 'JOB_FAILED' } : {}) }); await this.store.advanceCursors(c => { c.micro = to; }); return 'dead-lettered'; }
+    await this.store.appendEvent({ type: 'dream_retry', ...runIds, durationMs, attempts: after?.attempts ?? 0, state: after?.status ?? 'unknown', reason: after?.status === 'blocked' ? 'MODEL_UNAVAILABLE' : 'JOB_NOT_COMPLETE' });
     return `retry (${after?.status ?? 'unknown'})`;
   }
 }

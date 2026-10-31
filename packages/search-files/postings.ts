@@ -6,6 +6,7 @@ import { MDBError } from '../core/types.js';
 import { safePath } from '../storage-local/index.js';
 import type { SearchVault } from './index.js';
 import { manifestFor, type Manifest, type ManifestEntry } from './manifest.js';
+import { assertAvailableStorage, assertStorageQuota } from '../core/storage-lifecycle.js';
 
 /**
  * Filesystem-only candidate index: trigram postings over the raw text (frontmatter + body) of every object's head revision.
@@ -31,17 +32,31 @@ function* varints(buffer: Buffer, start: number, end: number): Generator<number>
 }
 const pushVarint = (out: number[], value: number): void => { while (value >= 0x80) { out.push((value % 0x80) | 0x80); value = Math.floor(value / 0x80); } out.push(value); };
 
-export interface FsIndexStatus { present: boolean; documents?: number; builtAt?: string; reason?: string }
+export interface FsIndexStatus { present: boolean; documents?: number; builtAt?: string; manifestSequence?: number; reason?: string }
 
-export async function buildFsIndex(vault: SearchVault): Promise<{ documents: number; shards: number; bytes: number; ms: number }> {
+export async function buildFsIndex(vault: SearchVault, options: { fault?: (stage: string) => void; env?: Record<string, string | undefined> } = {}): Promise<{ documents: number; shards: number; bytes: number; ms: number }> {
   if (!vault.actor.permissions.includes('*')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Search index maintenance requires trusted owner identity');
+  await assertAvailableStorage(vault.root, options.env ?? process.env);
   const started = performance.now();
   const manifest = await manifestFor(vault); await manifest.sync();
   const entries = [...manifest.entries.values()].filter(e => SAFE_ID.test(e.id) && SAFE_ID.test(e.rev)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const base = await safePath(vault.root, '.mdb/indexes'); await fs.mkdir(base, { recursive: true });
-  const work = path.join(base, `fs-trigram.${randomUUID()}.tmp`); await fs.mkdir(path.join(work, 'parts'), { recursive: true });
+  options.fault?.('index.before_scratch_create');
+  const scratchRoot = await safePath(vault.root, '.mdb/indexes/.engram-builds'); await fs.mkdir(scratchRoot, { recursive: true });
+  const scratchStat = await fs.lstat(scratchRoot); if (scratchStat.isSymbolicLink() || !scratchStat.isDirectory()) throw new MDBError('INVALID_INPUT', 'Refusing an unsafe index scratch directory');
+  const id = randomUUID(); const work = path.join(scratchRoot, `fs-trigram-${id}.tmp`);
+  const writeScratch = async (file: string, data: string | Uint8Array): Promise<void> => {
+    const size = Buffer.byteLength(data);
+    await assertAvailableStorage(base, options.env ?? process.env, size);
+    await assertStorageQuota('index-scratch', scratchRoot, size, options.env ?? process.env);
+    options.fault?.(file.includes('/parts/') ? 'index.before_part_write' : file.endsWith('.bin') ? 'index.before_shard_write' : 'index.before_metadata_write');
+    await fs.writeFile(file, data);
+  };
   const unreadable = new Set<number>(); // ordinals whose revision could not be read: listed with a revision that never matches, so they stay permanent candidates
   try {
+    await fs.mkdir(work, { mode: 0o700 });
+    await fs.writeFile(path.join(work, '.engram-index-build.json'), JSON.stringify({ schemaVersion: 1, id, pid: process.pid, createdAt: new Date().toISOString() }), { mode: 0o600, flag: 'wx' });
+    await fs.mkdir(path.join(work, 'parts'), { recursive: true });
     const blocks = Math.ceil(entries.length / BLOCK);
     for (let block = 0; block < blocks; block++) {
       const slice = entries.slice(block * BLOCK, (block + 1) * BLOCK);
@@ -61,7 +76,7 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
       for (let s = 0; s < SHARDS; s++) {
         const bucket = buckets[s]!; if (!bucket.size) continue;
         const flat: number[] = []; for (const [key, list] of bucket) { flat.push(Math.floor(key / 4294967296), key % 4294967296, list.length, ...list); }
-        await fs.writeFile(path.join(work, 'parts', `${block}-${s}`), Buffer.from(Uint32Array.from(flat).buffer));
+        await writeScratch(path.join(work, 'parts', `${block}-${s}`), Buffer.from(Uint32Array.from(flat).buffer));
       }
     }
     let bytes = 0;
@@ -78,33 +93,36 @@ export async function buildFsIndex(vault: SearchVault): Promise<{ documents: num
         const hi = Math.floor(key / 4294967296), lo = key % 4294967296; out.push(hi >> 8 & 0xff, hi & 0xff, lo >>> 24 & 0xff, lo >>> 16 & 0xff, lo >>> 8 & 0xff, lo & 0xff); pushVarint(out, body.length); for (const byte of body) out.push(byte);
       }
       const payload = Buffer.from(out); const file = Buffer.alloc(4 + payload.length); file.writeUInt32LE(crc32(payload), 0); payload.copy(file, 4); bytes += file.length;
-      await fs.writeFile(path.join(work, `s${s}.bin`), file);
+      await writeScratch(path.join(work, `s${s}.bin`), file);
     }
     await fs.rm(path.join(work, 'parts'), { recursive: true, force: true });
-    await fs.writeFile(path.join(work, 'docs.tsv'), entries.map((e, ordinal) => `${e.id}\t${unreadable.has(ordinal) ? '-' : e.rev}`).join('\n') + '\n');
-    await fs.writeFile(path.join(work, 'meta.json'), JSON.stringify({ schema: SCHEMA, shards: SHARDS, documents: entries.length, builtAt: new Date().toISOString(), manifestSequence: manifest.sequence }));
+    await writeScratch(path.join(work, 'docs.tsv'), entries.map((e, ordinal) => `${e.id}\t${unreadable.has(ordinal) ? '-' : e.rev}`).join('\n') + '\n');
+    await writeScratch(path.join(work, 'meta.json'), JSON.stringify({ schema: SCHEMA, shards: SHARDS, documents: entries.length, builtAt: new Date().toISOString(), manifestSequence: manifest.sequence }));
+    await fs.rm(path.join(work, '.engram-index-build.json'));
     const target = await safePath(vault.root, DIR); const old = `${target}.old.${randomUUID()}`;
+    options.fault?.('index.before_publish');
     await fs.rename(target, old).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
     await fs.rename(work, target); await fs.rm(old, { recursive: true, force: true });
+    await fs.rmdir(scratchRoot).catch(() => undefined);
     cache.delete(vault.root);
     return { documents: entries.length, shards: SHARDS, bytes, ms: Math.round(performance.now() - started) };
-  } catch (error) { await fs.rm(work, { recursive: true, force: true }); throw error; }
+  } catch (error) { await fs.rm(work, { recursive: true, force: true }); await fs.rmdir(scratchRoot).catch(() => undefined); throw error; }
 }
 
-interface Loaded { decoded?: { map: Map<number, { ords: number[]; tfs: number[] }>; size: number }; stale?: { sequence: number; ids: Set<string> }; signature: string; documents: number; builtAt: string; ordinals: Map<string, { ordinal: number; rev: string }>; ids: string[]; shards: Map<number, Map<number, { start: number; end: number }> & { buffer?: Buffer }> }
+interface Loaded { decoded?: { map: Map<number, { ords: number[]; tfs: number[] }>; size: number }; stale?: { sequence: number; ids: Set<string> }; signature: string; documents: number; builtAt: string; manifestSequence: number; ordinals: Map<string, { ordinal: number; rev: string }>; ids: string[]; shards: Map<number, Map<number, { start: number; end: number }> & { buffer?: Buffer }> }
 const cache = new Map<string, Loaded>();
 
 async function load(root: string): Promise<Loaded> {
   const dir = await safePath(root, DIR); const metaPath = path.join(dir, 'meta.json');
   let stat; try { stat = await fs.stat(metaPath); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new MDBError('CAPABILITY_UNAVAILABLE', 'filesystem trigram index not built'); throw error; }
   const signature = `${stat.mtimeMs}:${stat.size}`; const hit = cache.get(root); if (hit && hit.signature === signature) return hit;
-  let meta: { schema?: number; shards?: number; documents?: number; builtAt?: string };
+  let meta: { schema?: number; shards?: number; documents?: number; builtAt?: string; manifestSequence?: number };
   try { meta = JSON.parse(await fs.readFile(metaPath, 'utf8')); } catch { throw new MDBError('INTERNAL', 'filesystem trigram index metadata is unreadable'); }
   if (meta.schema !== SCHEMA || meta.shards !== SHARDS) throw new MDBError('INTERNAL', 'filesystem trigram index has an unsupported schema');
   const lines = (await fs.readFile(path.join(dir, 'docs.tsv'), 'utf8')).split('\n').filter(Boolean); const ordinals = new Map<string, { ordinal: number; rev: string }>(); const ids: string[] = [];
   lines.forEach((line, ordinal) => { const [id, rev] = line.split('\t'); if (!id || !rev) throw new MDBError('INTERNAL', 'filesystem trigram index document list is corrupt'); ordinals.set(id, { ordinal, rev }); ids.push(id); });
   if (lines.length !== meta.documents) throw new MDBError('INTERNAL', 'filesystem trigram index document count does not match its metadata');
-  const loaded: Loaded = { signature, documents: lines.length, builtAt: meta.builtAt ?? '', ordinals, ids, shards: new Map() }; cache.set(root, loaded); return loaded;
+  const loaded: Loaded = { signature, documents: lines.length, builtAt: meta.builtAt ?? '', manifestSequence: Number.isSafeInteger(meta.manifestSequence) ? meta.manifestSequence! : 0, ordinals, ids, shards: new Map() }; cache.set(root, loaded); return loaded;
 }
 
 async function shard(root: string, loaded: Loaded, s: number): Promise<Map<number, { start: number; end: number }> & { buffer?: Buffer }> {
@@ -147,7 +165,7 @@ export const resetFsIndexCache = (): void => cache.clear();
 export const fsIndexServes = (terms: string[]): boolean => terms.every(term => term.length >= 3 && ELIGIBLE.test(term));
 
 export async function fsIndexStatus(vault: SearchVault): Promise<FsIndexStatus> {
-  try { const loaded = await load(vault.root); return { present: true, documents: loaded.documents, builtAt: loaded.builtAt }; }
+  try { const loaded = await load(vault.root); return { present: true, documents: loaded.documents, builtAt: loaded.builtAt, manifestSequence: loaded.manifestSequence }; }
   catch (error) { return { present: false, reason: error instanceof Error ? error.message : String(error) }; }
 }
 

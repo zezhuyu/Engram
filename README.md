@@ -66,7 +66,9 @@ node bin/mdb-mcp.js --root ./my-vault
 
 MCP uses stdio by default. To opt into a remote HTTP listener, set `MDB_MCP_TRANSPORT=http` and (when remote access is intended) `MDB_MCP_HTTP_HOST=0.0.0.0`; only one transport runs at a time. HTTP accepts individually issued scoped credentials (`mdb credential create`) and retains `MDB_MCP_HTTP_TOKEN` as a legacy single-identity option. Put remote access behind TLS. Native host MCP connections are the client; internal Engram skills invoke those MCP tools. See [integrations/README.md](integrations/README.md) and [docs/memory.md](docs/memory.md) for setup.
 
-MCP exposes search/get/put/patch/link/context, sessions, authorized workspace and collection operations, history, proposals, promotion and skills over the selected stdio or HTTP transport. The self-hosted HTTP server binds each credential to its own actor and permissions, and serves authenticated lifecycle ingestion for Claude Code and Codex. Hook agents retain their native primary memory; Engram passively records allowlisted lifecycle events and supplies bounded secondary recall. Per-machine delivery spools retry outages without storing bearer tokens. There is no managed Engram hosting service. Missing host identity gives an anonymous actor with no grants. Do not give untrusted hosts `*` permissions.
+MCP exposes search/get/put/patch/link/context, sessions, authorized workspace and collection operations, history, proposals, promotion, skills, deterministic wiki lint (`mdb_wiki_lint`), reviewed wiki change proposal/list tools (`mdb_wiki_propose_change`, `mdb_wiki_proposals`), and read-only revision diff (`mdb_diff`). Agents can propose wiki retire, restore, rename and merge operations; only the trusted host approves or rejects them through the SDK or CLI. No wiki approval or direct delete tool is exposed over MCP. The self-hosted HTTP server binds each credential to its own actor and permissions, and serves authenticated lifecycle ingestion for Claude Code and Codex. Hook agents retain their native primary memory; Engram passively records allowlisted lifecycle events and supplies bounded secondary recall. Per-machine delivery spools retry outages without storing bearer tokens. There is no managed Engram hosting service. Missing host identity gives an anonymous actor with no grants. Do not give untrusted hosts `*` permissions.
+
+For importing, linking, searching and capturing AI chat history, see [Universal AI Chat Integration](docs/chat-integration.md). Historical exports, explicit MCP access and passive capture from an Engram-controlled client are separate capabilities; native provider web UI capture is not claimed.
 
 ## KB skills and intelligence
 
@@ -76,6 +78,10 @@ All 22 KB skill directories are preserved in `skills/upstream-kb/`, with an impo
 node bin/mdb.js skills list --root ./my-vault
 node bin/mdb.js skills show wiki-query --root ./my-vault
 node bin/mdb.js skills run memory-recall --input '{"query":"retrieval"}' --root ./my-vault
+node bin/mdb.js wiki lint --scope wiki --json --root ./my-vault
+node bin/mdb.js wiki propose retire --page PAGE_ID --revision REVISION --reason 'Superseded' --root ./my-vault
+node bin/mdb.js wiki proposals --status pending --root ./my-vault
+node bin/mdb.js intelligence approve PROPOSAL_ID --root ./my-vault
 node bin/mdb.js intelligence run --job index --root ./my-vault
 node bin/mdb.js jobs status --root ./my-vault
 ```

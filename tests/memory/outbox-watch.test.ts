@@ -73,6 +73,8 @@ test('CLI: watch refuses a token file other users can read, and the printed serv
   for (const platform of ['macos', 'linux'] as const) { const unit = spawnSync(process.execPath, [MDB, 'outbox', 'watch-unit', '--platform', platform, '--url', 'http://100.1.2.3:9/mcp', '--token-file', file, '--workspace', 'proj'], { encoding: 'utf8', env, timeout: 20000 }); const text = unit.stdout; assert.equal(unit.status, 0, unit.stderr);
     assert.ok(!text.includes('super-secret-token'), 'the credential is not in the service text'); assert.match(text, platform === 'macos' ? /KeepAlive/ : /Restart=always/); assert.match(text, /outbox/); }
   assert.ok(!watcherServiceText('linux', { node: '/n', mdb: '/m', url: 'http://h/mcp', tokenFile: '/t' }).includes('Bearer'));
+  const isolated = watcherServiceText('macos', { node: '/n', mdb: '/m', url: 'http://h/mcp', tokenFile: '/t', env: { ENGRAM_DATA_DIR: path.join(dir, 'selected-root') } });
+  assert.ok(!isolated.includes('StandardErrorPath'), 'launchd must not create an unbounded app-owned log file');
 });
 
 test('CLI: the real watcher process delivers through a 0600 token file and then exits with status 0 promptly when asked, even after it held a live HTTP connection', async t => {

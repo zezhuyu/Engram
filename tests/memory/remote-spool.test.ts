@@ -3,9 +3,24 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createServer } from 'node:http';
-import { drainRemoteCaptureSpool, queueRemoteCapture } from '../../packages/memory/remote-spool.js';
+import { defaultRemoteSpoolDirectory, drainRemoteCaptureSpool, queueRemoteCapture } from '../../packages/memory/remote-spool.js';
 import { tempDir } from '../helpers/host.js';
 import { recordCase } from '../helpers/report.js';
+
+test('default remote-spool writer and delivery stay under ENGRAM_DATA_DIR', async t => {
+  const root = await tempDir(t, 'spool-configured-root'); const saved = { data: process.env.ENGRAM_DATA_DIR, spool: process.env.ENGRAM_REMOTE_SPOOL };
+  process.env.ENGRAM_DATA_DIR = root; delete process.env.ENGRAM_REMOTE_SPOOL;
+  t.after(() => { if (saved.data === undefined) delete process.env.ENGRAM_DATA_DIR; else process.env.ENGRAM_DATA_DIR = saved.data; if (saved.spool === undefined) delete process.env.ENGRAM_REMOTE_SPOOL; else process.env.ENGRAM_REMOTE_SPOOL = saved.spool; });
+  const spool = defaultRemoteSpoolDirectory(); assert.equal(spool, path.join(root, '.engram-runtime/remote-spool'));
+  let delivered = 0; const server = createServer((request, response) => { assert.match(request.headers.authorization ?? '', /^Bearer test-token$/); request.resume(); request.on('end', () => { delivered++; response.writeHead(202, { 'content-type': 'application/json' }); response.end('{"accepted":true}'); }); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`;
+  const result = await queueRemoteCapture({ url, registrationId: 'synthetic-registration', token: 'test-token', payload: { hook_event_name: 'UserPromptSubmit', prompt: 'synthetic only' } });
+  assert.deepEqual(result, { delivered: 1, queued: 0, rejected: 0 }); assert.equal(delivered, 1);
+  assert.deepEqual((await fs.readdir(spool)).filter(name => name.endsWith('.json')), [], 'successful delivery removes only the queued envelope');
+  assert.equal(path.relative(root, spool).startsWith('..'), false);
+  recordCase({ suite: 'memory', name: 'remote-spool-data-root-write-and-delivery', status: 'PASS', detail: { spool } });
+});
 
 // Regression from the multi-container run: 1100 concurrent hook processes left 1002 entries in a spool capped at 1000.
 test('the remote capture spool never exceeds its cap under concurrent writers', async t => {

@@ -14,7 +14,7 @@
     "feasibility": "1 if metadata.proposedValidation names an observable check and metadata.testPlan has at least one concrete step (v1 scored only the prose body and missed these fields; v1 scoring is still reported as legacyQuality).",
     "evidenceGrounding": "1 only when every evidence URI/revision is supplied and each verbatim span occurs in that exact source; otherwise 0.",
     "contradictions": "1 if the candidate cites both cache claims and preserves their conflict as uncertainty; 0 if it asserts either universal rule as fact.",
-    "hallucinations": "1 if every evidence span is verbatim and no universal factual claim appears unattributed (a claim quoted or attributed to a source, e.g. 'Claim A says ...', is not a hallucination).",
+    "deterministicSafetyGuard": "1 if no narrow, explicitly configured unsupported-universal phrase appears unattributed. This check does not establish semantic grounding; that remains NOT_ASSESSED until independent adjudication.",
     "separation": "deep only: 1 if metadata.facts (each restating a cited source) and metadata.speculation are both present and missingEvidence is named.",
     "multiHop": "deep only: 1 if metadata.hops has 2+ steps (1 suffices for a contradiction)."
   },
@@ -89,6 +89,7 @@
     {
       "id": "deep-cache-deploy",
       "mode": "deep",
+      "expectedOutcome": "abstention",
       "evidence": [
         "opsCache",
         "jsCache"
@@ -98,6 +99,29 @@
         "cache",
         "invalidat"
       ]
+    }
+  ],
+  "negativeControls": [
+    {
+      "id": "java-homonym-negative-control",
+      "evidence": ["javaLanguage", "javaIsland"],
+      "instruction": "This is a lexical-decoy control. The shared word Java has unrelated meanings in these two sources: a programming language and an island. Do not infer a relationship from the shared word. Return no discovery unless the supplied evidence establishes a specific cross-domain mechanism; abstain when it does not.",
+      "expectedUsableCandidates": 0,
+      "minimumProviderCalls": 1
+    },
+    {
+      "id": "python-homonym-negative-control",
+      "evidence": ["pythonLanguage", "pythonSnake"],
+      "instruction": "This is a lexical-decoy control. Python means a programming language in one source and a snake in the other. Do not invent a technical or biological mechanism from the shared word. Return no discovery unless the supplied evidence establishes a specific cross-domain mechanism; abstain when it does not.",
+      "expectedUsableCandidates": 0,
+      "minimumProviderCalls": 1
+    },
+    {
+      "id": "bank-homonym-negative-control",
+      "evidence": ["riverBank", "financeBank"],
+      "instruction": "This is a lexical-decoy control. Bank means land beside a river in one source and a financial institution in the other. Do not infer a shared operational mechanism from the homonym. Return no discovery unless the supplied evidence establishes a specific cross-domain mechanism; abstain when it does not.",
+      "expectedUsableCandidates": 0,
+      "minimumProviderCalls": 1
     }
   ],
   "criticCases": [

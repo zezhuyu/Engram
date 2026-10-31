@@ -4,13 +4,14 @@ import { resolve, dirname } from 'node:path';
 import type { Document, PutInput, Scope, SearchInput, SearchResult, VaultConfig } from '../core/types.js';
 import { MDBError } from '../core/types.js';
 import { skillCatalog } from './catalog.js';
+import { lintWiki, type WikiLintOptions, type WikiLintCode, type WikiLintSeverity, type WikiLintIssue } from '../intelligence/wiki-lint.js';
 
 export interface SkillVault {
   actor: { actorId: string; permissions: string[] };
   ingest(file: string, scope: Scope): Promise<unknown>;
   put(input: PutInput): Promise<unknown>;
   get(id: string, revisionId?: string): Promise<Document>;
-  listDocuments(input?: { includeHistory?: boolean; scopes?: Scope[] }): Promise<Document[]>;
+  listDocuments(input?: { includeHistory?: boolean; scopes?: Scope[]; includeUnresolvedReferences?: boolean }): Promise<Document[]>;
   config(): Promise<VaultConfig>;
   promote(id: string, to: Scope, sanitizedBody: string, title?: string): Promise<unknown>;
 }
@@ -20,6 +21,7 @@ export interface SkillContext {
   intelligence: {
     provider?: { id: string };
     enqueue(job: 'wiki' | 'profile' | 'memory' | 'reflect' | 'dream' | 'index', input?: Record<string, unknown>): Promise<unknown>;
+    proposeFromLint?(input: WikiLintIssue[] | { issues?: WikiLintIssue[]; scopes?: Scope[]; dryRun?: boolean; limit?: number }): Promise<unknown>;
     sessionEnd(input: { sessionId: string; body?: string }): Promise<unknown>;
   };
 }
@@ -52,21 +54,13 @@ export async function listSkills(): Promise<SkillDefinition[]> {
   return Promise.all(Object.keys(skillCatalog).sort().map(getSkill));
 }
 
-async function audit(vault: SkillVault, scopes?: Scope[]): Promise<unknown> {
-  const documents = await vault.listDocuments({ scopes });
-  const issues: { objectId: string; issue: string }[] = [];
-  for (const doc of documents) {
-    if (['wiki_page', 'insight', 'discovery', 'user_insight'].includes(doc.kind) && doc.evidence.length === 0) issues.push({ objectId: doc.id, issue: 'missing_evidence' });
-    for (const evidence of doc.evidence) {
-      // References are checked with the trusted actor; denied IDs never appear in output.
-      try {
-        const match = evidence.uri.match(/(?:^mdb:\/\/objects\/|\/objects\/)([^/]+)$/);
-        if (!match?.[1]) throw new Error('unresolved');
-        await vault.get(match[1], evidence.revisionId);
-      } catch { issues.push({ objectId: doc.id, issue: 'unresolved_or_inaccessible_evidence' }); }
-    }
-  }
-  return { checked: documents.length, issues, semanticTruthVerified: false };
+function lintOptions(input: Record<string, unknown>): WikiLintOptions {
+  const choices = ['missing_evidence', 'unresolved_or_inaccessible_evidence', 'evidence_span_not_found', 'uncited_claim', 'broken_wikilink', 'dangling_reference', 'orphan_page', 'duplicate_title', 'duplicate_content', 'stale_source', 'source_deleted', 'empty_page', 'tag_inconsistency'];
+  if (input.checks !== undefined && (!Array.isArray(input.checks) || input.checks.some(x => typeof x !== 'string' || !choices.includes(x)))) return invalid('checks must contain known wiki lint codes');
+  const minSeverity = input.minSeverity;
+  if (minSeverity !== undefined && !['error', 'warning', 'info'].includes(String(minSeverity))) return invalid('minSeverity must be error, warning, or info');
+  if (input.limit !== undefined && (!Number.isInteger(input.limit) || Number(input.limit) < 0)) return invalid('limit must be a nonnegative integer');
+  return { ...(Array.isArray(input.scopes) ? { scopes: input.scopes as Scope[] } : {}), ...(Array.isArray(input.checks) ? { checks: input.checks as WikiLintCode[] } : {}), ...(minSeverity ? { minSeverity: minSeverity as WikiLintSeverity } : {}), ...(input.limit !== undefined ? { limit: input.limit as number } : {}) };
 }
 
 /** Dispatch only known operations. Skill or source text is never executable code. */
@@ -103,7 +97,11 @@ export async function runSkill(name: string, input: Record<string, unknown>, con
       return { documents: documents.length, kinds, capabilities: { lexical: true, modelConfigured: config.model.provider !== null, networkFetching: false, mediaConversion: false } };
     }
     case 'export': return { format: 'mdb-authorized-documents-v1', documents: await vault.listDocuments({ scopes: input.scopes as Scope[] | undefined }) };
-    case 'audit': return audit(vault, input.scopes as Scope[] | undefined);
+    case 'audit': {
+      const options = lintOptions(input);
+      if (input.propose === true) { if (!intelligence.proposeFromLint) return invalid('Lint proposals are unavailable in this skill host'); return intelligence.proposeFromLint({ issues: (await lintWiki(vault, options)).issues, dryRun: input.dryRun === true, limit: input.limit as number | undefined }); }
+      return lintWiki(vault, options);
+    }
     case 'rebuild': await search.rebuild(input.scope === undefined ? undefined : scopeField(input)); return { rebuilt: true, canonicalRevisionsChanged: false };
     case 'promotion':
       if (input.review !== true) return invalid('Explicit review=true and sanitizedBody are required for promotion');
@@ -113,7 +111,9 @@ export async function runSkill(name: string, input: Record<string, unknown>, con
       scopeField(input);
       if (!Array.isArray(input.objectIds) || input.objectIds.length === 0 || input.objectIds.some(id => typeof id !== 'string')) return invalid('Explicit nonempty objectIds evidence selection is required');
       for (const id of input.objectIds) await vault.get(id);
-      return { job: await intelligence.enqueue(mode, input), semanticExecutionAvailable: Boolean(intelligence.provider), requiresReview: true };
+      if (mode === 'wiki' && input.skill !== undefined && input.skill !== name) return invalid('skill is selected by the skill registry and cannot be overridden');
+      const jobInput = mode === 'wiki' ? { ...input, skill: name, ...(input.targetPageId ? { targetPageId: input.targetPageId } : {}), ...(input.issues ? { issues: input.issues as WikiLintIssue[] } : {}) } : input;
+      return { job: await intelligence.enqueue(mode, jobInput), semanticExecutionAvailable: Boolean(intelligence.provider), requiresReview: true };
   }
 }
 

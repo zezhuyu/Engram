@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Assemble the portable CLI/SDK client package from a completed TypeScript build. */
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -14,9 +14,19 @@ const version = `${sourcePackage.version}-ci.${commit}`;
 const client = await mkdtemp(join(tmpdir(), 'engram-client-package-'));
 
 try {
-  for (const path of ['dist/packages', 'dist/integrations']) {
+  for (const path of ['dist/packages', 'dist/integrations', 'skills']) {
     await cp(join(root, path), join(client, path), { recursive: true });
   }
+  const removeSourceMaps = async directory => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) await removeSourceMaps(file);
+      else if (entry.isFile() && entry.name.endsWith('.map')) await rm(file);
+    }
+  };
+  await removeSourceMaps(client);
+  // Upstream reference corpora are repository-only review material, not runtime skills.
+  await rm(join(client, 'skills/upstream-kb'), { recursive: true, force: true });
   for (const path of ['index.js', 'index.js.map', 'index.d.ts']) {
     await rm(join(client, 'dist/packages/mcp', path), { force: true });
   }
@@ -31,8 +41,12 @@ try {
     engines: sourcePackage.engines,
     bin: { mdb: 'bin/mdb.js' },
     exports: { '.': './dist/packages/sdk/index.js' },
-    files: ['bin/', 'dist/', 'README.md'],
-    dependencies: sourcePackage.dependencies,
+    files: ['bin/', 'dist/', 'skills/', 'README.md'],
+    dependencies: { yaml: sourcePackage.dependencies.yaml },
+    optionalDependencies: {
+      ...(sourcePackage.dependencies['@aws-sdk/client-s3'] ? { '@aws-sdk/client-s3': sourcePackage.dependencies['@aws-sdk/client-s3'] } : {}),
+      ...(sourcePackage.dependencies.pg ? { pg: sourcePackage.dependencies.pg } : {}),
+    },
   };
   await writeFile(join(client, 'package.json'), `${JSON.stringify(clientPackage, null, 2)}\n`);
   await mkdir(destination, { recursive: true });

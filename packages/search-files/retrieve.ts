@@ -21,11 +21,12 @@ export type Prefilter = ((ctx: PrefilterContext) => Promise<{ ids?: Set<string>;
 
 export function assertSearchIdentity(vault: SearchVault, input: SearchInput, actor: ActorContext): void {
   if (input.includeHistory && !actor.permissions.includes('*') && !actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'History search requires history:read permission');
+  if (input.includeRejected && !actor.permissions.includes('*') && !actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Rejected discovery search requires history:read permission');
   if (actor.actorId !== vault.actor.actorId || actor.permissions.some(permission => !vault.actor.permissions.includes('*') && !vault.actor.permissions.includes(permission))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Search identity must match the trusted vault identity');
 }
 
 export const metadataMatches = (input: SearchInput, e: { kind: string; tags: string[]; status: string; updated: string }): boolean =>
-  e.status !== 'deleted' && e.status !== 'tombstone' && (!input.kinds?.length || input.kinds.includes(e.kind)) && (!input.tags?.length || input.tags.every(tag => e.tags.includes(tag))) && (!input.since || e.updated >= input.since) && (!input.until || e.updated <= input.until);
+  e.status !== 'deleted' && e.status !== 'tombstone' && (input.includeRejected === true || e.kind !== 'discovery' || e.status !== 'rejected') && (!input.kinds?.length || input.kinds.includes(e.kind)) && (!input.tags?.length || input.tags.every(tag => e.tags.includes(tag))) && (!input.since || e.updated >= input.since) && (!input.until || e.updated <= input.until);
 
 
 /**
@@ -239,6 +240,7 @@ export async function retrieve(vault: SearchVault, input: SearchInput, actor: Ac
     for (;;) {
       const picked = order.take(batchSize); if (!picked.length) break; const batch = await loadBatch(vault, picked);
       const documents = batch.filter(doc => doc.status !== 'deleted' && doc.status !== 'tombstone'
+        && (input.includeRejected === true || doc.kind !== 'discovery' || doc.status !== 'rejected')
         && (!filters || filters.some(scope => scopeMatches(doc.scope, scope)))
         && (!input.kinds?.length || input.kinds.includes(doc.kind)) && (!input.tags?.length || input.tags.every(tag => doc.tags.includes(tag)))
         && (!input.since || doc.updatedAt >= input.since) && (!input.until || doc.updatedAt <= input.until));

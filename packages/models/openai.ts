@@ -1,10 +1,12 @@
 import { MDBError, type CriticVerdict, type CritiqueRequest, type ModelCallOptions, type ModelProposal, type ModelProvider, type ModelRequest } from '../core/types.js';
 import { CancelledError, ProviderError } from './errors.js';
-import { critiqueMessages, estimateTokens, generationMessages, type ChatMessage } from './prompts.js';
+import { critiqueMessages, estimateTokens, generationMessages, providerMessages, type ChatMessage } from './prompts.js';
 import { extractJson, parseModelProposal, parseVerdict } from './schema.js';
+import { redactText } from '../memory/redact.js';
 
 export interface HttpProviderOptions {
   id: string; baseUrl: string; model: string; apiKey?: string; locality: 'local' | 'remote';
+  redactPiiForLocal?: boolean;
   timeoutMs: number; maxRetries: number; maxInputTokens: number; maxOutputTokens: number;
   /** Ask for response_format json_object. Disable for servers that reject it. */
   jsonMode?: boolean;
@@ -47,10 +49,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   async generate(input: ModelRequest, options: ModelCallOptions = {}): Promise<ModelProposal> {
-    return parseModelProposal(extractJson(await this.complete(generationMessages(input), options)));
+    return parseModelProposal(extractJson(redactText(await this.complete(providerMessages(generationMessages(input), this.locality, this.options.redactPiiForLocal), options))));
   }
   async critique(input: CritiqueRequest, options: ModelCallOptions = {}): Promise<CriticVerdict> {
-    return parseVerdict(extractJson(await this.complete(critiqueMessages(input), options)));
+    return parseVerdict(extractJson(redactText(await this.complete(providerMessages(critiqueMessages(input), this.locality, this.options.redactPiiForLocal), options))));
   }
 
   private async complete(messages: ChatMessage[], call: ModelCallOptions): Promise<string> {

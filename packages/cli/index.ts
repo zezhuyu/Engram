@@ -1,4 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { queryCommand, lineGrep, STREAM_COMMANDS, STREAMED } from './query.js';
 import { detectUnix, unixMain } from './unix.js';
 import { resolve } from 'node:path';
@@ -18,7 +20,7 @@ import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttp
 import { createRegistration, revokeRegistration } from '../memory/capture.js';
 import { drainRemoteCaptureSpool, queueRemoteCapture } from '../memory/remote-spool.js';
 import type { JobKind } from '../intelligence/index.js';
-import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, refreshRelevance, readRanking, clearRanking, relevanceStatus, showModel, setModel, testModel, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput } from '../sdk/index.js';
+import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, refreshRelevance, readRanking, clearRanking, relevanceStatus, showModel, setModel, testModel, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput, CHAT_PROVIDERS, importChatEvents, parseGenericJson, parseChatGptExport, parseChatGptZip, parseClaudeExport, parseClaudeZip, parseGeminiTakeoutActivity, parseGeminiTakeoutZip, parseGenericJsonl } from '../sdk/index.js';
 
 /** Builds the vault-configured built-in provider (openai, ollama, openai-compatible). Returns undefined, with a stderr note, when unavailable. */
 async function configuredProvider(root: string): Promise<ModelProvider | undefined> {
@@ -33,10 +35,19 @@ Usage: mdb COMMAND [arguments] [--root PATH] [--json]
 
 mcp-proxy --url URL --token-env VAR [--workspace ID] [--outbox DIR] [--transport-trust tailscale]   stdio proxy for an agent host; keeps task/note/handoff writes locally while the server is unreachable and sends them when it returns
 remote mode: any client runs these against the server instead of a local vault when --server URL [--token-env VAR] [--workspace ID] is given, ENGRAM_URL is set, or the current project is bound to a server (--root or --local forces a local vault)
-    search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | insight search | capabilities
+    search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | chat account|project|import|list|get|search | insight search | capabilities
+chat account register|revoke|list --provider chatgpt|claude|gemini|generic --account ID [--label LABEL]
+chat client register --provider P --account A --principal ACTOR --consent   owner-consented Engram-controlled two-way chat capture
+chat project create|link --provider P --account A --project ID --workspace W [--name N] | remap|unlink --expected-version N | list|resolve
+chat import preview|run|resume --provider P --account A --file PATH --format generic-json|generic-jsonl|chatgpt-json|chatgpt-zip|claude-json|claude-zip|gemini-takeout-json|gemini-takeout-zip [--batch ID --membership standalone|member|unknown]
+chat import status --batch ID | list [filters] | get --conversation ID [filters] | search --query TEXT [filters]
     task upsert --id ID --title T --status S [--body B] [--expected-revision R | --as-of TIME]    note upsert --id ID --title T (--body B | --file F)    handoff write --session ID --state ended|interrupted [--completed a,b --next ... --blockers ... --files ... --open-tasks ...]
     remote tools | remote call TOOL --input JSON      (every server tool; task/note/handoff writes made while the server is unreachable are kept in the local outbox and merged in later)
 outbox [drain --url URL --token-env VAR [--workspace ID] | watch --url URL (--token-env VAR | --token-file F) [--workspace ID] [--project-dir D] [--interval-sec N] [--exit-when-empty-sec N] | watch-unit --url URL --token-file F [--platform macos|linux] | log [--limit N]]   what is waiting on this machine (queued, conflicts, rejected); drain sends it now; log is the timestamped record
+storage status | breakdown | cleanup --dry-run   report logical storage paths/usage and preview only positively marked orphan scratch (nothing is deleted)
+wiki lint [--scope S ...] [--check CODE ...] [--min-severity error|warning|info] [--limit N] [--propose [--dry-run]]   deterministic ACL-safe wiki lint and pending proposal generation
+wiki propose retire --page ID --revision REV --reason TEXT | restore --page ID --to-revision REV --revision CURRENT --reason TEXT | rename --page ID --revision REV --title NEW | merge --target ID --revision REV --source ID:REV ... --title T (--body T | --file F) --evidence URI:REV[:SPAN] ... --reason TEXT
+wiki proposals [--status pending|approved|rejected]   list visible reviewed wiki changes; trusted host reviews with intelligence approve|reject
 model show | test | set (--local-agent [claude|codex|auto] | --api URL [--model NAME] [--api-key-env VAR] [--allow-network]) [--allow-private-to-remote] [--no-check]
     one vault-wide model switch for profile/insight collection, dream and project insight relevance; keys come from the environment only
 
@@ -97,15 +108,18 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
     if (!token.startsWith('--')) { args.push(token); continue; }
     const [key, ...parts] = token.slice(2).split('=');
-    if (parts.length) flags[key!] = parts.join('=');
+    if (parts.length) {
+      const value = parts.join('=');
+      flags[key!] = ['scope', 'check', 'source', 'evidence'].includes(key!) && typeof flags[key!] === 'string' ? `${flags[key!] as string},${value}` : value;
+    }
     else if (switches.has(key!)) flags[key!] = true;
-    else { const value = argv[++i]; if (!value || value.startsWith('--')) throw new MDBError('INVALID_ARGUMENT', `--${key} requires a value`); flags[key!] = value; }
+    else { const value = argv[++i]; if (!value || value.startsWith('--')) throw new MDBError('INVALID_ARGUMENT', `--${key} requires a value`); flags[key!] = ['scope', 'check', 'source', 'evidence'].includes(key!) && typeof flags[key!] === 'string' ? `${flags[key!] as string},${value}` : value; }
   }
   return { args, flags };
 }
@@ -178,13 +192,113 @@ function parseScope(flags: Flags): Scope {
 async function body(flags: Flags): Promise<string> { return text(flags, 'file') ? readFile(resolve(text(flags, 'file')!), 'utf8') : required(text(flags, 'body'), '--body or --file'); }
 function jsonInput(flags: Flags): Record<string, unknown> { const value = JSON.parse(text(flags, 'input', '{}')!); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new MDBError('INVALID_ARGUMENT', '--input must be a JSON object'); return value; }
 
+async function chatFileEvents(file: string, format: string) {
+  const info = await stat(file);
+  if (!info.isFile()) throw new MDBError('INVALID_INPUT', '--file must be a regular file');
+  const limit = format === 'chatgpt-zip' || format === 'claude-zip' || format === 'gemini-takeout-zip' ? 256 * 1024 * 1024 : 64 * 1024 * 1024;
+  if (info.size > limit) throw new MDBError('INVALID_INPUT', `Chat export exceeds the ${limit} byte CLI limit`);
+  const digest = createHash('sha256');
+  for await (const chunk of createReadStream(file)) digest.update(chunk as Buffer);
+  const sourceSha256 = digest.digest('hex');
+  if (format === 'generic-jsonl') return { sourceSha256, events: parseGenericJsonl(createReadStream(file)) };
+  const bytes = await readFile(file);
+  const content = bytes.toString('utf8');
+  const parsers: Record<string, () => ReturnType<typeof parseGenericJson>> = {
+    'generic-json': () => parseGenericJson(content),
+    'chatgpt-json': () => parseChatGptExport(content),
+    'chatgpt-zip': () => parseChatGptZip(bytes),
+    'claude-json': () => parseClaudeExport(content),
+    'claude-zip': () => parseClaudeZip(bytes),
+    'gemini-takeout-json': () => parseGeminiTakeoutActivity(content),
+    'gemini-takeout-zip': () => parseGeminiTakeoutZip(bytes),
+  };
+  const parser = parsers[format];
+  if (!parser) throw new MDBError('INVALID_ARGUMENT', 'Unsupported --format; use generic-jsonl, generic-json, chatgpt-json|zip, claude-json|zip, or gemini-takeout-json|zip');
+  return { sourceSha256, events: parser() };
+}
+
+async function chatCommand(client: Engram, sub: string | undefined, action: string | undefined, flags: Flags): Promise<unknown> {
+  const registry = client.chatProjects;
+  if (sub === 'account') {
+    if (action === 'list') return registry.listSourceAccounts();
+    const provider = required(text(flags, 'provider'), '--provider') as typeof CHAT_PROVIDERS[number];
+    if (!(CHAT_PROVIDERS as readonly string[]).includes(provider)) throw new MDBError('INVALID_ARGUMENT', 'Unsupported provider');
+    const account = required(text(flags, 'account'), '--account');
+    if (action === 'register') return registry.registerSourceAccount({ provider, sourceAccountId: account, ...(text(flags, 'label') ? { label: text(flags, 'label')! } : {}) });
+    if (action === 'revoke') return registry.revokeSourceAccount(provider, account);
+    throw new MDBError('INVALID_ARGUMENT', 'usage: chat account register|revoke|list --provider P --account ID');
+  }
+  if (sub === 'client') {
+    if (action !== 'register') throw new MDBError('INVALID_ARGUMENT', 'usage: chat client register --provider P --account A --principal ACTOR --consent');
+    const provider = required(text(flags, 'provider'), '--provider') as typeof CHAT_PROVIDERS[number];
+    if (!(CHAT_PROVIDERS as readonly string[]).includes(provider)) throw new MDBError('INVALID_ARGUMENT', 'Unsupported provider');
+    return createRegistration(client.vault, {
+      host: 'engram-chat-client', principalId: required(text(flags, 'principal'), '--principal'), workspaceId: 'personal',
+      consent: flags.consent === true, chatSource: { provider, sourceAccountId: required(text(flags, 'account'), '--account') },
+      capture: ['user.message', 'assistant.message']
+    });
+  }
+  if (sub === 'project') {
+    if (action === 'list') return registry.listProjects();
+    const provider = required(text(flags, 'provider'), '--provider') as typeof CHAT_PROVIDERS[number];
+    if (!(CHAT_PROVIDERS as readonly string[]).includes(provider)) throw new MDBError('INVALID_ARGUMENT', 'Unsupported provider');
+    const sourceAccountId = required(text(flags, 'account'), '--account');
+    const externalProjectId = text(flags, 'project');
+    if (action !== 'resolve' && !externalProjectId) throw new MDBError('INVALID_ARGUMENT', '--project is required');
+    if (action === 'create') return registry.createWorkspaceAndLink({ provider, sourceAccountId, externalProjectId: externalProjectId!, projectName: text(flags, 'name', externalProjectId)!, workspaceId: required(text(flags, 'workspace'), '--workspace'), ...(text(flags, 'description') ? { description: text(flags, 'description')! } : {}) });
+    if (action === 'link') return registry.linkProject({ provider, sourceAccountId, externalProjectId: externalProjectId!, projectName: text(flags, 'name'), workspaceId: required(text(flags, 'workspace'), '--workspace') });
+    if (action === 'remap') return registry.remapProject({ provider, sourceAccountId, externalProjectId: externalProjectId!, workspaceId: required(text(flags, 'workspace'), '--workspace'), expectedVersion: number(flags, 'expected-version')! });
+    if (action === 'unlink') return registry.unlinkProject({ provider, sourceAccountId, externalProjectId: externalProjectId!, expectedVersion: number(flags, 'expected-version')! });
+    if (action === 'resolve') {
+      const membership = required(text(flags, 'membership'), '--membership') as 'member' | 'standalone' | 'unknown';
+      return registry.resolveProject({ provider, sourceAccountId, ...(externalProjectId ? { externalProjectId } : {}), membership });
+    }
+    throw new MDBError('INVALID_ARGUMENT', 'usage: chat project create|link|remap|unlink|list|resolve');
+  }
+  if (sub === 'import') {
+    if (action === 'status') {
+      const batchId = required(text(flags, 'batch'), '--batch');
+      const personal = await client.vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'personal' }] });
+      const record = personal.find(doc => doc.kind === 'chat_import_run' && doc.metadata.batchId === batchId);
+      return record ? { ...JSON.parse(record.body) as Record<string, unknown>, warnings: personal.filter(doc => doc.kind === 'chat_import_warning' && doc.metadata.batchId === batchId).map(doc => JSON.parse(doc.body) as unknown) } : null;
+    }
+    if (!['preview', 'run', 'resume'].includes(action ?? '')) throw new MDBError('INVALID_ARGUMENT', 'usage: chat import preview|run|resume|status');
+    const provider = required(text(flags, 'provider'), '--provider') as typeof CHAT_PROVIDERS[number];
+    if (!(CHAT_PROVIDERS as readonly string[]).includes(provider)) throw new MDBError('INVALID_ARGUMENT', 'Unsupported provider');
+    const sourceAccountId = required(text(flags, 'account'), '--account');
+    const file = resolve(required(text(flags, 'file'), '--file'));
+    const format = required(text(flags, 'format'), '--format');
+    const batchId = action === 'resume'
+      ? required(text(flags, 'batch'), '--batch (resume requires the original batch ID)')
+      : required(text(flags, 'batch', `chat-${Date.now().toString(36)}`), '--batch');
+    const parsed = await chatFileEvents(file, format);
+    let startOffset = action === 'resume' ? number(flags, 'offset') : undefined;
+    if (action === 'resume' && startOffset === undefined) {
+      const docs = await client.vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'personal' }] });
+      const saved = docs.find(doc => doc.kind === 'chat_import_run' && doc.metadata.batchId === batchId);
+      if (!saved) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Import checkpoint not found');
+      startOffset = Number((JSON.parse(saved.body) as { nextOffset?: number }).nextOffset);
+    }
+    const membership = text(flags, 'membership', 'unknown')! as 'member' | 'standalone' | 'unknown';
+    if (!['member', 'standalone', 'unknown'].includes(membership)) throw new MDBError('INVALID_ARGUMENT', '--membership must be member, standalone or unknown');
+    return importChatEvents(client.vault, registry, parsed.events, { provider, sourceAccountId, batchId, sourceSha256: parsed.sourceSha256, ...(startOffset !== undefined ? { startOffset } : {}), ...(number(flags, 'max-records') ? { maxRecords: number(flags, 'max-records')! } : {}), preview: action === 'preview', membershipForProject: projectId => projectId ? 'member' : membership });
+  }
+  const scopes = text(flags, 'workspace') ? [{ type: 'workspace' as const, workspaceId: text(flags, 'workspace')! }] : undefined;
+  const provider = text(flags, 'provider'), sourceAccountId = text(flags, 'account'), externalProjectId = text(flags, 'project'), role = text(flags, 'role');
+  const includeNonUser = flags['include-non-user'] === true || flags['include-non-user'] === 'true';
+  if (sub === 'list') return client.chatConversations.list({ ...(scopes ? { scopes } : {}), ...(provider ? { provider } : {}), ...(sourceAccountId ? { sourceAccountId } : {}), ...(externalProjectId ? { externalProjectId } : {}), ...(role ? { role } : {}), ...(text(flags, 'since') ? { since: text(flags, 'since')! } : {}), ...(text(flags, 'until') ? { until: text(flags, 'until')! } : {}), ...(includeNonUser ? { includeNonUser } : {}), ...(number(flags, 'limit') ? { limit: number(flags, 'limit')! } : {}), ...(text(flags, 'cursor') ? { cursor: text(flags, 'cursor')! } : {}) });
+  if (sub === 'get') return client.chatConversations.get({ externalConversationId: required(text(flags, 'conversation'), '--conversation'), ...(scopes ? { scopes } : {}), ...(provider ? { provider } : {}), ...(sourceAccountId ? { sourceAccountId } : {}), ...(includeNonUser ? { includeNonUser } : {}), ...(text(flags, 'cursor') ? { cursor: text(flags, 'cursor')! } : {}), ...(number(flags, 'max-messages') ? { maxMessages: number(flags, 'max-messages')! } : {}) });
+  if (sub === 'search') return client.chatConversations.search({ query: required(text(flags, 'query'), '--query'), mode: text(flags, 'mode') as 'keyword' | 'grep' | undefined, ...(scopes ? { scopes } : {}), ...(provider ? { provider } : {}), ...(sourceAccountId ? { sourceAccountId } : {}), ...(externalProjectId ? { externalProjectId } : {}), ...(role ? { role } : {}), ...(text(flags, 'since') ? { since: text(flags, 'since')! } : {}), ...(text(flags, 'until') ? { until: text(flags, 'until')! } : {}), ...(includeNonUser ? { includeNonUser } : {}), ...(number(flags, 'limit') ? { limit: number(flags, 'limit')! } : {}), ...(text(flags, 'cursor') ? { cursor: text(flags, 'cursor')! } : {}), ...(text(flags, 'source-cursor') ? { sourceCursor: text(flags, 'source-cursor')! } : {}) });
+  throw new MDBError('INVALID_ARGUMENT', 'usage: chat account|project|import|list|get|search');
+}
+
 function summarizeRun(r: { cycle?: { id: string; state: string; watermark: number; error?: { category: string; message: string }; workspaces: Record<string, { status: string; outcome?: string }>; global: { status: string }; dream: { status: string; proposals: unknown[] } }; ran: boolean; reason?: string }): unknown {
   const c = r.cycle; return { ran: r.ran, ...(r.reason ? { reason: r.reason } : {}), ...(c ? { cycle: c.id, state: c.state, watermark: c.watermark, workspaces: Object.fromEntries(Object.entries(c.workspaces).map(([k, w]) => [k, w.outcome ?? w.status])), global: c.global.status, dream: c.dream.status, dreams: c.dream.proposals.length, ...(c.error ? { error: `${c.error.category}: ${c.error.message}` } : {}) } : {}) };
 }
 /** Commands that never change the vault: they must not record activity either (a read leaves the vault byte-identical). */
-const READ_ONLY_COMMANDS = new Set(['doctor', 'verify', 'get', 'history', 'diff', 'grep', 'search', 'context', 'links', 'backlinks', 'related', 'query', 'capabilities', 'insight']);
-const READ_ONLY_SUBCOMMANDS: Record<string, string[]> = { model: ['show', 'test'], workspace: ['list', 'info', 'daily', 'changes'], collection: ['list', 'info'], credential: ['audit'], profile: ['show', 'proposals'], jobs: ['status'], index: ['status', 'verify'], memory: ['recent', 'timeline', 'range', 'search', 'grep', 'get', 'status', 'capabilities', 'adapter'], embed: ['status'], skills: ['list', 'show'] };
-export function isReadOnlyCommand(command: string | undefined, sub: string | undefined): boolean { if (!command) return true; if (command === 'query') return sub !== 'save'; if (command === 'memory' && sub === 'adapter') return true; return READ_ONLY_COMMANDS.has(command) || (READ_ONLY_SUBCOMMANDS[command]?.includes(sub ?? '') ?? false); }
+const READ_ONLY_COMMANDS = new Set(['doctor', 'verify', 'get', 'history', 'diff', 'grep', 'search', 'context', 'links', 'backlinks', 'related', 'query', 'capabilities', 'insight', 'storage']);
+const READ_ONLY_SUBCOMMANDS: Record<string, string[]> = { model: ['show', 'test'], wiki: ['lint', 'proposals'], intelligence: ['proposals'], workspace: ['list', 'info', 'daily', 'changes'], collection: ['list', 'info'], credential: ['audit'], profile: ['show', 'proposals'], jobs: ['status'], index: ['status', 'verify'], memory: ['recent', 'timeline', 'range', 'search', 'grep', 'get', 'status', 'capabilities', 'adapter'], embed: ['status'], skills: ['list', 'show'] };
+export function isReadOnlyCommand(command: string | undefined, sub: string | undefined, third?: string): boolean { if (!command) return true; if (command === 'query') return sub !== 'save'; if (command === 'memory' && sub === 'adapter') return true; if (command === 'chat') return ['list', 'get', 'search'].includes(sub ?? '') || (sub === 'project' && ['list', 'resolve'].includes(third ?? '')) || (sub === 'account' && third === 'list') || (sub === 'import' && ['preview', 'status'].includes(third ?? '')); return READ_ONLY_COMMANDS.has(command) || (READ_ONLY_SUBCOMMANDS[command]?.includes(sub ?? '') ?? false); }
 export async function execute(argv: string[]): Promise<unknown> {
   const { args, flags } = parse(argv);
   const [command, sub, third, fourth] = args;
@@ -316,13 +430,17 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'observe') return engine.observe({ sessionId: required(text(flags, 'session'), '--session'), body: await body(flags), source: text(flags, 'source') });
       if (sub === 'end') return engine.sessionEnd({ sessionId: required(text(flags, 'session'), '--session'), ...(flags.body || flags.file ? { body: await body(flags) } : {}) });
       break;
+    // Await here so a rejected chat operation settles before the shared activity
+    // cleanup runs; returning the promise lets a rejection become temporarily
+    // unhandled while the async finally block is still pending.
+    case 'chat': return await chatCommand(client, sub, third, flags);
     case 'model': {
       if (!sub || sub === 'show') return showModel(await v.config());
       if (sub === 'test') return testModel(await configuredProvider(root), await v.config());
       if (sub !== 'set') throw new MDBError('INVALID_INPUT', 'Usage: mdb model show | set | test');
       const bool = (name: string): boolean | undefined => flags[name] === undefined ? undefined : flags[name] === true || flags[name] === 'true';
       const localAgent = flags['local-agent'] === undefined ? undefined : flags['local-agent'] === true ? 'auto' : String(flags['local-agent']);
-      return setModel(v, { provider: text(flags, 'provider'), localAgent: localAgent as 'claude' | 'codex' | 'auto' | undefined, api: text(flags, 'api'), modelName: text(flags, 'model'), baseUrl: text(flags, 'base-url'), apiKeyEnv: text(flags, 'api-key-env'), command: text(flags, 'command'), allowNetwork: bool('allow-network'), allowPrivateContentToRemote: bool('allow-private-to-remote'), timeoutMs: number(flags, 'timeout-ms'), maxOutputTokens: number(flags, 'max-output-tokens'), maxInputTokens: number(flags, 'max-input-tokens'), locality: text(flags, 'locality') as 'local' | 'remote' | undefined, check: flags['no-check'] ? false : true });
+      return setModel(v, { provider: text(flags, 'provider'), localAgent: localAgent as 'claude' | 'codex' | 'auto' | undefined, api: text(flags, 'api'), modelName: text(flags, 'model'), baseUrl: text(flags, 'base-url'), apiKeyEnv: text(flags, 'api-key-env'), command: text(flags, 'command'), allowNetwork: bool('allow-network'), allowPrivateContentToRemote: bool('allow-private-to-remote'), redactPiiForLocal: bool('redact-pii-for-local'), timeoutMs: number(flags, 'timeout-ms'), maxOutputTokens: number(flags, 'max-output-tokens'), maxInputTokens: number(flags, 'max-input-tokens'), locality: text(flags, 'locality') as 'local' | 'remote' | undefined, check: flags['no-check'] ? false : true });
     }
     case 'profile':
       if (sub === 'show') return (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] }));
@@ -334,6 +452,8 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'proposals') return engine.proposals();
       break;
     case 'intelligence':
+      if (sub === 'approve' || sub === 'reject') return engine.review(required(third, 'proposal ID'), sub === 'approve', text(flags, 'reason'));
+      if (sub === 'proposals') return engine.proposals().then(proposals => proposals.filter(p => !text(flags, 'status') || p.status === text(flags, 'status')));
       if (sub === 'run' && text(flags, 'snapshot')) {
         if (text(flags, 'snapshot') !== 'now') throw new MDBError('INVALID_ARGUMENT', '--snapshot must be now'); if ((text(flags, 'stage') ?? 'daily') !== 'daily') throw new MDBError('INVALID_ARGUMENT', '--stage must be daily');
         return summarizeRun(await client.adaptive.runCycle({ kind: 'manual', ...(text(flags, 'key') ? { idempotencyKey: text(flags, 'key')! } : {}), signal: abort.signal }));
@@ -395,6 +515,33 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'sync') return client.search.sync();
       if (sub === 'verify') return v.verify();
       break;
+    case 'wiki':
+      if (sub === 'proposals') return (await engine.proposals()).filter(p => p.input.kind === 'wiki_change' && (!text(flags, 'status') || p.status === text(flags, 'status')));
+      if (sub === 'propose') {
+        const action = third; if (!['retire', 'restore', 'rename', 'merge'].includes(action ?? '')) throw new MDBError('INVALID_ARGUMENT', 'wiki propose requires retire, restore, rename, or merge');
+        const splitRef = (value: string, label: string) => { const match = /^(.*):(rev_[A-Za-z0-9_-]+)(?::(.*))?$/.exec(value); if (!match?.[1]) throw new MDBError('INVALID_ARGUMENT', `${label} must be URI:REVISION[:SPAN]`); return { uri: match[1], revisionId: match[2]!, ...(match[3] ? { span: match[3] } : {}) }; };
+        return engine.proposeWikiChange({ action: action as 'retire'|'restore'|'rename'|'merge', targetPageId: required(text(flags, action === 'merge' ? 'target' : 'page'), action === 'merge' ? '--target' : '--page'), targetRevisionId: required(text(flags, 'revision'), '--revision'), reason: text(flags, 'reason') ?? '', ...(action === 'restore' ? { restoreRevisionId: required(text(flags, 'to-revision'), '--to-revision') } : {}), ...(action === 'rename' ? { newTitle: required(text(flags, 'title'), '--title') } : {}), ...(action === 'merge' ? { mergeSources: (list(flags, 'source') ?? []).map(value => { const [pageId, revisionId, ...extra] = value.split(':'); if (!pageId || !revisionId || extra.length) throw new MDBError('INVALID_ARGUMENT', '--source must be ID:REVISION'); return { pageId, revisionId }; }), title: required(text(flags, 'title'), '--title'), body: await body(flags), evidence: (list(flags, 'evidence') ?? []).map(value => splitRef(value, '--evidence')) } : {}) });
+      }
+      if (sub === 'lint') {
+        const scopes = text(flags, 'scope')?.split(',').filter(Boolean).map(value => {
+          const scopeFlags: Flags = { scope: value }; return parseScope(scopeFlags);
+        });
+        const checks = text(flags, 'check')?.split(',').filter(Boolean);
+        const lintOptions = { ...(scopes ? { scopes } : {}), ...(checks ? { checks: checks as never } : {}), ...(text(flags, 'min-severity') ? { minSeverity: text(flags, 'min-severity') as never } : {}), ...(number(flags, 'limit') !== undefined ? { limit: number(flags, 'limit')! } : {}) };
+        return flags.propose ? engine.proposeFromLint({ issues: (await client.wikiLint(lintOptions)).issues, dryRun: flags['dry-run'] === true, limit: number(flags, 'proposal-limit') }) : client.wikiLint(lintOptions);
+      }
+      break;
+    case 'storage': {
+      const { storageStatus, cleanupPreview } = await import('../core/storage-lifecycle.js');
+      if (sub === 'status' || !sub) return storageStatus();
+      if (sub === 'breakdown') return storageStatus();
+      if (sub === 'cleanup') {
+        if (!flags['dry-run']) throw new MDBError('INVALID_ARGUMENT', 'storage cleanup is report-only; pass --dry-run to preview eligible orphan markers');
+        const preview = await cleanupPreview(); const status = await storageStatus();
+        return { ...preview, pressure: status.pressure };
+      }
+      throw new MDBError('INVALID_ARGUMENT', 'usage: mdb storage status|breakdown|cleanup --dry-run');
+    }
     case 'skills':
       if (sub === 'list') return client.skills();
       if (sub === 'show') return client.skill(required(third, 'skill name'));
@@ -403,7 +550,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); return { root: restored.root }; } return v.backup(resolve(id()));
   }
   throw new MDBError('INVALID_ARGUMENT', 'Unknown command. Run mdb help.');
-  } finally { process.removeListener('SIGINT', interrupt); if (!['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub)) await touchActivity(root); }
+  } finally { process.removeListener('SIGINT', interrupt); if (!['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); }
 }
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const unix = detectUnix(argv); if (unix) { process.exitCode = await unixMain(unix.command, unix.rest, unix.root); process.stdin.destroy(); return; } // Unix-style text tools: own option parsing and exit codes (docs/unix.md)

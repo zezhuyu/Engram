@@ -5,8 +5,10 @@ import { MDBError, type Document, type Scope } from '../core/types.js';
 import { Vault } from '../core/vault.js';
 import { IntelligenceEngine } from '../intelligence/index.js';
 import { DEFAULT_CAPTURE, DEFAULT_TOOL_ALLOWLIST, parseMemoryEvent, type MemoryEvent, type MemoryEventType, type Registration } from './types.js';
-import { redactText } from './redact.js';
-import { atomicWrite } from '../storage-local/index.js';
+import { ChatProjectRegistry, type ChatProvider, type ProjectMembership } from '../chat/projects.js';
+import { CAPTURE_TEXT_LIMIT, redactCaptureText } from './redact.js';
+import { atomicWrite, safePath } from '../storage-local/index.js';
+import { assertAvailableStorage } from '../core/storage-lifecycle.js';
 
 const DIR = '.mdb/capture';
 const dir = (root: string, ...parts: string[]) => path.join(root, DIR, ...parts);
@@ -14,6 +16,8 @@ export const queueCap = (): number => (Number(process.env.MDB_CAPTURE_QUEUE_CAP)
 const LOW_VALUE: MemoryEventType[] = ['tool.result', 'assistant.message'];
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
+const CAPTURE_QUEUE_TEMP = /^(\d{14}-[hl]-[a-f0-9]{8}\.json)\.(\d+)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.tmp$/;
+const CAPTURE_TEMP_SWEEP_LIMIT = 128;
 
 // ---- registrations -------------------------------------------------------------------------------------------------------------------
 export async function readRegistration(root: string, id: string): Promise<Registration | undefined> {
@@ -25,15 +29,26 @@ export async function listRegistrations(root: string): Promise<Registration[]> {
   return out;
 }
 /** Owner-only. Creates the identity binding that every later event is checked against, and grants that principal workspace access (the ACL still applies at every write). */
-export async function createRegistration(owner: Vault, input: { host: string; principalId: string; workspaceId: string; collectionId?: string; capture?: MemoryEventType[]; toolAllowlist?: string[]; excludePatterns?: string[]; consentPolicyId?: string; consent: boolean }): Promise<Registration> {
+export async function createRegistration(owner: Vault, input: { host: string; principalId: string; workspaceId: string; collectionId?: string; capture?: MemoryEventType[]; toolAllowlist?: string[]; excludePatterns?: string[]; consentPolicyId?: string; consent: boolean; chatSource?: { provider: ChatProvider; sourceAccountId: string } }): Promise<Registration> {
+  if (!owner.actor.permissions.includes('*')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Owner access is required to create a capture registration');
   if (input.consent !== true) throw new MDBError('INVALID_INPUT', 'Capture requires explicit consent');
   if (!SAFE.test(input.host) || !SAFE.test(input.principalId) || !SAFE.test(input.workspaceId)) throw new MDBError('INVALID_INPUT', 'Invalid host, principal or workspace');
+  if ((input.host === 'engram-chat-client') !== Boolean(input.chatSource)) throw new MDBError('INVALID_INPUT', 'Owned chat client registrations must bind a source account, and other hosts cannot claim one');
+  if (input.chatSource) {
+    if (!['chatgpt', 'claude', 'gemini', 'generic'].includes(input.chatSource.provider) || !SAFE.test(input.chatSource.sourceAccountId)) throw new MDBError('INVALID_INPUT', 'Invalid chat source identity');
+    if (input.workspaceId !== 'personal') throw new MDBError('INVALID_INPUT', 'Owned chat registrations use Personal as their registration scope; project routing is resolved per turn');
+    await new ChatProjectRegistry(owner).ensurePersonalWorkspace();
+    const account = (await new ChatProjectRegistry(owner).listSourceAccounts()).find(item => item.provider === input.chatSource!.provider && item.sourceAccountId === input.chatSource!.sourceAccountId && item.status === 'active');
+    if (!account) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Chat source account must be actively provisioned by the owner');
+    const expectedCapture: MemoryEventType[] = ['user.message', 'assistant.message'];
+    if (input.capture && expectedCapture.some(type => !input.capture!.includes(type))) throw new MDBError('INVALID_INPUT', 'Owned chat client must capture both user and assistant turns');
+  }
   for (const pattern of input.excludePatterns ?? []) { if (pattern.length > 200) throw new MDBError('INVALID_INPUT', 'Exclude pattern too long'); try { new RegExp(pattern); } catch { throw new MDBError('INVALID_INPUT', 'Invalid exclude pattern'); } }
   const workspaces = await owner.listWorkspaces(); if (!workspaces.some(w => w.id === input.workspaceId)) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Workspace not found');
   if (input.collectionId) await owner.listCollections(input.workspaceId).then(list => { if (!list.some(c => c.id === input.collectionId)) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Collection not found'); });
   await owner.grant(input.workspaceId, input.principalId, ['read', 'write']);
   await owner.setConfig(c => { c.capture.enabled = true; if (!c.capture.allowedSources.includes(input.host)) c.capture.allowedSources.push(input.host); });
-  const registration: Registration = { id: `reg_${randomBytes(8).toString('hex')}`, host: input.host, principalId: input.principalId, workspaceId: input.workspaceId, ...(input.collectionId ? { collectionId: input.collectionId } : {}), capture: input.capture ?? DEFAULT_CAPTURE, toolAllowlist: input.toolAllowlist ?? DEFAULT_TOOL_ALLOWLIST, excludePatterns: input.excludePatterns ?? [], consentPolicyId: input.consentPolicyId ?? 'owner-consent-v1', createdAt: new Date().toISOString(), permissions: [] };
+  const registration: Registration = { id: `reg_${randomBytes(8).toString('hex')}`, host: input.host, principalId: input.principalId, workspaceId: input.workspaceId, ...(input.collectionId ? { collectionId: input.collectionId } : {}), capture: input.capture ?? (input.chatSource ? ['user.message', 'assistant.message'] : DEFAULT_CAPTURE), toolAllowlist: input.toolAllowlist ?? DEFAULT_TOOL_ALLOWLIST, excludePatterns: input.excludePatterns ?? [], consentPolicyId: input.consentPolicyId ?? 'owner-consent-v1', createdAt: new Date().toISOString(), ...(input.chatSource ? { chatSource: input.chatSource } : {}), permissions: [] };
   await fs.mkdir(dir(owner.root, 'registrations'), { recursive: true, mode: 0o700 });
   await fs.writeFile(dir(owner.root, 'registrations', `${registration.id}.json`), JSON.stringify(registration, null, 1), { mode: 0o600 });
   return registration;
@@ -67,7 +82,8 @@ export function eventFromHostPayload(registration: Registration, payload: Record
   else { title = 'Session end'; content = `reason=${str(payload.reason) ?? 'unknown'}`; }
   const cwd = str(payload.cwd) ?? '';
   for (const pattern of registration.excludePatterns) { const re = new RegExp(pattern, 'i'); if (re.test(content) || re.test(cwd)) return undefined; }
-  const redacted = redactText(content).slice(0, 20_000);
+  const redacted = redactCaptureText(content);
+  const truncated = content.length > CAPTURE_TEXT_LIMIT;
   const discriminator = str(pick(payload, 'prompt_id', 'turn_id', 'turnId', 'tool_use_id')) ?? '';
   const capturedAt = str(payload._engramCapturedAt);
   const timestamp = capturedAt && Number.isFinite(Date.parse(capturedAt)) ? new Date(capturedAt).toISOString() : now.toISOString();
@@ -76,9 +92,58 @@ export function eventFromHostPayload(registration: Registration, payload: Record
     workspaceId: registration.workspaceId, ...(registration.collectionId ? { collectionId: registration.collectionId } : {}), principalId: registration.principalId, type,
     ...(str(payload.transcript_path) ? { sourceRef: String(payload.transcript_path).slice(0, 500) } : {}), contentHash: sha(redacted), classification: type === 'user.message' ? 'user_private' : 'workspace_private',
     consentPolicyId: registration.consentPolicyId, schemaVersion: 1, content: redacted, title,
-    ...(cwd ? { metadata: { project: path.basename(cwd).replace(/[^A-Za-z0-9._ -]/g, '_').slice(0, 80) || 'root', cwdHash: sha(cwd).slice(0, 12) } } : {})
+    ...(cwd || truncated ? { metadata: { ...(cwd ? { project: path.basename(cwd).replace(/[^A-Za-z0-9._ -]/g, '_').slice(0, 80) || 'root', cwdHash: sha(cwd).slice(0, 12) } : {}), ...(truncated ? { truncated: true, originalCharacters: content.length } : {}) } } : {})
   };
   return event;
+}
+
+/** Captures both sides of one turn from an Engram-controlled/instrumented chat client.
+ * The registration pins the provider account and destination authority; the client
+ * supplies only conversation/project identity and message text. Events use the
+ * existing durable spool and are journaled by the ordinary capture drain.
+ */
+export interface OwnedChatTurnInput {
+  conversationId: string; turnId: string; membership: ProjectMembership; externalProjectId?: string;
+  title?: string; userText: string; assistantText: string; timestamp?: string;
+}
+export async function captureOwnedChatTurn(root: string, registrationId: string, input: OwnedChatTurnInput): Promise<{ accepted: number; queued: number; route: 'routed' | 'pending' | 'review_required'; workspaceId?: string }> {
+  const registration = await readRegistration(root, registrationId);
+  if (!registration?.chatSource || registration.host !== 'engram-chat-client') throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Unknown, revoked, or non-chat capture registration');
+  if (!registration.capture.includes('user.message') || !registration.capture.includes('assistant.message')) throw new MDBError('INVALID_INPUT', 'Owned chat registration must capture both turn roles');
+  if (!SAFE.test(input.conversationId.replace(/[^A-Za-z0-9_.-]/g, '_')) || !SAFE.test(input.turnId.replace(/[^A-Za-z0-9_.-]/g, '_')) || input.conversationId.length > 500 || input.turnId.length > 240 || (input.externalProjectId?.length ?? 0) > 500) throw new MDBError('INVALID_INPUT', 'Invalid owned chat conversation, turn, or project ID');
+  if (!['member', 'standalone', 'unknown'].includes(input.membership)) throw new MDBError('INVALID_INPUT', 'Invalid chat project membership');
+  if (input.membership === 'member' && !input.externalProjectId || input.membership === 'standalone' && input.externalProjectId) throw new MDBError('INVALID_INPUT', 'Project identity and membership do not agree');
+  const timestamp = input.timestamp && Number.isFinite(Date.parse(input.timestamp)) ? new Date(input.timestamp).toISOString() : new Date().toISOString();
+  if (input.timestamp && !Number.isFinite(Date.parse(input.timestamp))) throw new MDBError('INVALID_INPUT', 'Invalid chat event timestamp');
+  const conversationId = input.conversationId, turnId = input.turnId;
+  const metadataBase: Record<string, string | number | boolean> = {
+    chatProvider: registration.chatSource.provider, chatSourceAccountId: registration.chatSource.sourceAccountId,
+    chatMembership: input.membership, externalConversationId: conversationId, conversationTitle: (input.title ?? '').slice(0, 500), turnId,
+    ...(input.externalProjectId ? { externalProjectId: input.externalProjectId } : {})
+  };
+  let accepted = 0;
+  for (const [speaker, type, raw] of [['user', 'user.message', input.userText], ['assistant', 'assistant.message', input.assistantText]] as const) {
+    if (typeof raw !== 'string' || !raw.trim() || raw.length > 100_000) throw new MDBError('INVALID_INPUT', 'Owned chat turns require non-empty messages no larger than 100000 characters');
+    const content = redactCaptureText(raw);
+    const event: MemoryEvent = {
+      eventId: sha([registration.id, conversationId, turnId, speaker, sha(content)].join('\0')).slice(0, 32), timestamp,
+      host: registration.host, sessionId: sha([registration.id, conversationId].join('\0')).slice(0, 40),
+      workspaceId: registration.workspaceId, principalId: registration.principalId, type,
+      classification: speaker === 'user' ? 'user_private' : 'workspace_private', consentPolicyId: registration.consentPolicyId,
+      schemaVersion: 1, content, title: `${speaker === 'user' ? 'User' : 'Assistant'} chat message`, contentHash: sha(content),
+      metadata: { ...metadataBase, speaker, externalMessageId: `${turnId}:${speaker}`, eventTime: timestamp }
+    };
+    if (await enqueueEvent(root, { registrationId, event }) === 'queued') accepted++;
+  }
+  if (accepted !== 2) return { accepted, queued: (await spoolStats(root)).queued, route: input.membership === 'unknown' ? 'review_required' : input.membership === 'member' ? 'pending' : 'routed' };
+  // Do not perform registry/vault reads in the producer path. A live client must
+  // durably enqueue promptly during a writer outage; the ordinary capture drain
+  // performs route resolution and retains unresolved entries for a later retry.
+  return {
+    accepted, queued: (await spoolStats(root)).queued,
+    route: input.membership === 'unknown' ? 'review_required' : input.membership === 'member' ? 'pending' : 'routed',
+    ...(input.membership === 'standalone' ? { workspaceId: 'personal' } : {})
+  };
 }
 
 /** An explicitly saved note, decision, finding or task completion (not a hook). Same registration checks, redaction and queue as passive events. */
@@ -86,30 +151,57 @@ export async function recordExplicit(root: string, registrationId: string, input
   const registration = await readRegistration(root, registrationId); if (!registration) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Unknown or revoked registration');
   if (!registration.capture.includes(input.type)) throw new MDBError('INVALID_INPUT', `This registration does not capture ${input.type}; reinstall with --capture including it`);
   if (!SAFE.test(input.sessionId.replace(/[^A-Za-z0-9_.-]/g, '_')) || !input.text.trim()) throw new MDBError('INVALID_INPUT', 'A session id and text are required');
-  const content = redactText(input.text).slice(0, 20_000);
-  const event: MemoryEvent = { eventId: sha([registration.host, input.sessionId, input.type, sha(content)].join('\0')).slice(0, 32), timestamp: new Date().toISOString(), host: registration.host, sessionId: input.sessionId.replace(/[^A-Za-z0-9_.:-]/g, '_'), workspaceId: registration.workspaceId, ...(registration.collectionId ? { collectionId: registration.collectionId } : {}), principalId: registration.principalId, type: input.type, contentHash: sha(content), classification: input.speaker === 'user' ? 'user_private' : 'workspace_private', consentPolicyId: registration.consentPolicyId, schemaVersion: 1, content, title: input.title ?? input.type, metadata: { speaker: input.speaker ?? 'assistant' } };
+  const content = redactCaptureText(input.text);
+  const truncated = input.text.length > CAPTURE_TEXT_LIMIT;
+  const event: MemoryEvent = { eventId: sha([registration.host, input.sessionId, input.type, sha(content)].join('\0')).slice(0, 32), timestamp: new Date().toISOString(), host: registration.host, sessionId: input.sessionId.replace(/[^A-Za-z0-9_.:-]/g, '_'), workspaceId: registration.workspaceId, ...(registration.collectionId ? { collectionId: registration.collectionId } : {}), principalId: registration.principalId, type: input.type, contentHash: sha(content), classification: input.speaker === 'user' ? 'user_private' : 'workspace_private', consentPolicyId: registration.consentPolicyId, schemaVersion: 1, content, title: input.title ?? input.type, metadata: { speaker: input.speaker ?? 'assistant', ...(truncated ? { truncated: true, originalCharacters: input.text.length } : {}) } };
   return enqueueEvent(root, { registrationId: registration.id, event });
 }
 
 // ---- durable bounded spool -----------------------------------------------------------------------------------------------------------
 export interface SpoolRecord { registrationId: string; event: MemoryEvent }
-/** Never blocks and never throws to the host: a full queue evicts or drops low-value events first and counts what it dropped. */
+/** A full queue rejects only the new event, reports that rejection to its caller, and never evicts accepted capture. */
 export async function enqueueEvent(root: string, record: SpoolRecord): Promise<'queued' | 'dropped'> {
+  const bytes = Buffer.byteLength(JSON.stringify(record)) + 4096;
+  await assertAvailableStorage(root, process.env, bytes);
   const queue = dir(root, 'queue'); await fs.mkdir(queue, { recursive: true, mode: 0o700 }); await fs.mkdir(dir(root, 'dropped'), { recursive: true, mode: 0o700 });
   const high = !LOW_VALUE.includes(record.event.type);
-  let names = await fs.readdir(queue);
+  await recoverCaptureQueueTemps(root);
+  const names = await fs.readdir(queue);
   if (names.filter(n => n.endsWith('.json')).length >= queueCap()) {
-    const victim = names.filter(n => n.includes('-l-')).sort()[0];
-    if (!high || !victim) { await fs.writeFile(dir(root, 'dropped', `${Date.now()}-${randomBytes(3).toString('hex')}`), record.event.type); return 'dropped'; }
-    await fs.rm(path.join(queue, victim), { force: true }); await fs.writeFile(dir(root, 'dropped', `${Date.now()}-${randomBytes(3).toString('hex')}`), 'evicted:' + victim);
+    const dropped = dir(root, 'dropped');
+    if ((await fs.readdir(dropped)).length < 1000) await fs.writeFile(dir(root, 'dropped', `${Date.now()}-${randomBytes(3).toString('hex')}`), record.event.type, { flag: 'wx', mode: 0o600 });
+    return 'dropped'; // explicit rejection; preserve all already accepted queue entries
   }
   const name = `${String(Date.now()).padStart(14, '0')}-${high ? 'h' : 'l'}-${randomBytes(4).toString('hex')}.json`;
-  await atomicWrite(root, `${DIR}/queue/${name}`, JSON.stringify(record));
-  names = []; return 'queued';
+  await atomicWrite(root, `${DIR}/queue/${name}`, JSON.stringify(record), undefined, process.pid);
+  return 'queued';
 }
 export async function spoolStats(root: string): Promise<{ queued: number; dropped: number; rejected: number }> {
-  const count = async (d: string) => (await fs.readdir(dir(root, d)).catch(() => [] as string[])).filter(n => !n.startsWith('.')).length;
-  return { queued: await count('queue'), dropped: await count('dropped'), rejected: await count('rejected') };
+  const names = async (d: string) => (await fs.readdir(dir(root, d)).catch(() => [] as string[])).filter(n => !n.startsWith('.'));
+  return { queued: (await names('queue')).filter(n => n.endsWith('.json')).length, dropped: (await names('dropped')).length, rejected: (await names('rejected')).length };
+}
+
+/** Reclaim only atomic queue temps tagged with a process that is certainly gone.
+ * Legacy UUID-only temp files are deliberately left untouched because their owner
+ * cannot be established. The bounded scan avoids turning recovery into unbounded I/O.
+ */
+export async function recoverCaptureQueueTemps(root: string): Promise<{ inspected: number; removed: number }> {
+  const queue = dir(root, 'queue');
+  const candidates = (await fs.readdir(queue).catch(() => [] as string[])).filter(name => CAPTURE_QUEUE_TEMP.test(name)).slice(0, CAPTURE_TEMP_SWEEP_LIMIT);
+  let removed = 0;
+  for (const name of candidates) {
+    const match = CAPTURE_QUEUE_TEMP.exec(name); if (!match) continue;
+    const pid = Number(match[2]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    try { process.kill(pid, 0); continue; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue; }
+    try {
+      const target = await safePath(root, `${DIR}/queue/${name}`);
+      const stat = await fs.lstat(target);
+      if (stat.isFile() && !stat.isSymbolicLink()) { await fs.unlink(target); removed++; }
+    } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  }
+  return { inspected: candidates.length, removed };
 }
 
 // ---- ingest ----------------------------------------------------------------------------------------------------------------------------
@@ -138,18 +230,39 @@ export async function ingestRecord(root: string, record: SpoolRecord, now = Date
   if (!config.capture.enabled || !config.capture.allowedSources.includes(event.host)) return { status: 'rejected', reason: 'capture is not enabled for this host' };
   for (const pattern of registration.excludePatterns) if (new RegExp(pattern, 'i').test(event.content ?? '')) return { status: 'rejected', reason: 'excluded by pattern' };
   const vault = new Vault(root, { actorId: registration.principalId, permissions: registration.permissions }); // ACL decides; a failed write is a rejection, never a bypass
-  const scope = scopeOf(registration);
+  let effectiveRegistration = registration;
+  if (registration.chatSource) {
+    const provider = event.metadata?.chatProvider, account = event.metadata?.chatSourceAccountId, membership = event.metadata?.chatMembership;
+    const expectedSpeaker = event.type === 'user.message' ? 'user' : event.type === 'assistant.message' ? 'assistant' : undefined;
+    if (registration.host !== 'engram-chat-client' || !expectedSpeaker || event.metadata?.speaker !== expectedSpeaker
+      || provider !== registration.chatSource.provider || account !== registration.chatSource.sourceAccountId
+      || typeof event.metadata?.externalConversationId !== 'string' || typeof event.metadata?.externalMessageId !== 'string'
+      || !['member', 'standalone', 'unknown'].includes(String(membership))) return { status: 'rejected', reason: 'chat event source identity does not match its trusted registration' };
+    const externalProjectId = typeof event.metadata?.externalProjectId === 'string' ? event.metadata.externalProjectId : undefined;
+    let route;
+    try {
+      route = await new ChatProjectRegistry(vault).resolveProject({ provider: registration.chatSource.provider, sourceAccountId: registration.chatSource.sourceAccountId, ...(externalProjectId ? { externalProjectId } : {}), membership: membership as ProjectMembership });
+    } catch (error) {
+      // Revoked accounts and malformed identity are terminal, not retryable routing outages.
+      if (error instanceof MDBError && ['NOT_FOUND_OR_FORBIDDEN', 'INVALID_INPUT'].includes(error.code)) return { status: 'rejected', reason: 'chat source or membership is no longer authorized' };
+      throw error;
+    }
+    if (route.status !== 'routed') throw new MDBError('CONFLICT', `Chat event routing remains ${route.status}; it is retained for later resolution`);
+    effectiveRegistration = { ...registration, workspaceId: route.workspaceId };
+  }
+  const scope = scopeOf(effectiveRegistration);
   try {
     const key = `memory:${event.host}:${event.eventId}`;
     if (await vault.byIdempotencyKey(key, scope)) return { status: 'duplicate', objectId: (await vault.byIdempotencyKey(key, scope))!.id };
-    const session = await ensureSession(vault, registration, event);
+    const session = await ensureSession(vault, effectiveRegistration, event);
     if (event.type === 'session.start') return { status: 'duplicate', objectId: session.id };
     if (event.type === 'session.end') { const closed = await new IntelligenceEngine(vault).sessionEnd({ sessionId: session.id, queue: new IntelligenceEngine(owner) }); return { status: 'ingested', objectId: closed.id }; }
     const speaker = event.type === 'user.message' ? 'user' : event.type === 'assistant.message' ? 'assistant' : event.type === 'tool.result' ? 'tool' : String(event.metadata?.speaker ?? 'assistant');
+    const isChat = registration.chatSource !== undefined;
     const doc = await vault.put({
-      scope, kind: KIND[event.type], title: event.title ?? event.type, body: redactText(event.content ?? ''), tags: ['memory', event.type],
+      scope, kind: isChat ? 'chat_message' : KIND[event.type], title: event.title ?? event.type, body: redactCaptureText(event.content ?? ''), tags: isChat ? ['chat', 'memory', event.type, `chat-provider-${registration.chatSource!.provider}`, `chat-account-${sha(registration.chatSource!.sourceAccountId).slice(0, 32)}`] : ['memory', event.type],
       evidence: [{ uri: session.uri, revisionId: session.revisionId }], idempotencyKey: key,
-      metadata: { sessionId: session.id, hostSessionId: event.sessionId, ...(typeof event.metadata?.project === 'string' ? { project: event.metadata.project } : {}), ...(typeof event.metadata?.cwdHash === 'string' ? { cwdHash: event.metadata.cwdHash } : {}), eventId: event.eventId, eventType: event.type, speaker, host: event.host, eventTime: event.timestamp, classification: event.classification, consentPolicyId: event.consentPolicyId, source: event.host, evidenceClass: speaker === 'user' ? 'user_authored' : 'agent_observation', ...(event.contentHash ? { contentHash: event.contentHash } : {}), ...(event.sourceRef ? { sourceRef: event.sourceRef } : {}), ...(event.agentId ? { agentId: event.agentId } : {}) }
+      metadata: { sessionId: session.id, hostSessionId: event.sessionId, ...(typeof event.metadata?.project === 'string' ? { project: event.metadata.project } : {}), ...(typeof event.metadata?.cwdHash === 'string' ? { cwdHash: event.metadata.cwdHash } : {}), ...(isChat ? { provider: registration.chatSource!.provider, sourceAccountId: registration.chatSource!.sourceAccountId, externalConversationId: event.metadata?.externalConversationId ?? '', externalMessageId: event.metadata?.externalMessageId ?? '', role: speaker, ...(typeof event.metadata?.externalProjectId === 'string' ? { externalProjectId: event.metadata.externalProjectId } : {}), ...(typeof event.metadata?.conversationTitle === 'string' ? { conversationTitle: event.metadata.conversationTitle } : {}), ...(typeof event.metadata?.eventTime === 'string' ? { sourceTimestamp: event.metadata.eventTime } : {}), ...(typeof event.metadata?.parentMessageId === 'string' ? { parentMessageId: event.metadata.parentMessageId } : {}), ...(typeof event.metadata?.branchId === 'string' ? { branchId: event.metadata.branchId } : {}) } : {}), eventId: event.eventId, eventType: event.type, speaker, host: event.host, eventTime: event.timestamp, classification: event.classification, consentPolicyId: event.consentPolicyId, source: event.host, evidenceClass: speaker === 'user' ? 'user_authored' : 'agent_observation', ...(event.contentHash ? { contentHash: event.contentHash } : {}), ...(event.sourceRef ? { sourceRef: event.sourceRef } : {}), ...(event.agentId ? { agentId: event.agentId } : {}) }
     });
     if (event.type === 'task.completed') await new IntelligenceEngine(owner).enqueue('reflect', { scope: session.scope, objectIds: [session.id, doc.id] });
     return { status: 'ingested', objectId: doc.id };
@@ -217,7 +330,10 @@ export async function drainSpool(root: string, options: { limit?: number; signal
     const result = await withDrainLock(root, async () => {
       const out: DrainResult = { processed: 0, ingested: 0, duplicates: 0, rejected: 0, deferred: 0 };
       // Events enqueued while this drain was working skipped their own drain (the lock was held), so look again before releasing, a bounded number of times.
-      for (let pass = 0; pass < 5; pass++) { const before = out.processed + out.deferred; await drainPass(root, options, out); if (out.processed + out.deferred === before || options.signal?.aborted) break; if ((await spoolStats(root)).queued === 0) break; }
+      // Retry after a pass only when records were actually removed. Deferred entries
+      // stay queued for a later invocation (for example after an ACL/project mapping
+      // change); spinning over them here adds load without making progress.
+      for (let pass = 0; pass < 5; pass++) { const before = out.processed; await drainPass(root, options, out); if (out.processed === before || options.signal?.aborted) break; if ((await spoolStats(root)).queued === 0) break; }
       return out;
     });
     return result ?? { processed: 0, ingested: 0, duplicates: 0, rejected: 0, deferred: 0, skipped: 'another drain is running' };
@@ -226,6 +342,7 @@ export async function drainSpool(root: string, options: { limit?: number; signal
 async function drainPass(root: string, options: { limit?: number; signal?: AbortSignal }, out: DrainResult): Promise<void> {
   {
     const queue = dir(root, 'queue'); await fs.mkdir(dir(root, 'rejected'), { recursive: true, mode: 0o700 });
+    await recoverCaptureQueueTemps(root);
     const names = (await fs.readdir(queue).catch(() => [] as string[])).filter(n => n.endsWith('.json') && !n.startsWith('.')).sort().slice(0, options.limit ?? 500);
     for (const name of names) {
       if (options.signal?.aborted) break;

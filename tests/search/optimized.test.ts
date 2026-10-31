@@ -141,6 +141,73 @@ test('journal overlay: create, update, tombstone, purge and restore after the ch
   recordCase({ suite: 'search-optimized', name: 'journal-overlay', status: 'PASS' });
 });
 
+test('SQLite query handles are reused without hiding journal or replacement-index updates', async t => {
+  const { root, vault } = await disposableVault(t);
+  await vault.createWorkspace('reader-cache');
+  const scope: Scope = { type: 'workspace', workspaceId: 'reader-cache' };
+  for (let i = 0; i < 8; i++) await vault.put({ scope, kind: 'note', title: `Cached ${i}`, body: `cachemarker original ${i}` });
+  await setSqlite(vault, true);
+  const engine = new SearchEngine(vault);
+  await engine.rebuild();
+  const internal = (engine as unknown as { sqlite: { open: (file: string, create: boolean) => Promise<DatabaseSync> } }).sqlite;
+  const originalOpen = internal.open.bind(internal); let readerOpens = 0;
+  internal.open = async (file, create) => { if (!create) readerOpens++; return originalOpen(file, create); };
+  try {
+    const query = async (q: string) => engine.query({ query: q, mode: 'keyword', limit: 20 });
+    assert.equal((await query('cachemarker')).hits.length, 8);
+    const afterFirstRead = readerOpens;
+    assert.equal((await query('cachemarker')).hits.length, 8);
+    assert.equal(readerOpens, afterFirstRead, 'the same indexed scope reuses its read-only connection');
+
+    const added = await vault.put({ scope, kind: 'note', title: 'Cached latest', body: 'cachemarker afterackmarker' });
+    assert.ok((await query('afterackmarker')).hits.some(hit => hit.objectId === added.id), 'unindexed acknowledged write is visible through the canonical journal overlay');
+    await engine.sync();
+    assert.ok((await query('afterackmarker')).hits.some(hit => hit.objectId === added.id), 'cached reader observes committed WAL synchronization');
+
+    const dbPath = path.join(root, '.mdb/indexes/workspace-reader-cache.sqlite');
+    for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) await fs.rm(file, { force: true });
+    await engine.rebuild();
+    const beforeReplacementRead = readerOpens;
+    assert.equal((await query('afterackmarker')).hits.length, 1);
+    assert.ok(readerOpens > beforeReplacementRead, 'replacement index inode retires the cached connection');
+    assert.deepEqual((await verifyInvariants(vault)).issues, []);
+  } finally { internal.open = originalOpen; }
+  recordCase({ suite: 'search-optimized', name: 'sqlite-read-handle-cache-freshness', status: 'PASS', detail: { readerOpens } });
+});
+
+test('SQLite lag maintenance is deferred off the query path and converges in the background', async t => {
+  const { vault } = await disposableVault(t);
+  await vault.createWorkspace('deferred-index');
+  const scope: Scope = { type: 'workspace', workspaceId: 'deferred-index' };
+  for (let i = 0; i < 200; i++) await vault.put({ scope, kind: 'note', title: `Baseline ${i}`, body: `baseline ${i}` });
+  await setSqlite(vault, true);
+  const engine = new SearchEngine(vault);
+  await engine.rebuild();
+  for (let i = 0; i < 257; i++) await vault.put({ scope, kind: 'note', title: `Dirty ${i}`, body: `dirtyoverlaymarker ${i}` });
+
+  const internal = (engine as unknown as { sqlite: { sync: () => Promise<unknown> } }).sqlite;
+  const originalSync = internal.sync.bind(internal);
+  let syncCalls = 0;
+  let syncComplete = false;
+  internal.sync = async () => {
+    syncCalls++;
+    try { return await originalSync(); }
+    finally { syncComplete = true; }
+  };
+  const first = await engine.query({ query: 'dirtyoverlaymarker', mode: 'keyword', limit: 300 });
+  assert.equal(first.hits.length, 257, 'the committed journal overlay makes every new result visible immediately');
+  assert.ok((((first as typeof first & { index?: { lagObjects?: number } }).index?.lagObjects) ?? 0) > 256, 'the initial query observes the complete index lag');
+  assert.equal(syncCalls, 0, 'query completion does not wait for a synchronous index transaction');
+
+  const deadline = Date.now() + 30_000;
+  while (!syncComplete && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(syncCalls, 1, 'one coalesced background synchronization is scheduled');
+  const settled = await engine.query({ query: 'dirtyoverlaymarker', mode: 'keyword', limit: 300 });
+  assert.equal(((settled as typeof settled & { index?: { lagObjects?: number } }).index?.lagObjects) ?? 0, 0, 'background index synchronization converges');
+  assert.equal(settled.hits.length, 257);
+  recordCase({ suite: 'search-optimized', name: 'sqlite-query-defers-bulk-sync', status: 'PASS', detail: { lagObjects: 257, syncCalls, immediatelyVisible: 257, queryWaitedForSync: false } });
+});
+
 test('damaged, foreign-format or inconsistent index databases degrade only their own scope, never correctness', async t => {
   const { root, vault, rng } = await randomCorpus(t, 31337, 70);
   await setSqlite(vault, true); const engine = new SearchEngine(vault); await engine.rebuild();

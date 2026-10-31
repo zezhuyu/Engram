@@ -22,6 +22,36 @@ export function currentQualityStatus(base: string | undefined, record: { status?
   return base === 'PASS' ? 'INCOMPLETE' : base ?? 'NOT_RUN';
 }
 
+export interface CurrentQualityRecord {
+  status?: string;
+  runAt?: string;
+  provider?: string;
+  model?: string | null;
+  semanticGrounding?: string;
+  humanAdjudication?: string;
+  rawResponses?: string;
+  evidenceSource?: { fingerprint?: string };
+  metrics?: { modes?: Record<string, { meanQuality?: number }> };
+}
+
+/** Report the current evaluation itself instead of inheriting a stale base-gate narrative. */
+export function currentQualityDetail(file: string, base: string, status: string, record: CurrentQualityRecord | undefined): string {
+  if (!record) return `Current-source quality evidence ${file}: ${status} (base ${base}); evaluation is missing.`;
+  const modes = Object.entries(record.metrics?.modes ?? {})
+    .map(([mode, result]) => `${mode}=${typeof result.meanQuality === 'number' && Number.isFinite(result.meanQuality) ? result.meanQuality.toFixed(3) : 'unreported'}`)
+    .join(', ');
+  const identity = [record.provider, record.model].filter((part): part is string => typeof part === 'string' && part.length > 0).join('/');
+  return [
+    `Current-source quality evidence ${file}: ${status} (base ${base}; evaluation ${record.status ?? 'unreported'}).`,
+    record.runAt ? `Run ${record.runAt}.` : 'Run timestamp missing.',
+    identity ? `Provider/model ${identity}.` : 'Provider/model unreported.',
+    record.evidenceSource?.fingerprint ? `Source ${record.evidenceSource.fingerprint}.` : 'Source fingerprint unreported.',
+    modes ? `Mode means: ${modes}.` : '',
+    `Semantic grounding ${record.semanticGrounding ?? 'unreported'}; human adjudication ${record.humanAdjudication ?? 'unreported'}.`,
+    record.rawResponses ? `Raw responses ${record.rawResponses}.` : 'Raw-response path unreported.',
+  ].filter(Boolean).join(' ');
+}
+
 /** Evidence is current only when it binds every source required by the consumer to the exact current bytes. */
 export function sourceEvidenceMatches(record: { evidenceSource?: { files?: Record<string, string> } } | undefined, current: Record<string, string>): boolean {
   const files = record?.evidenceSource?.files;
@@ -29,36 +59,88 @@ export function sourceEvidenceMatches(record: { evidenceSource?: { files?: Recor
 }
 export interface Exclusion { id: string; approvedBy: string; reason: string; approvedAt: string; signature: string }
 export type ReleaseLevel = 'NOT_RELEASABLE' | 'BETA' | 'GA_ELIGIBLE';
-export interface PolicyInput { storageVerdict: string; openAreas: string[]; openGates: string[]; failedGates: string[]; evidence: ProductionEvidence[]; exclusions: unknown }
+export type ReleaseProfileName = 'core-beta' | 'full-intelligence-beta' | 'ga';
+export interface PolicyInput {
+  storageVerdict: string; openAreas: string[]; openGates: string[]; failedGates: string[]; evidence: ProductionEvidence[]; exclusions: unknown;
+  profile?: ReleaseProfileName;
+  requiredAreas?: Array<{ id: string; status: string }>;
+  requiredGates?: Array<{ id: string; status: string }>;
+  disabledFeatures?: string[];
+  disabledFeaturesAttestation?: unknown;
+  sourceFingerprint?: string;
+}
 export interface PolicyResult {
   level: ReleaseLevel; automatedGatesPass: boolean; failedGates: string[]; openAreas: string[]; openGates: string[];
   incompleteEvidence: ProductionEvidence[]; validExclusions: Exclusion[]; ignoredExclusions: Array<{ entry: unknown; problem: string }>; excludedEvidence: string[]; blockers: string[]; summary: string;
+  profile?: ReleaseProfileName;
 }
 
-export interface SuiteEvidenceLike { status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[] }
-export interface SuiteInventory { minimumTests: number; requiredTests: string[]; requiredCases: string[] }
+export interface ReleaseAuthorization {
+  schemaVersion: 1;
+  purpose: 'engram-release';
+  sourceFingerprint: string;
+  ref: string;
+  commit: string;
+  profile: ReleaseProfileName;
+  releaseLevel: 'BETA' | 'GA_ELIGIBLE';
+  approvedBy: string;
+  approvedAt: string;
+  signature: string;
+}
+
+/** Owner authorization is a detached, source/tag-bound signature; editable workflow inputs are not authority. */
+export function verifyReleaseAuthorization(
+  value: unknown,
+  expected: { sourceFingerprint: string; ref: string; commit: string; profile: ReleaseProfileName; releaseLevel: 'BETA' | 'GA_ELIGIBLE' },
+  publicKey: string | undefined,
+  now = Date.now(),
+): value is ReleaseAuthorization {
+  const record = value as Partial<ReleaseAuthorization> | undefined;
+  const at = typeof record?.approvedAt === 'string' ? Date.parse(record.approvedAt) : NaN;
+  const age = now - at;
+  return record?.schemaVersion === 1 && record.purpose === 'engram-release'
+    && typeof record.approvedBy === 'string' && record.approvedBy.trim().length > 0
+    && record.sourceFingerprint === expected.sourceFingerprint && record.ref === expected.ref
+    && record.commit === expected.commit && record.profile === expected.profile && record.releaseLevel === expected.releaseLevel
+    && Number.isFinite(at) && age >= -5 * 60_000 && age <= 7 * 24 * 3600_000
+    && trustedSignature(record, publicKey, 'signature');
+}
+
+export interface SuiteEvidenceLike { status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[]; environment?: Record<string, unknown> }
+export interface SuiteInventory { minimumTests: number; requiredTests: string[]; requiredCases: string[]; casesByPlatform?: Record<string, string[]> }
 export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined): boolean {
   // Arithmetic consistency alone cannot establish suite completeness: an
   // attacker (or accidental partial run) can shrink tests and totals together.
   if (!inventory || !Number.isInteger(inventory.minimumTests) || inventory.minimumTests < 1
     || !Array.isArray(inventory.requiredTests) || !Array.isArray(inventory.requiredCases)
-    || inventory.requiredTests.length === 0 || inventory.requiredCases.length === 0) return false;
+    || inventory.requiredTests.length === 0) return false;
   if (!report || !Array.isArray(report.tests) || !Array.isArray(report.caseDetails) || !Array.isArray(report.caseFailures) || !report.counts) return false;
   const counts = report.counts;
   const actual = { pass: report.tests.filter(t => t.status === 'PASS').length, fail: report.tests.filter(t => t.status === 'FAIL').length, skipped: report.tests.filter(t => t.status === 'SKIPPED').length, total: report.tests.length };
   if (Object.keys(actual).some(k => counts[k as keyof typeof actual] !== actual[k as keyof typeof actual]) || report.cases !== report.caseDetails.length) return false;
   if (report.caseFailures.length !== report.caseDetails.filter(c => c.status === 'FAIL').length) return false;
   if (report.tests.some(t => !['PASS', 'FAIL', 'SKIPPED'].includes(String(t.status))) || report.caseDetails.some(c => !['PASS', 'FAIL'].includes(String(c.status)))) return false;
-  const testNames = report.tests.map(t => t.name);
-  const caseNames = report.caseDetails.map(c => c.name);
+  const testNames = report.tests.map(t => typeof t.name === 'string' ? t.name : '');
+  const caseNames = report.caseDetails.map(c => typeof c.name === 'string' ? c.name : '');
   if (testNames.some(n => typeof n !== 'string' || !n) || new Set(testNames).size !== testNames.length || caseNames.some(n => typeof n !== 'string' || !n) || new Set(caseNames).size !== caseNames.length) return false;
-  const validCaseNames = caseNames.filter((n): n is string => typeof n === 'string');
-  if (report.tests.length < inventory.minimumTests || inventory.requiredTests.some(n => !testNames.includes(n))
-    || inventory.requiredCases.some(n => !validCaseNames.includes(n)) || validCaseNames.some(n => !inventory.requiredCases.includes(n))) return false;
+  const validCaseNames = caseNames;
+  // The test list is an exact, reviewed inventory. A renamed, omitted, or newly
+  // added mandatory test must invalidate evidence until the inventory is updated.
+  if (report.tests.length !== inventory.minimumTests || !sameStrings(testNames, inventory.requiredTests)) return false;
+  const platform = typeof report.environment?.platform === 'string' ? report.environment.platform : undefined;
+  const expectedCases = platform && inventory.casesByPlatform?.[platform];
+  if (inventory.casesByPlatform && (!platform || !expectedCases || !sameStrings(validCaseNames, expectedCases))) return false;
+  if (!inventory.casesByPlatform && (inventory.requiredCases.some(n => !validCaseNames.includes(n)) || validCaseNames.some(n => !inventory.requiredCases.includes(n)))) return false;
   if (report.status === 'PASS') return report.exitCode === 0 && actual.fail === 0 && report.caseFailures.length === 0 && actual.total > 0;
   if (report.status === 'FAIL') return report.exitCode !== 0 || actual.fail > 0 || report.caseFailures.length > 0;
   if (report.status === 'SKIPPED') return report.exitCode === 0 && actual.total > 0;
   return report.status === 'NOT_RUN' && actual.total === 0;
+}
+
+function sameStrings(actual: string[], expected: string[]): boolean {
+  if (new Set(actual).size !== actual.length || new Set(expected).size !== expected.length || actual.length !== expected.length) return false;
+  const right = new Set(expected);
+  return actual.every(value => right.has(value));
 }
 
 export function performanceSourceMatches(binding: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } | undefined, current: { fingerprint: string; files: Record<string, string> }, required: string[]): boolean {
@@ -188,18 +270,35 @@ export function validateExclusions(raw: unknown, knownIds: string[], trustedPubl
   return { valid, ignored };
 }
 
+const CORE_DISABLED_FEATURES = ['adaptive-intelligence', 'dream', 'preferences', 'wiki'];
+function coreFeatureProfileValid(input: PolicyInput, trustedPublicKey?: string): boolean {
+  if (input.profile !== 'core-beta') return true;
+  const record = input.disabledFeaturesAttestation as { profile?: string; sourceFingerprint?: string; disabledFeatures?: string[]; artifacts?: Record<string, string>; observedAt?: string } | undefined;
+  return record?.profile === 'core-beta'
+    && !!input.sourceFingerprint && record.sourceFingerprint === input.sourceFingerprint
+    && freshAttestation(record)
+    && sameStrings(record.disabledFeatures ?? [], CORE_DISABLED_FEATURES)
+    && !!record.artifacts && Object.keys(record.artifacts).length > 0
+    && Object.values(record.artifacts).every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash))
+    && trustedSignature(record, trustedPublicKey);
+}
+
 export function classifyRelease(input: PolicyInput, trustedPublicKey?: string): PolicyResult {
   const { valid, ignored } = validateExclusions(input.exclusions, input.evidence.map(e => e.id), trustedPublicKey);
   const excludedIds = new Set(valid.map(e => e.id));
   const incomplete = input.evidence.filter(e => e.status !== 'PASS' && !excludedIds.has(e.id));
   const failedEvidence = incomplete.filter(e => e.status === 'FAIL');
-  const automatedGatesPass = input.storageVerdict === 'PASS' && !input.openAreas.length && !input.openGates.length && !input.failedGates.length;
-  const hardFail = input.storageVerdict !== 'PASS' || input.failedGates.length > 0 || failedEvidence.length > 0;
-  const blockers = [...input.failedGates.map(g => `gate ${g} FAIL`), ...input.openAreas.map(a => `area ${a} not PASS`), ...input.openGates.map(g => `mandatory gate ${g} not PASS`), ...incomplete.map(e => `production evidence ${e.id} ${e.status}`)];
+  const profile = input.profile ?? 'ga';
+  const requiredAreaProblems = (input.requiredAreas ?? []).filter(a => a.status !== 'PASS');
+  const requiredGateProblems = (input.requiredGates ?? []).filter(g => g.status !== 'PASS');
+  const featureProfileValid = coreFeatureProfileValid(input, trustedPublicKey);
+  const automatedGatesPass = input.storageVerdict === 'PASS' && !input.openAreas.length && !input.openGates.length && !input.failedGates.length && !requiredAreaProblems.length && !requiredGateProblems.length && featureProfileValid;
+  const hardFail = input.storageVerdict !== 'PASS' || input.failedGates.length > 0 || failedEvidence.length > 0 || input.openAreas.length > 0 || input.openGates.length > 0 || requiredAreaProblems.length > 0 || requiredGateProblems.length > 0 || !featureProfileValid || (profile === 'ga' && incomplete.length > 0);
+  const blockers = [...input.failedGates.map(g => `gate ${g} FAIL`), ...input.openAreas.map(a => `area ${a} not PASS`), ...input.openGates.map(g => `mandatory gate ${g} not PASS`), ...requiredAreaProblems.map(a => `profile ${profile} requires area ${a.id} PASS (got ${a.status})`), ...requiredGateProblems.map(g => `profile ${profile} requires gate ${g.id} PASS (got ${g.status})`), ...(!featureProfileValid ? ['profile core-beta requires a trusted, current-source signed disabled capability attestation with artifact hashes'] : []), ...incomplete.map(e => `production evidence ${e.id} ${e.status}`)];
   const level: ReleaseLevel = hardFail ? 'NOT_RELEASABLE' : automatedGatesPass && !incomplete.length ? 'GA_ELIGIBLE' : 'BETA';
   const summary = level === 'GA_ELIGIBLE' ? 'GA-eligible: every automated gate passes and every production-evidence item is PASS or has a valid owner-approved exclusion. This is eligibility only; the release decision belongs to the owner.'
     : level === 'BETA' ? `BETA: ${blockers.length} open item(s) block GA. Passing the automated gates does not imply GA readiness.` : `NOT RELEASABLE: ${blockers.filter(b => /FAIL/.test(b) || /^area STORAGE/.test(b)).join('; ') || 'storage is not PASS'}.`;
-  return { level, automatedGatesPass, failedGates: input.failedGates, openAreas: input.openAreas, openGates: input.openGates, incompleteEvidence: incomplete, validExclusions: valid, ignoredExclusions: ignored, excludedEvidence: [...excludedIds], blockers, summary };
+  return { level, profile, automatedGatesPass, failedGates: input.failedGates, openAreas: input.openAreas, openGates: input.openGates, incompleteEvidence: incomplete, validExclusions: valid, ignoredExclusions: ignored, excludedEvidence: [...excludedIds], blockers, summary };
 }
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';

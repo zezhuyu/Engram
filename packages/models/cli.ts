@@ -1,17 +1,19 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, promises as fs, statSync } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { MDBError, type CriticVerdict, type CritiqueRequest, type ModelCallOptions, type ModelProposal, type ModelProvider, type ModelRequest } from '../core/types.js';
 import { CancelledError, ProviderError } from './errors.js';
-import { critiqueMessages, estimateTokens, generationMessages, type ChatMessage } from './prompts.js';
+import { critiqueMessages, estimateTokens, generationMessages, providerMessages, type ChatMessage } from './prompts.js';
 import { extractJson, parseModelProposal, parseVerdict } from './schema.js';
+import { createOwnedOperation } from '../core/storage-lifecycle.js';
+import { redactText } from '../memory/redact.js';
 
 export type CliKind = 'claude' | 'codex';
 export interface CliProviderOptions {
   id: string; kind: CliKind; command: string; model?: string;
   /** claude and codex send prompts to their vendor's cloud, so the default is 'remote'. Set 'local' only for a wrapper that keeps data on this machine. */
   locality: 'local' | 'remote';
+  redactPiiForLocal?: boolean;
   timeoutMs: number; maxRetries: number; maxInputTokens: number;
   extraArgs?: string[]; env?: NodeJS.ProcessEnv;
 }
@@ -34,8 +36,8 @@ export class CliAgentProvider implements ModelProvider {
   }
   /** Optional diagnostic tap for the raw text of each completion (evaluation only; never set in production paths). */
   onResponse?: (text: string, job: string) => void;
-  async generate(input: ModelRequest, options: ModelCallOptions = {}): Promise<ModelProposal> { const text = await this.complete(generationMessages(input), options); this.onResponse?.(text, input.job); return parseModelProposal(extractJson(text)); }
-  async critique(input: CritiqueRequest, options: ModelCallOptions = {}): Promise<CriticVerdict> { return parseVerdict(extractJson(await this.complete(critiqueMessages(input), options))); }
+  async generate(input: ModelRequest, options: ModelCallOptions = {}): Promise<ModelProposal> { const text = redactText(await this.complete(providerMessages(generationMessages(input), this.locality, this.options.redactPiiForLocal), options)); this.onResponse?.(text, input.job); return parseModelProposal(extractJson(text)); }
+  async critique(input: CritiqueRequest, options: ModelCallOptions = {}): Promise<CriticVerdict> { return parseVerdict(extractJson(redactText(await this.complete(providerMessages(critiqueMessages(input), this.locality, this.options.redactPiiForLocal), options)))); }
 
   private async complete(messages: ChatMessage[], call: ModelCallOptions): Promise<string> {
     if (call.signal?.aborted) throw new CancelledError();
@@ -53,17 +55,23 @@ export class CliAgentProvider implements ModelProvider {
   }
 
   private async once(prompt: string, signal?: AbortSignal): Promise<string> {
-    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-agent-'));
+    const operation = await createOwnedOperation('engram-agent');
+    const cwd = operation.directory;
     const outputFile = path.join(cwd, 'last-message.txt');
     const env = { ...(this.options.env ?? process.env) }; for (const name of SCRUBBED_ENV) delete env[name];
+    // Keep scratch created by the child CLI beneath this uniquely owned operation too;
+    // vendor home/cache locations remain host-owned exceptions.
+    env.TMPDIR = cwd; env.TMP = cwd; env.TEMP = cwd;
     try {
       return await new Promise<string>((resolve, reject) => {
         const child = spawn(this.options.command, cliArguments(this.options.kind, { cwd, outputFile, ...(this.options.model ? { model: this.options.model } : {}), ...(this.options.extraArgs ? { extraArgs: this.options.extraArgs } : {}) }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false });
-        let stdout = '', size = 0, settled = false, timedOut = false, tooLarge = false;
-        const finish = (action: () => void) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', onAbort); action(); };
+        let stdout = '', size = 0, settled = false, timedOut = false, tooLarge = false, aborted = false, quotaExceeded = false;
+        const finish = (action: () => void) => { if (settled) return; settled = true; clearTimeout(timer); clearInterval(quotaTimer); signal?.removeEventListener('abort', onAbort); action(); };
         const stop = () => { child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 2000).unref(); };
         const timer = setTimeout(() => { timedOut = true; stop(); }, this.options.timeoutMs);
-        const onAbort = () => { stop(); finish(() => reject(new CancelledError())); };
+        const quotaTimer = setInterval(() => { void operation.checkQuota().catch(() => { quotaExceeded = true; stop(); }); }, 500);
+        quotaTimer.unref();
+        const onAbort = () => { aborted = true; stop(); };
         signal?.addEventListener('abort', onAbort, { once: true });
         child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_STDOUT) { tooLarge = true; stop(); return; } stdout += chunk.toString('utf8'); });
         child.stderr.on('data', () => { /* never stored or surfaced: it may echo prompts */ });
@@ -71,6 +79,8 @@ export class CliAgentProvider implements ModelProvider {
         child.on('error', (error: NodeJS.ErrnoException) => finish(() => reject(error.code === 'ENOENT' ? new ProviderError('Agent CLI not found on PATH', false) : new ProviderError('Agent CLI could not be started', false))));
         child.on('close', async (code) => {
           if (settled) return;
+          if (aborted) return finish(() => reject(new CancelledError()));
+          if (quotaExceeded) return finish(() => reject(new ProviderError('Engram temporary storage quota reached; the model job was deferred', true)));
           if (tooLarge) return finish(() => reject(new ProviderError('Agent CLI output exceeded the size limit', false)));
           if (timedOut) return finish(() => reject(new ProviderError('Agent CLI timed out', true)));
           if (code !== 0) return finish(() => reject(new ProviderError(`Agent CLI exited with status ${code}`, true)));
@@ -80,7 +90,7 @@ export class CliAgentProvider implements ModelProvider {
         });
         child.stdin.end(prompt);
       });
-    } finally { await fs.rm(cwd, { recursive: true, force: true }); }
+    } finally { await operation.cleanup(); }
   }
 }
 

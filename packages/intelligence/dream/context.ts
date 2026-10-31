@@ -2,7 +2,7 @@ import type { Document } from '../../core/types.js';
 import type { Vault } from '../../core/vault.js';
 import { manifestFor, type ManifestEntry } from '../../search-files/manifest.js';
 import { loadDocuments, readableEntries } from '../corpus.js';
-import { KNOWLEDGE_KINDS } from './plan.js';
+import { KNOWLEDGE_KINDS, words } from './plan.js';
 import { readStats } from './lifecycle.js';
 import { learnedSuccess } from './learning.js';
 import type { Graph, PlanContext, Budgets } from './types.js';
@@ -55,7 +55,9 @@ export async function semanticAssociations(vault: Vault, pool: ManifestEntry[], 
 }
 export async function planContext(vault: Vault, pool: ManifestEntry[], budgets: Budgets, rng: () => number, options: { search?: SearchEngine; semantic?: boolean } = {}): Promise<PlanContext & { knownDiscoveries: number; semanticAssociationCount: number }> {
   const semantic = options.semantic === false ? new Map<string, Set<string>>() : await semanticAssociations(vault, pool, options.search);
-  const [graph, stats, supp] = await Promise.all([graphFor(vault, pool, semantic), readStats(vault), suppression(vault, pool)]);
-  return { pool, graph, budgets, rng, success: await learnedSuccess(vault, stats), suppressed: supp.suppressed, knownDiscoveries: supp.known, semanticAssociationCount: [...semantic.values()].reduce((sum, ids) => sum + ids.size, 0) / 2 };
+  const recent = [...pool].sort((a, b) => a.at < b.at ? 1 : a.at > b.at ? -1 : a.id.localeCompare(b.id)).slice(0, 512);
+  const [graph, stats, supp, documents] = await Promise.all([graphFor(vault, pool, semantic), readStats(vault), suppression(vault, pool), loadDocuments(vault, recent)]);
+  const bodyTerms = new Map(documents.map(doc => [doc.id, [...new Set(words(`${doc.title} ${doc.body.slice(0, 6000)}`))].slice(0, 80)]));
+  return { pool, graph, budgets, rng, bodyTerms, success: await learnedSuccess(vault, stats), suppressed: supp.suppressed, knownDiscoveries: supp.known, semanticAssociationCount: [...semantic.values()].reduce((sum, ids) => sum + ids.size, 0) / 2 };
 }
 export type { Document };

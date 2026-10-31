@@ -49,6 +49,18 @@ test('sources, scope defaults, collection narrowing and metadata projections com
   assert.deepEqual(await rowsOf(w.owner, { from: 'documents', scope: { workspace: 'app' }, where: { field: 'tags', op: 'contains', value: 'idea' }, pipe: [{ op: 'select', fields: ['title', 'workspace', 'visibility'] }] }), [{ title: 'Ideas', workspace: 'app', visibility: 'workspace' }]);
   rec('sources-and-scope');
 });
+
+test('rejected discoveries are hidden by default and history inspection requires explicit authorized opt-in', async t => {
+  const w = await world(t);
+  const rejected = await w.vault.put({ scope: { type: 'global', area: 'discoveries' }, kind: 'discovery', title: 'Rejected composition', body: 'private rejected composition marker', status: 'rejected' });
+  assert.deepEqual(await rowsOf(w.owner, { from: 'discoveries', search: { mode: 'keyword', text: 'private rejected composition marker' } }), []);
+  assert.deepEqual(await rowsOf(w.owner, { from: 'discoveries', scope: { includeRejected: false }, where: { field: 'id', op: 'eq', value: rejected.id } }), []);
+  const explicit = await rowsOf(w.owner, { from: 'discoveries', scope: { includeRejected: true }, where: { field: 'id', op: 'eq', value: rejected.id } });
+  assert.equal(explicit.length, 1);
+  await assert.rejects(w.agent.run({ version: 1, from: 'discoveries', scope: { includeRejected: true }, where: { field: 'id', op: 'eq', value: rejected.id } }), { code: 'NOT_FOUND_OR_FORBIDDEN' });
+  await assert.rejects(w.agent.run({ version: 1, from: 'discoveries', scope: { includeRejected: true }, search: { mode: 'keyword', text: 'private rejected composition marker' } }), { code: 'NOT_FOUND_OR_FORBIDDEN' });
+  rec('rejected-discovery-query-opt-in');
+});
 test('search modes: exact, keyword, regex and auto go through the index-backed engine, with transparent backend info', async t => {
   const w = await world(t);
   const exact = await w.owner.run({ version: 1, from: 'documents', search: { mode: 'exact', text: 'rollback works' }, pipe: [{ op: 'select', fields: ['id', 'score'] }] }); assert.deepEqual(idsOf(exact.rows), [w.d.deploy!]);

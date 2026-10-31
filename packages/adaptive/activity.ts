@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { ensureStorageDirectory, resolveStoragePath } from '../core/root.js';
 import type { CommitEvent } from '../core/types.js';
 import type { Vault } from '../core/vault.js';
 import { atomicWrite, safePath } from '../storage-local/index.js';
@@ -19,19 +19,20 @@ const inRanges = (sequence: number, ranges: Array<[number, number]>): boolean =>
  * in `activity/<sha256 of the vault's real path>.json`. It is written only for vaults that have an enabled schedule (the marker exists so the nightly Dream waits while someone works)
  * and only by commands that are not read-only; the CLI never calls it for search, grep, get, list, context or query. Best effort and throttled; it can never fail the caller.
  */
-const stateDir = (): string => process.env.ENGRAM_STATE_DIR ?? path.join(process.env.XDG_STATE_HOME ?? path.join(os.homedir(), '.local', 'state'), 'engram');
-async function activityFile(root: string): Promise<string> { const real = await fs.realpath(root).catch(() => path.resolve(root)); return path.join(stateDir(), 'activity', `${createHash('sha256').update(real).digest('hex').slice(0, 32)}.json`); }
+const stateDir = (env: Record<string, string | undefined> = process.env): string => resolveStoragePath('state', env);
+async function activityFile(root: string, env: Record<string, string | undefined> = process.env): Promise<string> { const real = await fs.realpath(root).catch(() => path.resolve(root)); return path.join(stateDir(env), 'activity', `${createHash('sha256').update(real).digest('hex').slice(0, 32)}.json`); }
 async function scheduleEnabled(root: string): Promise<boolean> { try { return (JSON.parse(await fs.readFile(await safePath(root, '.mdb/adaptive/config.json'), 'utf8')) as { enabled?: boolean }).enabled === true; } catch { return false; } }
-export async function touchActivity(root: string, now = new Date()): Promise<void> {
+export async function touchActivity(root: string, now = new Date(), env: Record<string, string | undefined> = process.env): Promise<void> {
   try {
     if (!(await scheduleEnabled(root))) return;
-    const file = await activityFile(root); const stat = await fs.stat(file).catch(() => undefined); if (stat && now.getTime() - stat.mtimeMs < 2000) return;
+    await ensureStorageDirectory('state', env);
+    const file = await activityFile(root, env); const stat = await fs.stat(file).catch(() => undefined); if (stat && now.getTime() - stat.mtimeMs < 2000) return;
     await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 }); const temporary = `${file}.${process.pid}.tmp`; await fs.writeFile(temporary, JSON.stringify({ at: now.toISOString() }), { mode: 0o600 }); await fs.rename(temporary, file);
   } catch { /* activity tracking is advisory */ }
 }
-async function touched(root: string): Promise<number> {
+async function touched(root: string, env: Record<string, string | undefined> = process.env): Promise<number> {
   const read = async (file: string): Promise<number> => { try { return Date.parse((JSON.parse(await fs.readFile(file, 'utf8')) as { at: string }).at) || 0; } catch { return 0; } };
-  return Math.max(await read(await activityFile(root)), await read(await safePath(root, ACTIVITY).catch(() => '')).catch(() => 0)); // the legacy in-vault marker written by older versions is still honored
+  return Math.max(await read(await activityFile(root, env)), await read(await safePath(root, ACTIVITY).catch(() => '')).catch(() => 0)); // the legacy in-vault marker written by older versions is still honored
 }
 /** Most recent foreground activity: an explicit touch or a non-background journal commit, ignoring sequence ranges the running cycle committed itself. */
 export async function lastForegroundAt(vault: Vault, ownRanges: Array<[number, number]> = []): Promise<number> {

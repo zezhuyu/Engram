@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { ensureStorageDirectory, resolveStoragePath } from '../core/root.js';
 import { redactText } from './redact.js';
 import { syncDirectory } from '../storage-local/index.js';
+import { storageQuota } from '../core/storage-lifecycle.js';
+import { assertAvailableStorage } from '../core/storage-lifecycle.js';
 
 /**
  * Client-side durable outbox for writes an agent made while the Engram server was unreachable (task, note and handoff upserts). An entry is the tool call itself
@@ -20,7 +22,7 @@ export type Delivery = 'delivered' | 'conflict' | 'rejected' | 'retry' | 'offlin
 /** Days of offline work must fit: the bound exists to stop a runaway loop, not to drop a user's writes (override for tests with ENGRAM_OUTBOX_CAP). */
 export const OUTBOX_CAP = Number(process.env.ENGRAM_OUTBOX_CAP) > 0 ? Number(process.env.ENGRAM_OUTBOX_CAP) : 5000;
 export const MAX_ENTRY_BYTES = 700 * 1024;
-export const defaultOutboxDirectory = (): string => process.env.ENGRAM_OUTBOX ?? path.join(os.homedir(), '.Engram-outbox');
+export const defaultOutboxDirectory = (env: NodeJS.ProcessEnv = process.env): string => resolveStoragePath('outbox', env);
 
 /** Entries for the same record must be replayed in order, so the record's identity is part of the entry. */
 export function entryKey(tool: string, args: Record<string, unknown>): string {
@@ -34,6 +36,8 @@ const ENTRY_NAME = /^\d{14}-[0-9a-f-]{36}\.json$/;
 const jsonNames = async (directory: string): Promise<string[]> => (await fs.readdir(directory).catch(() => [] as string[])).filter(name => ENTRY_NAME.test(name)).sort();
 
 export async function enqueueWrite(directory: string, input: { url: string; workspaceId?: string; tool: string; arguments: Record<string, unknown>; serverTime?: string; baseRevisionId?: string; baseArguments?: Record<string, unknown> }): Promise<OutboxEntry> {
+  await assertAvailableStorage(directory, process.env, 4096 + Buffer.byteLength(JSON.stringify(input.arguments)));
+  if (path.resolve(directory) === path.resolve(defaultOutboxDirectory())) await ensureStorageDirectory('outbox');
   const entry: OutboxEntry = { version: 1, id: randomUUID(), url: input.url, ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}), tool: input.tool, arguments: scrub(input.arguments) as Record<string, unknown>, key: entryKey(input.tool, input.arguments), queuedAt: new Date().toISOString(), attempts: 0, ...(input.serverTime ? { serverTime: input.serverTime } : {}), ...(input.baseRevisionId ? { baseRevisionId: input.baseRevisionId } : {}), ...(input.baseArguments ? { baseArguments: scrub(input.baseArguments) as Record<string, unknown> } : {}) };
   const text = JSON.stringify(entry); if (Buffer.byteLength(text) > MAX_ENTRY_BYTES) throw new Error('The queued write is too large for the local outbox');
   await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await syncDirectory(path.dirname(directory)).catch(() => undefined);
@@ -62,11 +66,53 @@ async function moveAside(directory: string, name: string, folder: 'conflicts' | 
 
 /** Append-only, timestamped record of what happened to each queued write (kept after the queued copy is deleted). Rotated at 1 MB. */
 export const LOG_FILE = 'outbox.log';
-export async function appendLog(directory: string, record: Record<string, unknown>): Promise<void> {
+const logQueues = new Map<string, Promise<void>>();
+async function lockLog(directory: string): Promise<() => Promise<void>> {
+  const lock = path.join(directory, '.outbox-log-lock'); const token = `${process.pid}:${randomUUID()}`;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    try { await fs.mkdir(lock, { mode: 0o700 }); await fs.writeFile(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token }), { flag: 'wx', mode: 0o600 }); return async () => { const owner = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8').catch(() => 'null')) as { token?: string } | null; if (owner?.token !== token) return; await fs.rm(lock, { recursive: true, force: true }); }; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        await fs.rmdir(lock).catch(() => undefined); // only succeeds for a lock directory whose owner marker was never written
+        if ((error as NodeJS.ErrnoException).code !== 'EISDIR') throw error;
+      }
+      const owner = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8').catch(() => 'null')) as { pid?: number } | null;
+      if (owner && Number.isInteger(owner.pid)) {
+        let alive = true; try { process.kill(owner.pid!, 0); } catch (probe) { alive = (probe as NodeJS.ErrnoException).code === 'EPERM'; }
+        if (!alive) {
+          const before = await fs.stat(path.join(lock, 'owner.json')).catch(() => undefined);
+          const check = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8').catch(() => 'null')) as { pid?: number } | null;
+          const after = await fs.stat(path.join(lock, 'owner.json')).catch(() => undefined);
+          if (before && after && before.ino === after.ino && check?.pid === owner.pid) await fs.rm(lock, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error('Could not acquire the bounded outbox log lock');
+}
+export async function appendLog(directory: string, record: Record<string, unknown>, env: Record<string, string | undefined> = process.env): Promise<void> {
   try {
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 }); const file = path.join(directory, LOG_FILE);
-    if (((await fs.stat(file).catch(() => undefined))?.size ?? 0) > 1_000_000) await fs.rename(file, `${file}.1`).catch(() => undefined);
-    await fs.appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`, { mode: 0o600 });
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const key = path.resolve(directory); const prior = logQueues.get(key) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(async () => {
+      const release = await lockLog(directory);
+      try {
+        const cap = Math.min(storageQuota('logs', env), 2_000_000), perFile = Math.floor(cap / 2);
+        if (perFile < 64) return;
+        const line = `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`, lineBytes = Buffer.byteLength(line);
+        if (lineBytes > Math.min(perFile, 64 * 1024)) return;
+        const file = path.join(directory, LOG_FILE), previous = `${file}.1`;
+        const currentSize = (await fs.stat(file).catch(() => undefined))?.size ?? 0;
+        if (currentSize + lineBytes > perFile) {
+          if (currentSize > perFile) return; // a manually enlarged/legacy log is not truncated automatically
+          await fs.rm(previous, { force: true });
+          if (currentSize) await fs.rename(file, previous);
+        }
+        await fs.appendFile(file, line, { mode: 0o600 });
+      } finally { await release(); }
+    });
+    logQueues.set(key, next); await next;
   } catch { /* the log must never block a write */ }
 }
 export async function readLog(directory: string, limit = 50): Promise<Array<Record<string, unknown>>> {

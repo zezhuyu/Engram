@@ -145,7 +145,7 @@ test('remote-web MCP exposes bounded authorized tools and idempotent versioned c
     const request = (id: number, name: string, args: unknown) => httpPost(endpoint, token, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
     const listed = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
     const tools = ((await listed.json()) as { result: { tools: Array<{ name: string }> } }).result.tools;
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_handoff_write', 'engram_history', 'engram_note_upsert', 'engram_patch', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_task_upsert', 'engram_timeline'].sort());
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_chat_get', 'engram_chat_list', 'engram_chat_project_link', 'engram_chat_project_remap', 'engram_chat_project_resolve', 'engram_chat_project_unlink', 'engram_chat_projects', 'engram_chat_search', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_handoff_write', 'engram_history', 'engram_note_upsert', 'engram_patch', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_task_upsert', 'engram_timeline'].sort());
     const capability = await request(3, 'engram_capabilities', { scope: { type: 'workspace', workspaceId: 'remote' } });
     assert.deepEqual((JSON.parse((await capability.json() as Reply).result!.content![0]!.text) as { authorization: unknown }).authorization, { read: true, write: true });
     const denied = await request(4, 'engram_create', { scope: { type: 'workspace', workspaceId: 'secret' }, kind: 'note', title: 'Hidden', body: 'no leak', source: 'ChatGPT', idempotencyKey: 'denied-write' });
@@ -245,9 +245,12 @@ test('two scoped remote agents passively deliver lifecycle observations to one a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('MCP transport selection rejects ambiguous modes and HTTP refuses a missing bearer secret', () => {
+test('MCP transport selection rejects ambiguous modes and HTTP refuses a missing bearer secret', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdb-mcp-config-test-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await new Engram(root).init({ sqlite: false });
   for (const env of [{ MDB_MCP_TRANSPORT: 'both' }, { MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_TOKEN: '' }]) {
-    const child = spawnSync(process.execPath, [MCP], { encoding: 'utf8', env: { ...process.env, ...env } });
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, MDB_ROOT: root }; delete childEnv.ENGRAM_DATA_DIR;
+    const child = spawnSync(process.execPath, [MCP], { encoding: 'utf8', env: childEnv });
     assert.equal(child.status, 1);
     assert.match(child.stderr, env.MDB_MCP_TRANSPORT === 'http' ? /requires .*credential|MDB_MCP_HTTP_TOKEN/ : /must be exactly/);
   }

@@ -11,6 +11,9 @@ import type { Candidate, CandidateRequest, CandidateSource, Edge, GraphView, Hyd
 
 const LIVE = (e: ManifestEntry) => e.status !== 'deleted' && e.status !== 'tombstone';
 const SHARED_AREAS = new Set(['wiki', 'shared', 'discoveries']);
+const assertRejectedHistoryAccess = (vault: Vault, includeRejected?: boolean): void => {
+  if (includeRejected && !vault.actor.permissions.includes('*') && !vault.actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Rejected discovery search requires history:read permission');
+};
 
 export function entryRow(e: ManifestEntry): Row {
   const row: Row = {
@@ -25,12 +28,12 @@ export function entryRow(e: ManifestEntry): Row {
 }
 const normTime = (t: string): string => { const ms = Date.parse(t); return Number.isFinite(ms) ? new Date(ms).toISOString() : t; };
 const isObservation = (e: ManifestEntry): boolean => !!e.sid || !!e.et || e.kind === 'observation';
-export function inSource(source: SourceName, e: ManifestEntry): boolean {
+export function inSource(source: SourceName, e: ManifestEntry, includeRejected = false): boolean {
   switch (source) {
     case 'observations': return isObservation(e);
     case 'wiki': return e.kind === 'wiki_page' || (e.scope.type === 'global' && e.scope.area === 'wiki');
     case 'insights': return e.kind === 'user_insight' || e.kind === 'insight';
-    case 'discoveries': return e.kind === 'discovery';
+    case 'discoveries': return e.kind === 'discovery' && (includeRejected || e.status !== 'rejected');
     default: return true;
   }
 }
@@ -62,7 +65,8 @@ class Snapshot implements SnapshotHandle {
     return { id: doc.id, revision: doc.revisionId, body: doc.body, links: doc.links, evidence: doc.evidence, meta: doc.metadata, createdAt: doc.createdAt, createdBy: doc.createdBy, revisionNumber: doc.revisionNumber };
   }
   estimate(request: Omit<CandidateRequest, 'search'>): number {
-    let n = 0; for (const e of this.entries.values()) if (inSource(request.source, e) && inScope(e, request.scope, request.source) && (!request.filters || evaluate(request.filters, entryRow(e)))) n++; return n;
+    assertRejectedHistoryAccess(this.vault, request.scope?.includeRejected);
+    let n = 0; for (const e of this.entries.values()) if (inSource(request.source, e, request.scope?.includeRejected) && inScope(e, request.scope, request.source) && (!request.filters || evaluate(request.filters, entryRow(e)))) n++; return n;
   }
   graph(): GraphView {
     if (this.view) return this.view;
@@ -117,7 +121,8 @@ export class VaultCandidateSource implements CandidateSource {
 
   async *candidates(request: CandidateRequest, signal?: AbortSignal): AsyncGenerator<Candidate> {
     const snap = this.open_.get(request.snapshot); if (!snap) throw queryError('SNAPSHOT_EXPIRED', 'The read snapshot is no longer available');
-    const match = (e: ManifestEntry): boolean => inSource(request.source, e) && inScope(e, request.scope, request.source) && (!request.filters || evaluate(request.filters, entryRow(e)));
+    assertRejectedHistoryAccess(this.vault, request.scope?.includeRejected);
+    const match = (e: ManifestEntry): boolean => inSource(request.source, e, request.scope?.includeRejected) && inScope(e, request.scope, request.source) && (!request.filters || evaluate(request.filters, entryRow(e)));
     if (!request.search) {
       const rows = [...snap.entries.values()].filter(match).map(e => ({ e, row: entryRow(e) }));
       rows.sort(request.order?.length ? ((cmp) => (a: { row: Row }, b: { row: Row }) => cmp(a.row, b.row))(comparator(request.order)) : (a, b) => a.e.id < b.e.id ? -1 : a.e.id > b.e.id ? 1 : 0);
@@ -132,7 +137,7 @@ export class VaultCandidateSource implements CandidateSource {
     const input: SearchInput = {
       query: s.text, mode: effective === 'exact' || effective === 'regex' ? 'grep' : effective,
       ...(s.mode === 'regex' ? { regex: true, caseSensitive: s.caseSensitive ?? false } : s.mode === 'exact' ? { caseSensitive: s.caseSensitive ?? true } : s.caseSensitive ? { caseSensitive: true } : {}),
-      ...(kinds ? { kinds } : {}), ...(searchScopes(request.scope, request.source) ? { scopes: searchScopes(request.scope, request.source)! } : {}), limit: request.limitHint !== undefined ? Math.max(1, Math.min(SEARCH_PAGE, request.limitHint)) : SEARCH_PAGE
+      ...(kinds ? { kinds } : {}), ...(request.source === 'discoveries' && request.scope?.includeRejected ? { includeRejected: true } : {}), ...(searchScopes(request.scope, request.source) ? { scopes: searchScopes(request.scope, request.source)! } : {}), limit: request.limitHint !== undefined ? Math.max(1, Math.min(SEARCH_PAGE, request.limitHint)) : SEARCH_PAGE
     };
     // Objects that changed after the snapshot: the search engine may have seen a newer revision than the snapshot pinned, so they are re-verified on the pinned revision.
     const drift = new Set<string>(); for (const ev of await this.vault.journalSince(snap.sequence)) drift.add(ev.objectId);

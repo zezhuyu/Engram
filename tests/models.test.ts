@@ -39,6 +39,20 @@ test('adapter sends bounded chat request with auth, delimits untrusted documents
   assert.match(sent.body.messages[0].content, /untrusted data/);
 });
 
+test('remote provider redacts SSN, Luhn-valid cards and email while local provider preserves owner-approved content', async t => {
+  const pii = 'SSN 123-45-6789 card 4111 1111 1111 1111 email jane.doe@example.test';
+  const input: ModelRequest = { ...request, goals: pii, instruction: pii, documents: [{ ...doc, body: pii }] };
+  const remote = await server(t, ok(completion(proposal)));
+  await make(remote.baseUrl, { locality: 'remote' }).generate(input);
+  const remoteWire = JSON.stringify(remote.seen[0]!.body.messages);
+  assert.doesNotMatch(remoteWire, /123-45-6789|4111 1111 1111 1111|jane\.doe@example\.test/);
+  assert.match(remoteWire, /REDACTED SSN/); assert.match(remoteWire, /REDACTED CARD/); assert.match(remoteWire, /REDACTED EMAIL/);
+  const local = await server(t, ok(completion(proposal)));
+  await make(local.baseUrl, { locality: 'local' }).generate(input);
+  const localWire = JSON.stringify(local.seen[0]!.body.messages);
+  assert.match(localWire, /123-45-6789/); assert.match(localWire, /4111 1111 1111 1111/); assert.match(localWire, /jane\.doe@example\.test/);
+});
+
 test('transient 5xx and 429 are retried with bounded attempts; success is returned', async t => {
   const s = await server(t, (req, res, n) => { if (n === 1) { res.writeHead(500); return res.end('boom'); } if (n === 2) { res.writeHead(429, { 'retry-after': '0' }); return res.end(); } ok(completion(proposal))(req, res); });
   assert.equal((await make(s.baseUrl).generate(request)).title, 'Derived');

@@ -18,7 +18,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/lint.mjs",
-    "test": "npm run build && node --test dist/tests/*.test.js dist/tests/search/*.test.js dist/tests/security/*.test.js dist/tests/memory/capture.test.js dist/tests/memory/remote-spool.test.js dist/tests/memory/physical-merge.test.js dist/tests/memory/typed-ops.test.js dist/tests/memory/default-workspace.test.js dist/tests/memory/project-binding.test.js dist/tests/memory/project-init-v2.test.js dist/tests/memory/user-setup.test.js dist/tests/memory/session-context.test.js dist/tests/memory/file-sync.test.js dist/tests/memory/hardening.test.js dist/tests/memory/handoff-hook.test.js dist/tests/memory/codex-trust.test.js dist/tests/memory/preference-lifecycle.test.js dist/tests/memory/recall.test.js dist/tests/profile/insights.test.js dist/tests/memory/handoff.test.js dist/tests/dream/*.test.js dist/tests/adaptive/*.test.js dist/tests/wiki/compile.test.js dist/tests/query/operators.test.js dist/tests/query/vault.test.js dist/tests/query/parity.test.js dist/tests/query/security.test.js dist/tests/query/recovery.test.js dist/tests/query/fuzz.test.js dist/tests/unix/parity.test.js dist/tests/unix/features.test.js dist/tests/unix/sandbox.test.js",
+    "test": "npm run build && node --test --test-concurrency=4 --test-timeout=180000 dist/tests/*.test.js dist/tests/search/*.test.js dist/tests/security/*.test.js dist/tests/memory/capture.test.js dist/tests/memory/remote-spool.test.js dist/tests/memory/physical-merge.test.js dist/tests/memory/typed-ops.test.js dist/tests/memory/default-workspace.test.js dist/tests/memory/project-binding.test.js dist/tests/memory/project-init-v2.test.js dist/tests/memory/user-setup.test.js dist/tests/memory/session-context.test.js dist/tests/memory/file-sync.test.js dist/tests/memory/hardening.test.js dist/tests/memory/handoff-hook.test.js dist/tests/memory/codex-trust.test.js dist/tests/memory/preference-lifecycle.test.js dist/tests/memory/recall.test.js dist/tests/profile/insights.test.js dist/tests/memory/handoff.test.js dist/tests/dream/*.test.js dist/tests/adaptive/*.test.js dist/tests/wiki/*.test.js dist/tests/query/operators.test.js dist/tests/query/vault.test.js dist/tests/query/parity.test.js dist/tests/query/security.test.js dist/tests/query/recovery.test.js dist/tests/query/fuzz.test.js dist/tests/unix/parity.test.js dist/tests/unix/features.test.js dist/tests/unix/sandbox.test.js",
     "verify": "npm run lint && npm run typecheck && npm test",
     "benchmark": "npm run build && node dist/scripts/benchmark.js",
     "profile:retrieval": "npm run build && node dist/scripts/profile-retrieval.js",
@@ -32,7 +32,9 @@
     "verify:recovery": "npm run build && node dist/scripts/verify-recovery.js",
     "verify:release": "npm run build && node dist/scripts/verify-release.js",
     "verify:platform": "npm run build && node dist/scripts/verify-platform.js",
-    "verify:all": "npm run verify && npm run verify:acid && npm run verify:security && npm run verify:search && npm run verify:intelligence && npm run verify:recovery && npm run verify:memory && npm run verify:profile && npm run verify:wiki && npm run verify:dream && npm run verify:adaptive && npm run verify:query && npm run verify:unix && npm run verify:platform && npm run verify:release",
+    "verify:all": "npm run verify && npm run verify:acid && npm run verify:security && npm run verify:search && npm run verify:intelligence && npm run verify:recovery && npm run verify:memory && npm run verify:profile && npm run verify:wiki && npm run verify:dream && npm run verify:adaptive && npm run verify:query && npm run verify:unix && npm run verify:platform && npm run verify:suite-inventory && npm run verify:release",
+    "verify:suite-inventory": "npm run build && node dist/scripts/verify-suite-inventory.js",
+    "update:suite-inventory": "npm run build && node dist/scripts/update-suite-inventory.js --write",
     "verify:xhost": "npm run build && node scripts/xhost/run.mjs && node scripts/xhost/report.mjs",
     "verify:memory": "npm run build && node dist/scripts/verify-memory.js",
     "verify:profile": "npm run build && node dist/scripts/verify-profile.js",
@@ -52,13 +54,15 @@
     "verify:adaptive": "npm run build && node dist/scripts/verify-adaptive.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1148.0",
-    "pg": "^8.23.1",
     "yaml": "2.8.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/pg": "^8.23.1",
     "typescript": "5.9.3"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/client-s3": "^3.1148.0",
+    "pg": "^8.23.1"
   }
 }

@@ -1,17 +1,20 @@
 import { createInterface } from 'node:readline';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Engram, resolveRoot } from '../sdk/index.js';
 import { runCaptured, UNIX_COMMANDS } from '../unix/index.js';
 import { MDBError, type ActorContext, type Scope, type PutInput, type PatchInput, type SearchInput } from '../core/types.js';
-import { hasHttpCredentials, recordHttpAuthorizationFailure, resolveHttpActor } from './credentials.js';
+import type { ModelProvider } from '../core/types.js';
+import { createProviderFromConfig, effectiveProvider, isBuiltinProvider } from '../models/factory.js';
+import { hasHttpCredentials, recordHttpAuthorizationFailures, resolveHttpActor } from './credentials.js';
 import { oauthResourceMetadata, resolveOAuthActor } from './oauth.js';
 import { bindAllowedWithoutTls, peerAllowed } from '../core/private-network.js';
 import { TASK_STATUSES, checkOffline, offlineFromAsOf, upsertNote, upsertTask, writeHandoff } from '../memory/workspace-ops.js';
 import { buildSessionContext } from '../memory/session-context.js';
 import { fetchProjection } from '../project-init.js';
 import { createRegistration, drainSpool, enqueueEvent, eventFromHostPayload, readRegistration } from '../memory/capture.js';
+import { FairRequestAdmission } from './http-admission.js';
 
 type Schema = { type?: string; properties?: Record<string, Schema>; required?: string[]; additionalProperties?: boolean; items?: Schema; enum?: unknown[]; anyOf?: Schema[]; minimum?: number; maximum?: number };
 const string: Schema = { type: 'string' };
@@ -71,6 +74,22 @@ export function withDefaultWorkspace(tools: Tool[], workspaceId: string | undefi
       } };
   });
 }
+function chatTools(client: Engram, prefix: 'mdb' | 'engram'): Tool[] {
+  const name = (operation: string) => `${prefix}_chat_${operation}`;
+  const provider = { enum: ['chatgpt', 'claude', 'gemini', 'generic'] } as Schema;
+  const filters: Record<string, Schema> = { provider, sourceAccountId: string, externalProjectId: string, role: { enum: ['user', 'assistant', 'system', 'tool', 'other'] }, since: string, until: string, includeNonUser: { type: 'boolean' }, scopes: array(scope), limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: string, sourceCursor: string };
+  const tools: Tool[] = [
+    { name: name('list'), description: 'List ACL-authorized imported conversations. Counts and titles are computed only after Vault ACL filtering.', inputSchema: object(filters), execute: async a => client.chatConversations.list(a as never) },
+    { name: name('get'), description: 'Read bounded pages from one ACL-authorized imported conversation. Hidden/system/tool messages are omitted unless includeNonUser is true; nextCursor continues in stable order.', inputSchema: object({ ...filters, externalConversationId: string, maxMessages: { type: 'integer', minimum: 1, maximum: 1000 } }, ['externalConversationId']), execute: async a => client.chatConversations.get(a as never) },
+    { name: name('search'), description: 'Search ACL-authorized imported chat messages through the existing Engram search index. Results contain bounded snippets and source references.', inputSchema: object({ ...filters, query: string, mode: { enum: ['keyword', 'grep'] } }, ['query']), execute: async a => client.chatConversations.search(a as never) },
+    { name: name('projects'), description: 'List provider project bindings visible to this actor; inaccessible destinations are omitted.', inputSchema: object({}), execute: async () => client.chatProjects.listProjects() },
+    { name: name('project_link'), description: 'Link an owner-provisioned provider account/project to an existing workspace after normal Personal-registry and target workspace read/write checks.', inputSchema: object({ provider, sourceAccountId: string, externalProjectId: string, projectName: string, workspaceId: string }, ['provider', 'sourceAccountId', 'externalProjectId', 'workspaceId']), execute: async a => client.chatProjects.linkProject({ provider: a.provider as never, sourceAccountId: String(a.sourceAccountId), externalProjectId: String(a.externalProjectId), ...(typeof a.projectName === 'string' ? { projectName: a.projectName } : {}), workspaceId: String(a.workspaceId) }) },
+    { name: name('project_remap'), description: 'Versioned remap of future provider project events. Existing imported history keeps its original workspace and routing provenance.', inputSchema: object({ provider, sourceAccountId: string, externalProjectId: string, workspaceId: string, expectedVersion: { type: 'integer', minimum: 1 } }, ['provider', 'sourceAccountId', 'externalProjectId', 'workspaceId', 'expectedVersion']), execute: async a => client.chatProjects.remapProject({ provider: a.provider as never, sourceAccountId: String(a.sourceAccountId), externalProjectId: String(a.externalProjectId), workspaceId: String(a.workspaceId), expectedVersion: Number(a.expectedVersion) }) },
+    { name: name('project_unlink'), description: 'Versioned unlink affects future routing only; it does not move or delete imported messages.', inputSchema: object({ provider, sourceAccountId: string, externalProjectId: string, expectedVersion: { type: 'integer', minimum: 1 } }, ['provider', 'sourceAccountId', 'externalProjectId', 'expectedVersion']), execute: async a => client.chatProjects.unlinkProject({ provider: a.provider as never, sourceAccountId: String(a.sourceAccountId), externalProjectId: String(a.externalProjectId), expectedVersion: Number(a.expectedVersion) }) },
+    { name: name('project_resolve'), description: 'Resolve only with explicit membership. Unknown membership returns review_required; it is never routed to Personal.', inputSchema: object({ provider, sourceAccountId: string, externalProjectId: string, membership: { enum: ['member', 'standalone', 'unknown'] } }, ['provider', 'sourceAccountId', 'membership']), execute: async a => client.chatProjects.resolveProject({ provider: a.provider as never, sourceAccountId: String(a.sourceAccountId), ...(typeof a.externalProjectId === 'string' ? { externalProjectId: a.externalProjectId } : {}), membership: a.membership as never }) },
+  ];
+  return tools;
+}
 function webToolsFor(client: Engram): Tool[] {
   const vault = client.vault;
   const remoteScope = scope;
@@ -109,12 +128,13 @@ function webToolsFor(client: Engram): Tool[] {
     { name: 'engram_propose_insight', description: 'Stage evidence-backed content for review. This does not commit or promote it.', inputSchema: object({ scope, title: string, body: string, evidence, tags: array(string) }, ['scope', 'title', 'body', 'evidence']), execute: async a => safe(await client.intelligence.propose({ ...a, kind: 'insight' } as unknown as PutInput) as unknown as Record<string, unknown>) },
   ];
   const durableClientTools = standardToolsFor(client).filter(tool => ['engram_note_upsert', 'engram_task_upsert', 'engram_handoff_write'].includes(tool.name));
-  return [...tools, ...durableClientTools];
+  return [...tools, ...chatTools(client, 'engram'), ...durableClientTools];
 }
 
 function standardToolsFor(client: Engram): Tool[] {
   const v = client.vault;
   return [
+    ...chatTools(client, 'mdb'),
     { name: 'mdb_search', description: 'Search authorized Markdown with citations and revision IDs.', inputSchema: object(searchProperties, ['query']), execute: async a => client.query(a as unknown as SearchInput) },
     { name: 'mdb_grep', description: 'Literal or bounded regular expression search over authorized Markdown.', inputSchema: object(searchProperties, ['query']), execute: async a => client.query({ ...a, mode: 'grep' } as unknown as SearchInput) },
     { name: 'mdb_get', description: 'Read an authorized object or immutable revision.', inputSchema: object({ objectId: string, revisionId: string }, ['objectId']), execute: async a => v.get(String(a.objectId), a.revisionId as string | undefined) },
@@ -155,6 +175,10 @@ function standardToolsFor(client: Engram): Tool[] {
     { name: 'mdb_collection_list', description: 'List authorized collections in a workspace.', inputSchema: object({ workspaceId: string }, ['workspaceId']), execute: async a => v.listCollections(String(a.workspaceId)) },
     { name: 'mdb_history', description: 'Read authorized immutable revision history.', inputSchema: object({ objectId: string }, ['objectId']), execute: async a => v.history(String(a.objectId)) },
     { name: 'mdb_propose_insight', description: 'Stage explicitly supplied evidence-backed insight for review; no model call or canonical commit.', inputSchema: object({ scope, title: string, body: string, evidence, tags: array(string) }, ['scope', 'title', 'body', 'evidence']), execute: async a => client.intelligence.propose({ ...a, kind: 'insight' } as unknown as PutInput) },
+    { name: 'mdb_wiki_lint', description: 'Run deterministic ACL-filtered wiki lint; optionally stage bounded proposals without applying them.', inputSchema: object({ scopes: array(scope), checks: array(string), minSeverity: { enum: ['error', 'warning', 'info'] }, limit: { type: 'integer', minimum: 0, maximum: 10000 }, propose: { type: 'boolean' }, dryRun: { type: 'boolean' }, proposalLimit: { type: 'integer', minimum: 0, maximum: 500 } }), execute: async a => { const options = { ...(a.scopes ? { scopes: a.scopes as Scope[] } : {}), ...(a.checks ? { checks: a.checks as never } : {}), ...(a.minSeverity ? { minSeverity: a.minSeverity as never } : {}), ...(a.limit !== undefined ? { limit: Number(a.limit) } : {}) }; const result = await client.wikiLint(options); return a.propose === true ? client.proposeFromLint({ issues: result.issues, scopes: options.scopes, dryRun: a.dryRun === true, limit: a.proposalLimit === undefined ? 100 : Number(a.proposalLimit) }) : result; } },
+    { name: 'mdb_wiki_propose_change', description: 'Stage a retire, restore, rename, or merge proposal for trusted-host review. Agents cannot approve or reject wiki changes.', inputSchema: object({ action: { enum: ['retire', 'restore', 'rename', 'merge'] }, targetPageId: string, targetRevisionId: string, reason: string, restoreRevisionId: string, newTitle: string, mergeSources: array(object({ pageId: string, revisionId: string }, ['pageId', 'revisionId'])), title: string, body: string, evidence, links }), execute: async a => client.intelligence.proposeWikiChange({ action: a.action as 'retire' | 'restore' | 'rename' | 'merge', targetPageId: String(a.targetPageId), targetRevisionId: String(a.targetRevisionId), reason: String(a.reason ?? ''), ...(a.restoreRevisionId ? { restoreRevisionId: String(a.restoreRevisionId) } : {}), ...(a.newTitle ? { newTitle: String(a.newTitle) } : {}), ...(a.mergeSources ? { mergeSources: a.mergeSources as Array<{pageId:string;revisionId:string}> } : {}), ...(a.title ? { title: String(a.title) } : {}), ...(a.body ? { body: String(a.body) } : {}), ...(a.evidence ? { evidence: a.evidence as never } : {}), ...(a.links ? { links: a.links as never } : {}) }) },
+    { name: 'mdb_wiki_proposals', description: 'List wiki change proposals visible to this actor.', inputSchema: object({ status: { enum: ['pending', 'approved', 'rejected'] } }), execute: async a => (await client.intelligence.proposals()).filter(p => p.input.kind === 'wiki_change' && (!a.status || p.status === a.status)) },
+    { name: 'mdb_diff', description: 'Read-only diff between two authorized immutable revisions.', inputSchema: object({ objectId: string, fromRevisionId: string, toRevisionId: string }, ['objectId', 'fromRevisionId', 'toRevisionId']), execute: async a => v.diff(String(a.objectId), String(a.fromRevisionId), String(a.toRevisionId)) },
     { name: 'mdb_promote', description: 'Promote explicitly reviewed sanitized content after source and destination authorization.', inputSchema: object({ objectId: string, to: { enum: ['shared', 'wiki', 'discoveries'] }, review: { enum: [true] }, sanitizedBody: string }, ['objectId', 'to', 'review', 'sanitizedBody']), execute: async a => v.promote(String(a.objectId), { type: 'global', area: a.to as 'wiki' | 'shared' | 'discoveries' }, String(a.sanitizedBody)) },
     { name: 'mdb_skills_list', description: 'List internal SDK-backed skills and imported KB reference skills.', inputSchema: object({}), execute: async () => client.skills() },
     { name: 'mdb_skill_show', description: 'Read skill instructions, provenance and execution status.', inputSchema: object({ name: string }, ['name']), execute: async a => client.skill(String(a.name)) },
@@ -222,8 +246,10 @@ function allowedOrigin(origin: string | undefined, env: NodeJS.ProcessEnv): bool
 }
 function readHttpBody(request: IncomingMessage): Promise<unknown> {
   return new Promise((resolveBody, reject) => {
+    const declared = Number(request.headers['content-length'] ?? 0);
+    if (Number.isFinite(declared) && declared > MAX_HTTP_BODY) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
     const chunks: Buffer[] = []; let size = 0, oversized = false;
-    request.on('data', chunk => { size += chunk.length; if (size > MAX_HTTP_BODY) oversized = true; else if (!oversized) chunks.push(chunk); });
+    request.on('data', chunk => { size += chunk.length; if (size > MAX_HTTP_BODY && !oversized) { oversized = true; request.pause(); reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); } else if (!oversized) chunks.push(chunk); });
     request.on('end', () => {
       if (oversized) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
       try { resolveBody(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(Object.assign(new Error('Parse error'), { statusCode: 400 })); }
@@ -252,6 +278,7 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   }
   const port = env.MDB_MCP_HTTP_PORT === undefined ? 3333 : Number(env.MDB_MCP_HTTP_PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('MDB_MCP_HTTP_PORT must be an integer from 0 to 65535');
+  const indexMaintainer = new Engram(root, { actorId: 'engram-http-index-maintenance', permissions: ['*'] });
   const resource = oauthMetadata ? new URL(oauthMetadata.resource) : undefined;
   const protectedResourcePath = resource && resource.pathname !== '/' ? `/.well-known/oauth-protected-resource${resource.pathname}` : '/.well-known/oauth-protected-resource';
   const sessions = new Map<string, { initialized: boolean; expires: number; authId: string; protocolVersion: string; defaultWorkspace?: string }>();
@@ -259,6 +286,44 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   const requestsPerMinute = Number(env.MDB_MCP_HTTP_REQUESTS_PER_MINUTE ?? 120);
   if (!Number.isInteger(requestsPerMinute) || requestsPerMinute < 1 || requestsPerMinute > 10_000) throw new Error('MDB_MCP_HTTP_REQUESTS_PER_MINUTE must be an integer from 1 to 10000');
   const peerFiltered = !['127.0.0.1', '::1', 'localhost'].includes(host) && bindAllowedWithoutTls(host, env);
+  // Bad credentials are throttled before another credential-file read or
+  // OAuth validation. Forwarded headers are deliberately ignored: identity is
+  // the TCP peer observed by this process.
+  const authFailuresByPeer = new Map<string, { window: number; failures: number }>();
+  // Cache only exact failed Authorization values, hashed and briefly, so a
+  // repeated bad token from a shared proxy is rejected before credential-file
+  // reads/JWT work. A different valid user's token from that same proxy is not
+  // throttled. Entries are bounded per peer and never retain bearer values.
+  const rejectedAuthByPeer = new Map<string, Map<string, number>>();
+  const REJECTED_AUTH_TTL_MS = 5_000, MAX_REJECTED_AUTH_PER_PEER = 16;
+  const AUTH_FAILURE_BURST = 8; const AUTH_WINDOW_MS = 1_000; const MAX_AUTH_IN_FLIGHT = 256;
+  const admissionLimit = (name: string, fallback: number, maximum: number): number => {
+    const value = Number(env[name] ?? fallback);
+    if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw new Error(`${name} must be an integer from 1 to ${maximum}`);
+    return value;
+  };
+  // Mutations serialize on the durable Vault lock. Keep only one admitted
+  // request per identity by default so a principal cannot queue a large batch
+  // ahead of another principal at that lock; the bounded shared queue still
+  // allows normal bursts and returns retryable 503 when full.
+  const admission = new FairRequestAdmission(admissionLimit('MDB_MCP_HTTP_MAX_IN_FLIGHT', 128, 512), admissionLimit('MDB_MCP_HTTP_MAX_IN_FLIGHT_PER_PRINCIPAL', 1, 128), admissionLimit('MDB_MCP_HTTP_MAX_QUEUED', 256, 2048));
+  let authInFlight = 0; let pendingAuthFailures = 0; let authFailureFlushInFlight: Promise<boolean> | undefined;
+  const flushAuthFailures = (): Promise<boolean> => {
+    if (authFailureFlushInFlight) return authFailureFlushInFlight;
+    if (pendingAuthFailures === 0) return Promise.resolve(true);
+    // Persist one snapshot per timer tick. Draining a growing queue in a loop
+    // used to emit many durable events inside a single interval under a flood,
+    // blocking unrelated writes on the Vault lock. New failures stay bounded
+    // in this counter and are picked up by the next tick.
+    const count = pendingAuthFailures; pendingAuthFailures = 0;
+    authFailureFlushInFlight = recordHttpAuthorizationFailures(root, count).then(() => true).catch(() => {
+      pendingAuthFailures = Math.min(Number.MAX_SAFE_INTEGER, pendingAuthFailures + count);
+      return false;
+    }).finally(() => { authFailureFlushInFlight = undefined; });
+    return authFailureFlushInFlight;
+  };
+  const authFailureFlush = setInterval(() => { void flushAuthFailures(); }, 1_000);
+  authFailureFlush.unref();
   const server = createServer(async (request, response) => {
     if (peerFiltered && !peerAllowed(request.socket.remoteAddress)) { request.socket.destroy(); return; } // only tailnet and loopback peers are served in the no-TLS mode
     // `IncomingMessage.url` is untrusted. A malformed absolute-form target such as
@@ -269,19 +334,70 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
     if (oauthMetadata && (endpoint.pathname === '/.well-known/oauth-protected-resource' || endpoint.pathname === protectedResourcePath)) { jsonResponse(response, 200, oauthMetadata); return; }
     const allowedHosts = (env.MDB_MCP_HTTP_ALLOWED_HOSTS ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
     if (allowedHosts.length && !allowedHosts.includes((request.headers.host ?? '').toLowerCase())) { jsonResponse(response, 403, { error: 'Host not allowed' }); return; }
+    const peer = request.socket.remoteAddress ?? 'unknown'; const now = Date.now(); let peerFailures = authFailuresByPeer.get(peer);
+    if (peerFailures && now - peerFailures.window >= AUTH_WINDOW_MS) { authFailuresByPeer.delete(peer); peerFailures = undefined; }
+    const refuseEarly = (retryAfter: number) => { jsonResponse(response, 429, { error: 'Authentication temporarily rate limited' }, { 'Retry-After': String(retryAfter), Connection: 'close' }); response.once('finish', () => request.socket.destroy()); };
+    const authorization = request.headers.authorization;
+    if (authorization) {
+      const digest = createHash('sha256').update(authorization).digest('hex');
+      const rejected = rejectedAuthByPeer.get(peer); const expires = rejected?.get(digest);
+      if (expires !== undefined && expires > now) {
+        // This is still a failed authentication attempt; the short-lived hash
+        // cache only skips credential-file/JWT work, not the audit count.
+        pendingAuthFailures++;
+        refuseEarly(Math.max(1, Math.ceil((expires - now) / 1000))); return;
+      }
+      if (expires !== undefined) rejected?.delete(digest);
+    }
+    if (authInFlight >= MAX_AUTH_IN_FLIGHT) { refuseEarly(1); return; }
     let actor: ActorContext | undefined;
-    try { actor = await resolveHttpActor(root, request.headers.authorization, token, legacyActor, false) ?? await resolveOAuthActor(request.headers.authorization, env); } catch { jsonResponse(response, 503, { error: 'Credential validation unavailable' }); return; }
+    // Neither the scoped credential resolver nor OAuth can accept a malformed
+    // Authorization header. Reject it before filesystem, hash or JWT work so
+    // malformed-token floods stay cheap even behind a shared reverse proxy.
+    if (/^Bearer [^\s]+$/.test(request.headers.authorization ?? '')) {
+      authInFlight++;
+      try { actor = await resolveHttpActor(root, request.headers.authorization, token, legacyActor, false) ?? await resolveOAuthActor(request.headers.authorization, env); }
+      catch { jsonResponse(response, 503, { error: 'Credential validation unavailable' }); return; }
+      finally { authInFlight--; }
+    }
     if (!actor) {
-      try { await recordHttpAuthorizationFailure(root); } catch { jsonResponse(response, 503, { error: 'Credential validation unavailable' }); return; }
+      pendingAuthFailures++;
+      if (authorization) {
+        let rejected = rejectedAuthByPeer.get(peer);
+        if (!rejected) { rejected = new Map(); rejectedAuthByPeer.set(peer, rejected); }
+        for (const [digest, expires] of rejected) if (expires <= now) rejected.delete(digest);
+        if (rejected.size >= MAX_REJECTED_AUTH_PER_PEER) rejected.delete(rejected.keys().next().value as string);
+        rejected.set(createHash('sha256').update(authorization).digest('hex'), now + REJECTED_AUTH_TTL_MS);
+      }
+      const after = authFailuresByPeer.get(peer);
+      if (!after || now - after.window >= AUTH_WINDOW_MS) {
+        if (authFailuresByPeer.size >= 1024) {
+          for (const [key, value] of authFailuresByPeer) if (now - value.window >= AUTH_WINDOW_MS) authFailuresByPeer.delete(key);
+          if (authFailuresByPeer.size >= 1024) authFailuresByPeer.delete(authFailuresByPeer.keys().next().value as string);
+        }
+        authFailuresByPeer.set(peer, { window: now, failures: 1 });
+      } else after.failures++;
+      if ((authFailuresByPeer.get(peer)?.failures ?? 0) >= AUTH_FAILURE_BURST) { refuseEarly(1); return; }
       const metadataUrl = resource ? new URL(protectedResourcePath, resource.origin).toString() : undefined;
-      jsonResponse(response, 401, { error: 'Unauthorized' }, { 'WWW-Authenticate': metadataUrl ? `Bearer resource_metadata=\"${metadataUrl}\"` : 'Bearer' }); return;
+      jsonResponse(response, 401, { error: 'Unauthorized' }, { 'WWW-Authenticate': metadataUrl ? `Bearer resource_metadata=\"${metadataUrl}\"` : 'Bearer', Connection: 'close' }); response.once('finish', () => request.socket.destroy()); return;
     }
     if (!allowedOrigin(request.headers.origin, env)) { jsonResponse(response, 403, { error: 'Origin not allowed' }); return; }
-    const now = Date.now(); const rateKey = actor.actorId; let rate = requestsByPrincipal.get(rateKey);
-    if (!rate || now - rate.window >= 60_000) { rate = { window: now, count: 0 }; requestsByPrincipal.set(rateKey, rate); }
+    const authenticatedAt = Date.now(); const rateKey = actor.actorId; let rate = requestsByPrincipal.get(rateKey);
+    if (!rate || authenticatedAt - rate.window >= 60_000) { rate = { window: authenticatedAt, count: 0 }; requestsByPrincipal.set(rateKey, rate); }
     rate.count++;
-    if (rate.count > requestsPerMinute) { jsonResponse(response, 429, { error: 'Rate limit exceeded' }, { 'Retry-After': String(Math.max(1, Math.ceil((60_000 - (now - rate.window)) / 1000))) }); return; }
-    if (requestsByPrincipal.size > MAX_SESSIONS * 2) for (const [key, value] of requestsByPrincipal) if (now - value.window > 60_000) requestsByPrincipal.delete(key);
+    if (rate.count > requestsPerMinute) { jsonResponse(response, 429, { error: 'Rate limit exceeded' }, { 'Retry-After': String(Math.max(1, Math.ceil((60_000 - (authenticatedAt - rate.window)) / 1000))) }); return; }
+    if (requestsByPrincipal.size > MAX_SESSIONS * 2) for (const [key, value] of requestsByPrincipal) if (authenticatedAt - value.window > 60_000) requestsByPrincipal.delete(key);
+    const cancelled = new AbortController(); const cancelAdmission = () => cancelled.abort();
+    request.once('aborted', cancelAdmission);
+    const release = await admission.acquire(actor.actorId, cancelled.signal);
+    request.off('aborted', cancelAdmission);
+    if (!release) {
+      request.resume();
+      jsonResponse(response, 503, { jsonrpc: '2.0', id: null, error: { code: -32005, message: 'Server is busy; retry this request', data: { retryable: true, executed: false, retryAfterSeconds: 1 } } }, { 'Retry-After': '1', Connection: 'close' });
+      response.once('finish', () => request.socket.destroy());
+      return;
+    }
+    try {
     if (endpoint.pathname === '/capture') {
       if (request.method !== 'POST') { jsonResponse(response, 405, { error: 'Method not allowed' }, { Allow: 'POST' }); return; }
       if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers['content-type'] ?? '')) { jsonResponse(response, 415, { error: 'Content-Type must be application/json' }); return; }
@@ -298,7 +414,7 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
         // The durable spool is the delivery acknowledgement. Drain asynchronously; retries retain queued events.
         void drainSpool(root).catch(() => undefined);
         jsonResponse(response, 202, { accepted: true, captured: true, eventId: event.eventId });
-      } catch (error) { jsonResponse(response, (error as { statusCode?: number }).statusCode ?? 400, { error: 'Capture request could not be accepted' }); }
+      } catch (error) { const status = (error as { statusCode?: number }).statusCode ?? 400; jsonResponse(response, status, { error: 'Capture request could not be accepted' }, status === 413 ? { Connection: 'close' } : {}); if (status === 413) request.resume(); }
       return;
     }
     if (endpoint.pathname !== '/mcp') { jsonResponse(response, 404, { error: 'Not found' }); return; }
@@ -314,7 +430,7 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
     if (!accept.includes('application/json') && !accept.includes('text/event-stream')) { jsonResponse(response, 406, { error: 'Accept must include application/json or text/event-stream' }); return; }
     let payload: unknown;
     try { payload = await readHttpBody(request); }
-    catch (error) { if (!response.headersSent) jsonResponse(response, (error as { statusCode?: number }).statusCode ?? 400, { error: (error as Error).message }); return; }
+    catch (error) { if (!response.headersSent) { const status = (error as { statusCode?: number }).statusCode ?? 400; jsonResponse(response, status, { error: (error as Error).message }, status === 413 ? { Connection: 'close' } : {}); if (status === 413) request.resume(); } return; }
     const batch = Array.isArray(payload) ? payload : [payload];
     if (!batch.length) { jsonResponse(response, 400, rpcError(null, -32600, 'Invalid request')); return; }
     const headerSessionId = request.headers['mcp-session-id'];
@@ -361,13 +477,68 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
     const responseHeaders = { 'Mcp-Session-Id': sessionId!, 'MCP-Protocol-Version': session.protocolVersion, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
     if (!replies.length) { jsonResponse(response, 202, undefined, responseHeaders); return; }
     jsonResponse(response, 200, Array.isArray(payload) ? replies : replies[0], responseHeaders);
+    } finally { release(); }
   });
+  // Node's header timeout is checked on an interval and can leave a peer that
+  // sends an incomplete header open longer than the configured bound. Keep an
+  // absolute connection-to-request timer; clear it once a complete request is
+  // parsed, then re-arm only after the response so slow application work is
+  // not interrupted.
+  const headerTimers = new WeakMap<import('node:net').Socket, NodeJS.Timeout>();
+  const armHeaderDeadline = (socket: import('node:net').Socket) => {
+    clearTimeout(headerTimers.get(socket));
+    const timer = setTimeout(() => socket.destroy(), 10_000);
+    timer.unref(); headerTimers.set(socket, timer);
+  };
+  server.on('connection', socket => armHeaderDeadline(socket));
+  server.on('request', (request, response) => {
+    const socket = request.socket as import('node:net').Socket;
+    clearTimeout(headerTimers.get(socket));
+    response.once('finish', () => { if (!socket.destroyed) armHeaderDeadline(socket); });
+  });
+  server.headersTimeout = 10_000; server.requestTimeout = 20_000; (server as typeof server & { connectionsCheckingInterval: number }).connectionsCheckingInterval = 1_000; server.keepAliveTimeout = 5_000; server.maxConnections = 512;
   await listen(server, port, host);
   const retryDrain = setInterval(() => { void drainSpool(root).catch(() => undefined); }, 2_000); retryDrain.unref();
   void drainSpool(root).catch(() => undefined);
+  // Index maintenance uses the trusted server identity and runs independently
+  // of whichever credential happens to search first. Stale/missing indexes
+  // still fall back to canonical, ACL-filtered retrieval while a build runs.
+  const refreshSearchIndex = () => { void indexMaintainer.search.refreshSearchIndex().catch(() => undefined); };
+  refreshSearchIndex();
+  const refreshIndex = setInterval(refreshSearchIndex, 5_000); refreshIndex.unref();
   const address = server.address();
   process.stderr.write(`MCP HTTP listening at http://${host}:${typeof address === 'object' && address ? address.port : port}/mcp\n`);
-  await new Promise<void>((resolveClose, reject) => { const close = () => { clearInterval(retryDrain); server.close(error => error ? reject(error) : resolveClose()); }; server.once('error', reject); process.once('SIGINT', close); process.once('SIGTERM', close); });
+  await new Promise<void>((resolveClose, reject) => {
+    let closing = false;
+    let shutdownDeadline: NodeJS.Timeout | undefined;
+    const close = () => {
+      if (closing) { server.closeAllConnections(); return; }
+      closing = true;
+      clearInterval(retryDrain);
+      clearInterval(refreshIndex);
+      clearInterval(authFailureFlush);
+      // Aggregate rejected requests in memory while serving traffic. Persisting
+      // their audit record periodically takes the vault lock and can delay
+      // acknowledged writes; flush only after this listener has drained.
+      // Streamable HTTP clients may keep an SSE/session socket open forever.
+      // Stop accepting new work immediately, allow in-flight requests a bounded
+      // drain window, then close only this server's remaining connections so
+      // process shutdown and its durable audit flush cannot hang indefinitely.
+      shutdownDeadline = setTimeout(() => server.closeAllConnections(), 5_000);
+      shutdownDeadline.unref();
+      server.close(error => {
+        if (shutdownDeadline) clearTimeout(shutdownDeadline);
+        if (error) { reject(error); return; }
+        void (async () => {
+          // The listener has drained. Flush all remaining counted failures in
+          // bounded snapshots; each iteration awaits one Vault append.
+          do { if (!await flushAuthFailures()) break; } while (pendingAuthFailures > 0);
+          await indexMaintainer.close();
+        })().then(resolveClose, reject);
+      });
+    };
+    server.once('error', reject); process.once('SIGINT', close); process.once('SIGTERM', close);
+  });
 }
 
 async function runStdio(tools: Tool[]): Promise<void> {
@@ -386,10 +557,20 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const transport = env.MDB_MCP_TRANSPORT ?? 'stdio';
   if (transport !== 'stdio' && transport !== 'http') throw new Error('MDB_MCP_TRANSPORT must be exactly "stdio" or "http"');
   const rootArg = process.argv.indexOf('--root');
-  const client = new Engram(resolveRoot(rootArg >= 0 ? process.argv[rootArg + 1] : undefined), hostActor(env));
+  const root = resolveRoot(rootArg >= 0 ? process.argv[rootArg + 1] : undefined);
+  const unconfigured = new Engram(root, hostActor(env));
+  let provider: ModelProvider | undefined;
+  try {
+    const config = await unconfigured.config();
+    if (isBuiltinProvider(effectiveProvider(config.model, env))) provider = createProviderFromConfig(config.model, env);
+  } catch (error) {
+    if (!(error instanceof MDBError) || error.code !== 'CAPABILITY_UNAVAILABLE') throw error;
+    process.stderr.write(`model provider unavailable: ${error.message}\n`);
+  }
+  const client = new Engram(root, hostActor(env), provider);
   const hostWorkspace = env.MDB_DEFAULT_WORKSPACE;
   if (hostWorkspace && !(DEFAULT_WORKSPACE_ID.test(hostWorkspace) && await client.vault.canAccess({ type: 'workspace', workspaceId: hostWorkspace }, 'read').catch(() => false))) throw new Error('MDB_DEFAULT_WORKSPACE is not a workspace this identity can access');
   const tools = withDefaultWorkspace(toolsFor(client), hostWorkspace);
-  if (transport === 'http') await runHttp(client.vault.root, actor => toolsFor(new Engram(client.vault.root, actor)), env, hostActor(env));
+  if (transport === 'http') await runHttp(client.vault.root, actor => toolsFor(new Engram(client.vault.root, actor, provider)), env, hostActor(env));
   else await runStdio(tools);
 }

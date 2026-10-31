@@ -17,6 +17,7 @@ const mdbFilter = (tool: string, args: string[], input = 'a b\nc d\n') => run(['
 test('required tools are present on the Linux lane', () => {
   if (!REQUIRE) { recordCase({ suite: 'unix-sandbox', name: 'tools-required', status: 'PASS', detail: { notRun: 'MDB_REQUIRE_GNU not set' } }); return; }
   for (const t of ['jq', 'awk', 'sed']) assert.ok(status[t]?.usable, `${t}: ${status[t]?.reason}`);
+  recordCase({ suite: 'unix-sandbox', name: 'tools-required', status: 'PASS' });
 });
 test('awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files', { skip: !REQUIRE && !status.awk?.usable ? 'gawk not installed (NOT_RUN)' : false }, async () => {
   const marker = path.join(os.tmpdir(), `engram-awk-${process.pid}`); await fs.rm(marker, { force: true });
@@ -39,7 +40,7 @@ test('sed: GNU sed --sandbox runs scripts but cannot execute, read or write file
   for (const bad of [['-i', 's/a/b/'], ['-f', '/etc/hosts'], ['s/a/b/', '/etc/passwd'], ['-s', 's/a/b/'], ['--follow-symlinks', 's/a/b/']]) assert.notEqual((await mdbFilter('sed', bad)).code, 0, bad.join(' '));
   recordCase({ suite: 'unix-sandbox', name: 'gnu-sed', status: 'PASS' });
 });
-test('the bridge never uses a shell: metacharacters in arguments are data', async () => {
+test('the bridge never uses a shell: metacharacters in arguments are data', { skip: !status.jq?.usable ? 'jq unavailable (NOT_RUN)' : false }, async () => {
   const marker = path.join(os.tmpdir(), `engram-meta-${process.pid}`); await fs.rm(marker, { force: true });
   const r = await run(['filter', 'jq', '-r', `"x; touch ${marker}; $(touch ${marker}) \`touch ${marker}\`"`], { input: 'null' }); assert.equal(r.code, 0);
   assert.ok(r.stdout.includes('touch'), 'printed as a string'); assert.ok(await gone(marker));

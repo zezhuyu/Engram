@@ -2,7 +2,17 @@ name: ci
 on:
   push:
     branches: ['**']
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      authorize_release:
+        description: Explicitly authorize publishing the version tag selected below
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
 jobs:
   linux-gnu:
     name: Linux (GNU coreutils, gawk, GNU sed)
@@ -60,10 +70,31 @@ jobs:
       - run: npm ci && npm run verify && npm run verify:unix && npm run verify:query
       - run: node --test tests/macos-packaging.test.mjs
 
+  exported-source:
+    name: Exported source full verification (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 25]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}', cache: npm }
+      - name: Build a source-only archive and verify the extracted tree
+        run: |
+          set -euo pipefail
+          export_root="$(mktemp -d)"
+          trap 'rm -rf "$export_root"' EXIT
+          git archive --format=tar HEAD | tar -xf - -C "$export_root"
+          cd "$export_root"
+          npm ci
+          npm run verify:all
+
   package-apps:
     name: Package client and server (${{ matrix.target }})
-    if: github.event_name == 'push'
-    needs: [linux-gnu, linux-reliability, macos]
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.authorize_release == true && startsWith(github.ref, 'refs/tags/v'))
+    needs: [linux-gnu, linux-reliability, macos, exported-source]
     strategy:
       fail-fast: false
       matrix:
@@ -120,14 +151,68 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  release-qualification:
+    name: Qualify explicit version tag
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.authorize_release == true))
+    needs: [linux-gnu, linux-reliability, macos, exported-source]
+    runs-on: ubuntu-24.04
+    env:
+      MDB_RELEASE_PROFILE: full-intelligence-beta
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Require a semantic version tag on a commit reachable from main
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+      - run: npm run verify:all
+      - run: npm run verify:release
+      - name: Require the explicitly selected profile to be eligible
+        run: |
+          node -e "const r=require('./verification/release-report.json'); if(r.releaseProfile!=='full-intelligence-beta' || !['BETA','GA_ELIGIBLE'].includes(r.releaseLevel)) { console.error(r.releaseProfile, r.releaseLevel, r.releasePolicy?.blockers); process.exit(1); }"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-qualification-evidence
+          path: verification/release-report.json
+          if-no-files-found: error
+          retention-days: 1
+
   publish-release:
     name: Publish client and server installers as direct release assets
-    if: github.event_name == 'push'
-    needs: [package-apps]
+    if: github.event_name == 'workflow_dispatch' && inputs.authorize_release == true && startsWith(github.ref, 'refs/tags/v')
+    needs: [package-apps, release-qualification]
     runs-on: ubuntu-24.04
+    environment: engram-release
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci && npm run build
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-qualification-evidence
+          path: verification
+      - name: Verify signed owner authorization for this exact source and tag
+        env:
+          MDB_RELEASE_PROFILE: full-intelligence-beta
+          ENGRAM_RELEASE_AUTHORIZATION_JSON: ${{ secrets.ENGRAM_RELEASE_AUTHORIZATION_JSON }}
+          ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY: ${{ secrets.ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: node dist/scripts/verify-release-authorization.js
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -135,17 +220,16 @@ jobs:
           merge-multiple: true
       - name: Write checksums for the individual app assets
         run: sha256sum release/assets/engram-* > release/assets/SHA256SUMS
-      - name: Create one prerelease for this push
+      - name: Publish the explicitly selected version tag
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_SHA: ${{ github.sha }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag="ci-${GITHUB_RUN_ID}"
-          gh release create "$tag" release/assets/engram-* release/assets/SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" release/assets/engram-* release/assets/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Engram build ${GITHUB_SHA::12}" \
+            --title "Engram ${GITHUB_REF_NAME}" \
             --notes "Automated installable Engram client and server apps for commit ${GITHUB_SHA}. Linux x64 assets are Debian installers (.deb); macOS arm64 assets are disk image installers (.dmg) containing the app and startup installer. Linux services can be enabled for startup with the included engram-client-service and engram-server-service installers. No service is enabled automatically by installing the package." \
             --prerelease

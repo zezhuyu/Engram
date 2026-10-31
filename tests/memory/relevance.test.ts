@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { TestContext } from 'node:test';
 import { Engram, OWNER, refreshRelevance, readRanking, relevanceStatus, clearRanking, type ModelProvider, type ModelRequest } from '../../packages/sdk/index.js';
 import { fetchProjection } from '../../packages/project-init.js';
 import { toolsFor } from '../../packages/mcp/index.js';
@@ -10,8 +11,9 @@ import type { RemoteSession } from '../../packages/memory/remote-client.js';
 import { buildSessionContext } from '../../packages/memory/session-context.js';
 
 const WS = 'proj-a';
-async function vault() {
-  const client = new Engram(await mkdtemp(path.join(os.tmpdir(), 'mdb-rel-')), OWNER); await client.init({ sqlite: false }); await client.createWorkspace(WS);
+async function vault(t: TestContext) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'mdb-rel-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const client = new Engram(root, OWNER); await client.init({ sqlite: false }); await client.createWorkspace(WS);
   const insight = async (claim: string, scopeLabel: string | undefined, extra: Record<string, unknown> = {}) => (await client.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: claim.slice(0, 30), body: claim, status: 'accepted', metadata: { category: 'preference', evidenceClass: 'explicit', visibility: 'user_private', sensitivity: 'none', ...(scopeLabel ? { scopeLabel } : {}), ...extra } })).id;
   return { client, insight };
 }
@@ -24,8 +26,8 @@ function fake(answer: (ids: string[]) => unknown, locality: 'local' | 'remote' =
 const config = async (client: Engram, allowPrivate = false) => { const c = await client.vault.config(); return { ...c, model: { ...c.model, allowPrivateContentToRemote: allowPrivate } }; };
 const claims = (p: { preferences: Array<{ claim: string }>; insights: Array<{ claim: string }> }) => [...p.preferences, ...p.insights].map(i => i.claim);
 
-test('a fresh model ranking reorders and drops irrelevant GLOBAL insights; project insights are kept and claims stay the vault\'s', async () => {
-  const { client, insight } = await vault();
+test('a fresh model ranking reorders and drops irrelevant GLOBAL insights; project insights are kept and claims stay the vault\'s', async t => {
+  const { client, insight } = await vault(t);
   const g1 = await insight('Global: uses tabs.', undefined), g2 = await insight('Global: prefers pytest.', undefined), w = await insight('Project: deploy on Tuesday.', WS);
   const before = claims(await fetchProjection({ client }, WS, 900));
   assert.deepEqual(before, ['Project: deploy on Tuesday.', 'Global: prefers pytest.', 'Global: uses tabs.'].sort((a, b) => before.indexOf(a) - before.indexOf(b)));
@@ -38,8 +40,8 @@ test('a fresh model ranking reorders and drops irrelevant GLOBAL insights; proje
   assert.equal(await relevanceStatus(client, WS), 'model');
 });
 
-test('invalid model output (unknown, duplicate or overlapping ids) is rejected and nothing is stored', async () => {
-  const { client, insight } = await vault(); const a = await insight('Global: A.', undefined); await insight('Global: B.', undefined);
+test('invalid model output (unknown, duplicate or overlapping ids) is rejected and nothing is stored', async t => {
+  const { client, insight } = await vault(t); const a = await insight('Global: A.', undefined); await insight('Global: B.', undefined);
   for (const bad of [{ relevant: ['obj_invented'], irrelevant: [] }, { relevant: [a, a], irrelevant: [] }, { relevant: [a], irrelevant: [a] }, { relevant: 'all', irrelevant: [] }]) {
     await assert.rejects(refreshRelevance(client, WS, fake(() => bad).provider, await config(client)), /Relevance|INVALID_MODEL_OUTPUT|ids|supplied|repeats/);
   }
@@ -47,8 +49,8 @@ test('invalid model output (unknown, duplicate or overlapping ids) is rejected a
   assert.equal((await fetchProjection({ client }, WS, 900)).ranking, 'deterministic');
 });
 
-test('a ranking goes stale when the accepted set changes and injection falls back to the deterministic order', async () => {
-  const { client, insight } = await vault(); const a = await insight('Global: A.', undefined); await insight('Global: B.', undefined);
+test('a ranking goes stale when the accepted set changes and injection falls back to the deterministic order', async t => {
+  const { client, insight } = await vault(t); const a = await insight('Global: A.', undefined); await insight('Global: B.', undefined);
   const base = claims(await fetchProjection({ client }, WS, 900));
   await refreshRelevance(client, WS, fake(() => ({ relevant: [], irrelevant: [a] })).provider, await config(client));
   assert.ok(!claims(await fetchProjection({ client }, WS, 900)).includes('Global: A.'));
@@ -60,8 +62,8 @@ test('a ranking goes stale when the accepted set changes and injection falls bac
   assert.deepEqual(await clearRanking(client, WS), { cleared: true }); assert.equal(await readRanking(client, WS), undefined);
 });
 
-test('sensitive, candidate and other-project insights are never sent to the model', async () => {
-  const { client, insight } = await vault(); await client.createWorkspace('other');
+test('sensitive, candidate and other-project insights are never sent to the model', async t => {
+  const { client, insight } = await vault(t); await client.createWorkspace('other');
   await insight('Global: fine.', undefined); await insight('SECRET-SENSITIVE-9 health detail.', undefined, { sensitivity: 'sensitive' });
   await insight('OTHER-PROJECT-9 belongs elsewhere.', 'other'); await client.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'cand', body: 'CANDIDATE-9 guess', status: 'candidate', metadata: { category: 'preference', sensitivity: 'none' } });
   const { provider, calls } = fake(ids => ({ relevant: ids, irrelevant: [] }));
@@ -70,8 +72,8 @@ test('sensitive, candidate and other-project insights are never sent to the mode
   for (const marker of ['SECRET-SENSITIVE-9', 'OTHER-PROJECT-9', 'CANDIDATE-9']) assert.ok(!sent.includes(marker), `${marker} reached the model`);
 });
 
-test('remote provider without allowPrivateContentToRemote: no request is made; with it, the request is made', async () => {
-  const { client, insight } = await vault(); await insight('Global: fine.', undefined);
+test('remote provider without allowPrivateContentToRemote: no request is made; with it, the request is made', async t => {
+  const { client, insight } = await vault(t); await insight('Global: fine.', undefined);
   const gated = fake(ids => ({ relevant: ids, irrelevant: [] }), 'remote');
   const skipped = await refreshRelevance(client, WS, gated.provider, await config(client, false));
   assert.equal(skipped.status, 'skipped_private'); assert.equal(gated.calls.length, 0); assert.equal(await readRanking(client, WS), undefined);
@@ -79,8 +81,8 @@ test('remote provider without allowPrivateContentToRemote: no request is made; w
   assert.equal((await refreshRelevance(client, WS, undefined, await config(client))).status, 'unavailable');
 });
 
-test('injection never calls a model: session context reads only the stored ranking', async () => {
-  const { client, insight } = await vault(); const a = await insight('Global: A-LINE.', undefined); await insight('Global: B-LINE.', undefined);
+test('injection never calls a model: session context reads only the stored ranking', async t => {
+  const { client, insight } = await vault(t); const a = await insight('Global: A-LINE.', undefined); await insight('Global: B-LINE.', undefined);
   const { provider, calls } = fake(() => ({ relevant: [], irrelevant: [a] }));
   await refreshRelevance(client, WS, provider, await config(client)); const used = calls.length;
   const context = JSON.stringify(await buildSessionContext(client, { workspaceId: WS } as never));
@@ -88,8 +90,8 @@ test('injection never calls a model: session context reads only the stored ranki
   assert.ok(context.includes('B-LINE') && !context.includes('A-LINE'), 'session context uses the ranking');
 });
 
-test('another actor without access to the workspace cannot read its ranking', async () => {
-  const { client, insight } = await vault(); await insight('Global: A.', undefined);
+test('another actor without access to the workspace cannot read its ranking', async t => {
+  const { client, insight } = await vault(t); await insight('Global: A.', undefined);
   await refreshRelevance(client, WS, fake(ids => ({ relevant: ids, irrelevant: [] })).provider, await config(client));
   const stranger = new Engram(client.vault.root, { actorId: 'stranger', permissions: [] });
   assert.equal(await readRanking(stranger, WS).catch(() => undefined), undefined);
@@ -123,8 +125,8 @@ test('derived insight is hidden from direct reads and every projection after cur
 /** A remote session whose calls run the server's own tools in-process and record which tools the client asked for. */
 const session = (server: Engram) => { const names: string[] = []; const tools = toolsFor(server); const remote: RemoteSession = { sessionId: 's', tools: tools.map(t => t.name), async call(name, args) { names.push(name); const tool = tools.find(t => t.name === name); if (!tool) return { isError: true, value: undefined }; try { return { isError: false, value: JSON.parse(JSON.stringify(await tool.execute(args))) }; } catch { return { isError: true, value: undefined }; } } }; return { remote, names }; };
 
-test('a remote client receives the finished projection from the server and computes nothing itself', async () => {
-  const { client, insight } = await vault(); const a = await insight('Global: A-LINE.', undefined); await insight('Global: B-LINE.', undefined); await insight('Project: P-LINE.', WS);
+test('a remote client receives the finished projection from the server and computes nothing itself', async t => {
+  const { client, insight } = await vault(t); const a = await insight('Global: A-LINE.', undefined); await insight('Global: B-LINE.', undefined); await insight('Project: P-LINE.', WS);
   await refreshRelevance(client, WS, fake(() => ({ relevant: [], irrelevant: [a] })).provider, await config(client));
   const { remote, names } = session(client);
   const viaServer = await fetchProjection({ remote }, WS, 900), local = await fetchProjection({ client }, WS, 900);
@@ -133,8 +135,8 @@ test('a remote client receives the finished projection from the server and compu
   assert.ok(!claims(viaServer).some(c => c.includes('A-LINE')), 'the server-side ranking was applied');
 });
 
-test('the server-side projection tool honours access: a caller without workspace access gets no private ranking or project claims', async () => {
-  const { client, insight } = await vault(); await insight('Project: P-LINE.', WS);
+test('the server-side projection tool honours access: a caller without workspace access gets no private ranking or project claims', async t => {
+  const { client, insight } = await vault(t); await insight('Project: P-LINE.', WS);
   await refreshRelevance(client, WS, fake(ids => ({ relevant: ids, irrelevant: [] })).provider, await config(client));
   const stranger = new Engram(client.vault.root, { actorId: 'stranger', permissions: [] });
   const { remote } = session(stranger);

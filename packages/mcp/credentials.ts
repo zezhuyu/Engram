@@ -10,7 +10,7 @@ const actorPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
 const permissionPattern = /^(?:workspace:[A-Za-z0-9][A-Za-z0-9_-]{0,99}:(?:read|write|promote|\*)|global:(?:wiki|shared|discoveries|profile|\*):(?:read|write|promote|\*))$/;
 export const isValidRemotePermission = (permission: string): boolean => permissionPattern.test(permission) && !permission.includes('*');
 type Credential = { id: string; tokenHash: string; actorId: string; permissions: string[]; createdAt: string };
-export interface CredentialAuditEvent { at: string; action: 'created' | 'revoked' | 'rotated' | 'authorization_failed'; actorId?: string; credentialId?: string; replacementId?: string; permissions?: string[] }
+export interface CredentialAuditEvent { at: string; action: 'created' | 'revoked' | 'rotated' | 'authorization_failed'; attempts?: number; actorId?: string; credentialId?: string; replacementId?: string; permissions?: string[] }
 type CredentialStore = { version: 1; credentials: Credential[]; audit?: CredentialAuditEvent[] };
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
 const auditCap = 10_000;
@@ -33,10 +33,16 @@ export async function hasHttpCredentials(root: string): Promise<boolean> {
 
 /** Record one failed HTTP auth attempt after all configured credential types fail. */
 export async function recordHttpAuthorizationFailure(root: string): Promise<void> {
+  await recordHttpAuthorizationFailures(root, 1);
+}
+
+/** Persist a bounded aggregate rather than doing a lock/fsync for every bad request. */
+export async function recordHttpAuthorizationFailures(root: string, attempts: number): Promise<void> {
+  if (!Number.isSafeInteger(attempts) || attempts < 1) return;
   await withVaultLock(root, async () => {
     const store = await readStore(root);
     if (!store.credentials.length) return;
-    store.audit = appendAudit(store, { at: new Date().toISOString(), action: 'authorization_failed' });
+    store.audit = appendAudit(store, { at: new Date().toISOString(), action: 'authorization_failed', attempts });
     await atomicWrite(root, FILE, JSON.stringify(store, null, 2));
   });
 }

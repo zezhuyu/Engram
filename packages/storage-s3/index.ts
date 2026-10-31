@@ -1,9 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand,
-  S3Client, type S3ClientConfig,
-} from '@aws-sdk/client-s3';
+import { createRequire } from 'node:module';
+import type { S3Client, S3ClientConfig } from '@aws-sdk/client-s3';
 import { MDBError, type CommitEvent, type CommitJournalStore, type ObjectStore } from '../core/types.js';
+
+type AwsS3 = typeof import('@aws-sdk/client-s3');
+const require = createRequire(import.meta.url);
+let awsS3: AwsS3 | undefined;
+function s3Sdk(): AwsS3 {
+  try { return awsS3 ??= require('@aws-sdk/client-s3') as AwsS3; }
+  catch { throw new MDBError('CAPABILITY_UNAVAILABLE', 'S3 storage requires the optional @aws-sdk/client-s3 package'); }
+}
 
 type Head = { sequence: number; recordKey?: string; recordSha256?: string };
 type Record = { event: CommitEvent; previous?: Head };
@@ -26,7 +32,7 @@ export class S3ObjectStore implements ObjectStore, CommitJournalStore {
   constructor(readonly bucket: string, options: S3ClientConfig & { prefix?: string; client?: S3Client } = {}) {
     if (!bucket || bucket.includes('/')) throw new MDBError('INVALID_INPUT', 'S3 bucket name is required');
     const { prefix = '', client, ...clientOptions } = options;
-    this.client = client ?? new S3Client(clientOptions);
+    this.client = client ?? new (s3Sdk().S3Client)(clientOptions);
     this.base = prefix.replace(/^\/+|\/+$/g, '');
     this.headKey = this.key('.mdb/events/_commit-head.json');
   }
@@ -36,7 +42,7 @@ export class S3ObjectStore implements ObjectStore, CommitJournalStore {
   }
   private async bytes(key: string): Promise<Uint8Array> {
     try {
-      const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.key(key) }));
+      const response = await this.client.send(new (s3Sdk().GetObjectCommand)({ Bucket: this.bucket, Key: this.key(key) }));
       if (!response.Body) throw new MDBError('INTERNAL', `S3 returned an empty body for ${key}`);
       return await response.Body.transformToByteArray();
     } catch (error) { if (missing(error)) throw Object.assign(new Error('Object not found'), { code: 'ENOENT' }); throw error; }
@@ -52,14 +58,14 @@ export class S3ObjectStore implements ObjectStore, CommitJournalStore {
     return results;
   }
   async stat(key: string): Promise<{ etag?: string; size: number } | null> {
-    try { const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.key(key) })); return { ...(r.ETag ? { etag: r.ETag } : {}), size: r.ContentLength ?? 0 }; }
+    try { const r = await this.client.send(new (s3Sdk().HeadObjectCommand)({ Bucket: this.bucket, Key: this.key(key) })); return { ...(r.ETag ? { etag: r.ETag } : {}), size: r.ContentLength ?? 0 }; }
     catch (error) { if (missing(error)) return null; throw error; }
   }
   async *list(prefix: string): AsyncIterable<{ key: string; size: number }> {
     const keyPrefix = this.key(prefix);
     let token: string | undefined;
     do {
-      const page = await this.client.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: keyPrefix, ContinuationToken: token }));
+      const page = await this.client.send(new (s3Sdk().ListObjectsV2Command)({ Bucket: this.bucket, Prefix: keyPrefix, ContinuationToken: token }));
       for (const item of page.Contents ?? []) if (item.Key && item.Size !== undefined) {
         const key = this.base ? item.Key.slice(this.base.length + 1) : item.Key;
         yield { key, size: item.Size };
@@ -68,7 +74,7 @@ export class S3ObjectStore implements ObjectStore, CommitJournalStore {
     } while (token);
   }
   async putImmutable(key: string, bytes: Uint8Array): Promise<void> {
-    try { await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: this.key(key), Body: bytes, IfNoneMatch: '*', Metadata: { sha256: hash(bytes) } })); }
+    try { await this.client.send(new (s3Sdk().PutObjectCommand)({ Bucket: this.bucket, Key: this.key(key), Body: bytes, IfNoneMatch: '*', Metadata: { sha256: hash(bytes) } })); }
     catch (error) {
       if (!precondition(error)) throw error;
       const existing = await this.read(key);
@@ -79,16 +85,16 @@ export class S3ObjectStore implements ObjectStore, CommitJournalStore {
     if (/^(?:\.mdb\/objects\/|.*\/sources\/originals\/|\.mdb\/events\/records\/)/.test(key)) throw new MDBError('INVALID_INPUT', 'Canonical immutable objects cannot be replaced by pointers');
     let etag: string | undefined; let current: string | null = null;
     try {
-      const head = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.key(key) })); etag = head.ETag;
+      const head = await this.client.send(new (s3Sdk().HeadObjectCommand)({ Bucket: this.bucket, Key: this.key(key) })); etag = head.ETag;
       current = Buffer.from(await this.bytes(key)).toString('utf8');
     } catch (error) { if (!missing(error)) throw error; }
     if (current !== expected) return false;
     try {
-      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: this.key(key), Body: value, ...(etag ? { IfMatch: etag } : { IfNoneMatch: '*' }) }));
+      await this.client.send(new (s3Sdk().PutObjectCommand)({ Bucket: this.bucket, Key: this.key(key), Body: value, ...(etag ? { IfMatch: etag } : { IfNoneMatch: '*' }) }));
       return true;
     } catch (error) { if (precondition(error)) return false; throw error; }
   }
-  async removeForAuthorizedPurge(key: string): Promise<void> { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: this.key(key) })); }
+  async removeForAuthorizedPurge(key: string): Promise<void> { await this.client.send(new (s3Sdk().DeleteObjectCommand)({ Bucket: this.bucket, Key: this.key(key) })); }
 
   async initializeJournal(): Promise<void> {
     const initial = JSON.stringify({ sequence: 0 } satisfies Head);

@@ -11,7 +11,7 @@ export type InsightEvidenceClass = 'explicit' | 'inferred' | 'exposure' | 'hypot
 export interface InsightSource { uri: string; revisionId: string; class: SourceClass; speaker?: string; span?: string }
 export interface InsightEval { verdict: 'accept' | 'reject' | 'review_required'; rationale: string; flags: string[]; patch: Record<string, unknown>; supersede: string[] }
 const KEY = /^[a-z0-9][a-z0-9_.-]{0,60}$/;
-const FREE_TEXT_CORRECTION = /\b(?:actually|correction|i meant|i was wrong|i changed my mind|from now on|going forward|no longer|not anymore|instead of|rather than)\b/i;
+const FREE_TEXT_CORRECTION = /\b(?:actually|correction|i meant|i was wrong|i changed my (?:mind|preference)|from now on|going forward|no longer|not anymore|instead of|rather than|in place of|i would rather|i\s+now\s+(?:prefer|like|want|need)|but\s+i\s+(?:now\s+)?(?:prefer|like|want|need)|i\s+(?:do\s+not|don't)\s+(?:prefer|like|want|need)|stop\s+using|switch(?:ed)?\b.{0,100}\bto|move\b.{0,100}\bfrom\b|my new preference|previously preferred|(?:do\s+not|don't)\s+keep|replace\b.{0,120}\bwith)\b/i;
 const NO_INSIGHT_CLAIM = /^\s*(?:no\s+(?:(?:enduring|lasting|user)\s+)*(?:insight|preference|proposal)|no\s+insight\s+(?:is\s+)?proposed|no\s+proposal\b)/i;
 const MULTIPLE_INSIGHTS = /\b(?:and|;)\s+(?:the\s+user\s+)?(?:prefers?|likes?|wants?|needs?|can|is\s+interested|has\s+experience|plans?|aims?)\b/i;
 const USER_OPTOUT = /\bforget\s+this\b|\b(?:do not|don't|never)\s+(?:(?:want|wish)\s+(?:you\s+to\s+)?)?(?:save|store|remember|retain|infer|derive)\s+(?:it|this(?:\s+conversation)?|that|anything|anywhere|a\s+(?:lasting|long[- ]term)\s+(?:preference|memory))\b/i;
@@ -23,6 +23,17 @@ const TOPIC_EXPOSURE = /\b(?:read|heard|saw|watched|skimmed|came across|learned 
 const THIRD_PARTY_ONLY = /\b(?:vendor|teammate|colleague|coworker|friend|customer|client|manager|partner|someone else)\b.{0,240}\b(?:nothing to do with my|not my (?:own )?(?:preference|habit|choice)|does not reflect my|doesn't reflect my)\b/i;
 const STOP_TERMS = new Set(['user', 'prefers', 'prefer', 'likes', 'wants', 'needs', 'using', 'rather', 'instead', 'changed', 'actually', 'explicitly', 'earlier', 'having', 'would', 'should', 'could', 'from', 'with', 'that', 'this', 'their', 'about', 'when', 'then', 'only', 'also', 'than', 'the', 'a', 'an', 'and', 'or', 'but', 'are', 'is', 'was', 'were', 'has', 'have', 'had', 'do', 'does', 'did', 'of', 'to', 'in', 'on', 'as', 'by', 'at', 'me', 'my', 'i', 'we', 'our', 'be', 'been', 'being', 'assistant']);
 const salientTerms = (text: string): Set<string> => new Set(normalize(text).split(' ').filter(word => word.length >= 4 && !STOP_TERMS.has(word)));
+const correctionTerms = (text: string): Set<string> => new Set(normalize(text).split(' ').map(word => word === 'js' ? 'javascript' : /^(?:tests?|testing)$/.test(word) ? 'test' : word).filter(word => word.length >= 4 && !STOP_TERMS.has(word)));
+/** Conservative cross-key identity for the well-defined answer-length preference family. */
+const preferenceFamily = (category: string, key: string, claim: string): string | undefined => {
+  if (!['preference', 'working_style'].includes(category)) return undefined;
+  const text = normalize(`${key.replace(/[-_.]/g, ' ')} ${claim}`);
+  if (/\b(?:answer|answers|response|responses|reply|replies)\b/.test(text)
+    && /\b(?:short|brief|concise|long|detailed|detail|thorough|verbose|length)\b/.test(text)) return 'response-length';
+  if (/\b(?:feedback|review)\b/.test(text)
+    && /\b(?:short|brief|concise|long|detailed|detail|thorough|comprehensive|verbose)\b/.test(text)) return 'feedback-detail';
+  return undefined;
+};
 const markerTargetsClaim = (body: string, marker: RegExp, key: string, claim: string): boolean => {
   const claimTerms = normalize(`${key.replace(/[-_.]/g, ' ')} ${claim}`).split(' ').filter(word => word.length >= 3 && !STOP_TERMS.has(word));
   return body.split(/(?<=[.!?;])\s+|\n+/).some(part => marker.test(part) && normalize(part).split(' ').some(term => term.length >= 3 && claimTerms.includes(term)));
@@ -31,9 +42,12 @@ const optedOut = (body: string, key: string, claim: string): boolean => BROAD_US
 const correctionApplies = (text: string, key: string, claim: string): boolean => {
   const marker = FREE_TEXT_CORRECTION.exec(text); if (!marker || marker.index === undefined) return false;
   const tail = normalize(text.slice(marker.index, marker.index + 240));
-  const terms = normalize(`${key.replace(/[-_.]/g, ' ')} ${claim}`).split(' ').filter(word => word.length >= 4 && !['user', 'prefers', 'prefer', 'likes', 'wants', 'needs', 'changed', 'actually', 'rather', 'instead'].includes(word));
-  return terms.some(term => tail.includes(term));
+  const terms = correctionTerms(`${key.replace(/[-_.]/g, ' ')} ${claim}`);
+  const tailTerms = correctionTerms(tail);
+  return [...terms].some(term => tailTerms.has(term));
 };
+/** Shared deterministic cue matcher for extraction fallback and correction evaluation. */
+export const explicitCorrectionApplies = correctionApplies;
 export const normalize = (text: string): string => text.toLowerCase().replace(/[\s\p{P}]+/gu, ' ').trim();
 const spanFound = (body: string, span: string): boolean => {
   if (span.length < 4) return false;
@@ -128,9 +142,12 @@ export async function evaluateInsight(vault: Vault, input: PutInput): Promise<In
   const allInsights = (await loadDocuments(vault, await readableEntries(vault))).filter(doc => doc.kind === 'user_insight' || doc.metadata.explicitPreference === true);
   const claimTerms = salientTerms(claim); const correctionText = docs.filter((doc, i) => sources[i]?.class === 'user_conversation').map(doc => doc.body).join('\n');
   const correctionTerms = salientTerms(correctionText);
+  const incomingFamily = preferenceFamily(category, key, claim);
   const existing = allInsights.filter(d => {
     if (applicability(d) !== label || ['superseded', 'rejected', 'deleted'].includes(d.status) || !(d.kind === 'user_insight' || d.metadata.explicitPreference === true)) return false;
-    if (d.metadata.preferenceKey === key) return true;
+    if (d.metadata.preferenceKey === key && (d.metadata.category === category || d.metadata.explicitPreference === true)) return true;
+    const existingFamily = preferenceFamily(String(d.metadata.category ?? ''), String(d.metadata.preferenceKey ?? ''), d.body);
+    if (evidenceClass === 'explicit' && freeTextCorrection && incomingFamily && incomingFamily === existingFamily && d.metadata.category === category) return true;
     if (evidenceClass !== 'explicit' || !freeTextCorrection || classifySource(d) === 'explicit') return false;
     const oldTerms = salientTerms(d.body); let overlap = 0;
     for (const word of oldTerms) if (claimTerms.has(word) && correctionTerms.has(word)) overlap++;
@@ -185,7 +202,19 @@ const clean = (t: string) => t.replace(/[\r\n]+/g, ' ').slice(0, 300);
 export async function projectProfile(owner: Vault): Promise<{ global: number; workspaces: number }> {
   if (!owner.actor.permissions.includes('*')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Projection requires the trusted owner');
   const entries = await readableEntries(owner, { kinds: ['user_insight'] });
-  const docs = (await loadDocuments(owner, entries)).filter(d => isInsight(d) && d.status === 'accepted');
+  const accepted = (await loadDocuments(owner, entries)).filter(d => isInsight(d) && d.status === 'accepted');
+  // Supersession is committed as a new immutable insight before the old object
+  // status is patched. If a process stops between those writes, the durable
+  // relation on the newer object still determines the current projection.
+  const byId = new Map(accepted.map(doc => [doc.id, doc]));
+  const supersededIds = new Set(accepted.flatMap(doc => Array.isArray(doc.metadata.supersedes) ? doc.metadata.supersedes.filter((id): id is string => typeof id === 'string') : []));
+  for (const id of supersededIds) {
+    const old = byId.get(id); if (!old || ['superseded', 'rejected', 'deleted'].includes(old.status)) continue;
+    const replacement = accepted.find(doc => Array.isArray(doc.metadata.supersedes) && doc.metadata.supersedes.includes(id) && applicability(doc) === applicability(old));
+    if (!replacement || !await owner.canAccess(old.scope, 'write')) continue;
+    try { await owner.patch({ objectId: old.id, expectedRevisionId: old.revisionId, status: 'superseded', metadataPatch: { supersededBy: replacement.uri, supersededByRevision: replacement.revisionId, supersededReason: 'reconciled from the accepted correction after interruption' } }); } catch { /* the durable supersedes relation still hides the old value from this projection */ }
+  }
+  const docs = accepted.filter(d => !supersededIds.has(d.id));
   const line = (d: Document) => `- **${d.metadata.category}** — ${clean(d.body)} _(extraction confidence ${typeof d.metadata.extractionConfidence === 'number' ? d.metadata.extractionConfidence.toFixed(2) : d.metadata.confidenceLabel}, factual certainty ${String(d.metadata.factualCertainty ?? d.metadata.evidenceClass)}, since ${d.metadata.validFrom})_ [history](${d.uri})`;
   const order = (a: Document, b: Document) => String(a.metadata.category).localeCompare(String(b.metadata.category)) || a.body.localeCompare(b.body) || a.id.localeCompare(b.id);
   const render = (list: Document[], hiddenLabel: string) => { const shown = list.filter(d => d.metadata.sensitivity !== 'sensitive').sort(order); const hidden = list.length - shown.length; return [...(shown.length ? shown.map(line) : ['_No accepted items._']), ...(hidden ? [`_${hidden} sensitive item(s) not listed ${hiddenLabel}._`] : [])]; };

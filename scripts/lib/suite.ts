@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -61,7 +62,26 @@ export interface SuiteReport {
   tests: TestResult[]; cases: number; caseFailures: unknown[]; seeds: number[]; invariantAssertions: number | null;
   gaps: Gap[]; limitations: string[]; repro: string; caseDetails: { name: string; status: string; detail?: unknown }[];
 }
+interface SuiteEvidenceReference { algorithm: 'sha256'; fingerprint: string; fileCount: number; manifestPath: 'source-evidence.json'; manifestSha256: string }
+interface SerializedSuiteReport extends Omit<SuiteReport, 'evidenceSource'> { evidenceSource: SuiteEvidenceReference | SourceEvidence }
 const sh = (cmd: string, args: string[] = []): string => { const r = spawnSync(cmd, args, { encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : ''; };
+
+/** Read a suite report and hydrate its source evidence only from a hash-bound sibling manifest. Old reports with inline file hashes remain readable. */
+export async function loadSuiteReport(reportPath: string): Promise<SuiteReport | undefined> {
+  let parsed: SerializedSuiteReport;
+  try { parsed = JSON.parse(await fs.readFile(reportPath, 'utf8')) as SerializedSuiteReport; } catch { return undefined; }
+  const source = parsed.evidenceSource;
+  if ('files' in source && source.files && typeof source.files === 'object') return parsed as SuiteReport;
+  if (!('manifestPath' in source)) return undefined;
+  if (source.manifestPath !== 'source-evidence.json' || source.algorithm !== 'sha256' || !/^[a-f0-9]{64}$/.test(source.fingerprint) || !Number.isInteger(source.fileCount) || source.fileCount < 1 || !/^[a-f0-9]{64}$/.test(source.manifestSha256)) return undefined;
+  try {
+    const bytes = await fs.readFile(path.join(path.dirname(reportPath), source.manifestPath));
+    if (createHash('sha256').update(bytes).digest('hex') !== source.manifestSha256) return undefined;
+    const manifest = JSON.parse(bytes.toString('utf8')) as SourceEvidence;
+    if (manifest.algorithm !== source.algorithm || manifest.fingerprint !== source.fingerprint || !manifest.files || Object.keys(manifest.files).length !== source.fileCount) return undefined;
+    return { ...parsed, evidenceSource: manifest } as SuiteReport;
+  } catch { return undefined; }
+}
 
 export function environment(): Record<string, unknown> {
   const tmp = os.tmpdir(); let filesystem = 'unknown';
@@ -72,12 +92,81 @@ export function environment(): Record<string, unknown> {
 }
 export function gitCommit(): string { return sh('git', ['rev-parse', 'HEAD']) || 'no-git-repository'; }
 
-export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promise<SuiteReport> {
+/** Return only descendants reachable from the process we spawned. Never use process-name matching here. */
+async function ownedDescendants(rootPid: number): Promise<number[]> {
+  return new Promise(resolve => {
+    const ps = spawn('ps', ['-axo', 'pid=,ppid='], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let output = '', settled = false;
+    const finish = (pids: number[]) => { if (settled) return; settled = true; clearTimeout(timer); resolve(pids); };
+    ps.stdout.setEncoding('utf8'); ps.stdout.on('data', (chunk: string) => { if (output.length < 2_000_000) output += chunk; });
+    ps.once('error', () => finish([]));
+    ps.once('close', code => {
+      if (code !== 0) return finish([]);
+      const parents = new Map<number, number>();
+      for (const line of output.split('\n')) { const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line); if (match) parents.set(Number(match[1]), Number(match[2])); }
+      const descendants: number[] = [];
+      for (const pid of parents.keys()) { let parent = parents.get(pid), depth = 0; while (parent !== undefined && depth++ < 256) { if (parent === rootPid) { descendants.push(pid); break; } parent = parents.get(parent); } }
+      finish(descendants.sort((a, b) => b - a));
+    });
+    const timer = setTimeout(() => { ps.kill('SIGKILL'); finish([]); }, 1_000);
+  });
+}
+
+function signalPid(pid: number, signal: NodeJS.Signals): void { try { process.kill(pid, signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; } }
+
+export async function runTestProcess(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; timedOut: boolean }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    let stdout = '', stderr = '', timedOut = false, closed = false, settled = false;
+    child.stdin.end(); child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (data: string) => { stdout += data; }); child.stderr.on('data', (data: string) => { stderr += data; });
+    const signalOwnedGroup = (signal: NodeJS.Signals) => {
+      if (!child.pid) return;
+      try { if (process.platform === 'win32') child.kill(signal); else process.kill(-child.pid, signal); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') stderr += `\n[runner] unable to signal owned test process group: ${(error as Error).message}`; }
+    };
+    let escalation: NodeJS.Timeout | undefined;
+    const timeout = setTimeout(async () => {
+      timedOut = true;
+      stderr += `\n[runner] suite exceeded ${timeoutMs} ms; terminating its owned process tree`;
+      const descendants = process.platform === 'win32' || !child.pid ? [] : await ownedDescendants(child.pid);
+      // Stop detached workers before their owner exits and reparents them. Every
+      // PID here was observed as a descendant of this exact child process.
+      for (const pid of descendants) { try { signalPid(pid, 'SIGTERM'); } catch (error) { stderr += `\n[runner] unable to signal owned descendant ${pid}: ${(error as Error).message}`; } }
+      signalOwnedGroup('SIGTERM');
+      escalation = setTimeout(() => {
+        for (const pid of descendants) { try { signalPid(pid, 'SIGKILL'); } catch (error) { stderr += `\n[runner] unable to escalate owned descendant ${pid}: ${(error as Error).message}`; } }
+        signalOwnedGroup('SIGKILL');
+        // Descendants can inherit stdout/stderr after detaching from the test
+        // runner. Close our read ends and settle on a fixed deadline rather
+        // than allowing those pipes to make a verification job unbounded.
+        child.stdout.destroy(); child.stderr.destroy();
+        if (!settled) { settled = true; closed = true; resolve({ status: 124, signal: null, stdout, stderr: `${stderr}\n[runner] output pipes closed after bounded process-tree escalation`, timedOut }); }
+      }, 2_000);
+    }, timeoutMs);
+    child.once('error', error => { clearTimeout(timeout); if (escalation) clearTimeout(escalation); if (!settled) { settled = true; closed = true; reject(error); } });
+    child.once('close', (status, signal) => {
+      clearTimeout(timeout); closed = true;
+      // The test-runner process can close while a detached worker still holds
+      // inherited pipes. Keep the escalation timer alive until the descendant
+      // cleanup deadline has elapsed.
+      if (timedOut) return;
+      if (escalation) clearTimeout(escalation);
+      if (!settled) { settled = true; resolve({ status, signal, stdout, stderr, timedOut }); }
+    });
+  });
+}
+
+export async function runSuite(spec: SuiteSpec, outRoot = process.env.MDB_VERIFICATION_OUTPUT ?? 'verification'): Promise<SuiteReport> {
   const outDir = path.join(outRoot, spec.name); await fs.mkdir(outDir, { recursive: true });
   const casesFile = path.resolve(outDir, 'cases.jsonl'); await fs.rm(casesFile, { force: true });
-  const args = ['--test', '--test-reporter=tap', ...(spec.concurrency ? [`--test-concurrency=${spec.concurrency}`] : []), ...spec.files];
+  const perTestTimeoutMs = Number(process.env.MDB_TEST_TIMEOUT_MS ?? 300_000);
+  const suiteTimeoutMs = Number(process.env.MDB_SUITE_TIMEOUT_MS ?? 900_000);
+  const args = ['--test', `--test-timeout=${perTestTimeoutMs}`, '--test-reporter=tap', ...(spec.concurrency ? [`--test-concurrency=${spec.concurrency}`] : []), ...spec.files];
   const started = Date.now();
-  const run = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env } });
+  let run: Awaited<ReturnType<typeof runTestProcess>>;
+  try { run = await runTestProcess(args, { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env }, suiteTimeoutMs); }
+  catch (error) { run = { status: 1, signal: null, stdout: '', stderr: `[runner] could not start test process: ${(error as Error).message}`, timedOut: false }; }
   const durationMs = Date.now() - started;
   const tests: TestResult[] = [];
   const outLines = run.stdout.split('\n'); let detailed = 0; const MAX_DETAILS = 25; // bounded report size: details for the first 25 failures only
@@ -95,17 +184,21 @@ export async function runSuite(spec: SuiteSpec, outRoot = 'verification'): Promi
   const command = `node ${args.join(' ')}`;
   const evidenceSource = await currentSourceEvidence();
   const report: SuiteReport = {
-    suite: spec.name, git_commit: gitCommit(), status, exitCode: run.status, run_at: new Date().toISOString(), command, durationMs, evidenceSource, environment: environment(), counts, tests,
+    suite: spec.name, git_commit: gitCommit(), status, exitCode: run.status, run_at: new Date().toISOString(), command, durationMs, evidenceSource, environment: { ...environment(), testTimeoutMs: perTestTimeoutMs, suiteTimeoutMs, timedOut: run.timedOut, terminatingSignal: run.signal }, counts, tests,
     cases: caseLines.length, caseFailures, seeds: [...new Set(caseLines.map(c => c.seed).filter((s): s is number => typeof s === 'number'))], invariantAssertions: null,
     gaps: spec.gaps, limitations: spec.limitations, repro: `npm run build && ${command}`, caseDetails: caseLines.map(c => ({ name: `${c.suite}/${c.name}`, status: c.status, ...(c.detail ? { detail: c.detail } : {}) }))
   };
-  await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+  const sourceManifest = `${JSON.stringify(evidenceSource)}\n`;
+  await fs.writeFile(path.join(outDir, 'source-evidence.json'), sourceManifest);
+  const reportEvidence: SuiteEvidenceReference = { algorithm: evidenceSource.algorithm, fingerprint: evidenceSource.fingerprint, fileCount: Object.keys(evidenceSource.files).length, manifestPath: 'source-evidence.json', manifestSha256: createHash('sha256').update(sourceManifest).digest('hex') };
+  const serialized: SerializedSuiteReport = { ...report, evidenceSource: reportEvidence };
+  await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(serialized) + '\n');
   await fs.writeFile(path.join(outDir, 'report.md'), markdown(spec, report) + '\n');
   if (status !== 'PASS') await fs.writeFile(path.join(outDir, 'last-output.txt'), scrubDiagnostics(run.stdout, { ...process.env, ...spec.env }).slice(-100000) + '\n--- stderr ---\n' + scrubDiagnostics(run.stderr, { ...process.env, ...spec.env }).slice(-10000)); // scrub the whole text first: a secret straddling the size cap must not survive as a fragment
   return report;
 }
 function markdown(spec: SuiteSpec, r: SuiteReport): string {
-  const lines = [`# ${spec.title}`, '', `**Status: ${r.status}** — ${r.counts.pass}/${r.counts.total} tests passed, ${r.counts.fail} failed, ${r.counts.skipped} skipped; ${r.cases} recorded cases, ${r.caseFailures.length} case failures.`, '', `Run at ${r.run_at}, ${(r.durationMs / 1000).toFixed(1)} s. Commit: ${r.git_commit}.`, `Source fingerprint: SHA-256 ${r.evidenceSource.fingerprint} (${Object.keys(r.evidenceSource.files).length} files).`, `Environment: ${r.environment.os} (${r.environment.arch}), tmp filesystem ${r.environment.tmpFilesystem}, Node ${r.environment.node}, SQLite ${r.environment.sqlite}, ${r.environment.cpu}.`, `Seeds: ${r.seeds.length ? r.seeds.join(', ') : 'none (deterministic)'}`, '', `Reproduce: \`${r.repro}\``, '', '## Tests', '', '| Status | Test |', '|---|---|', ...r.tests.map(t => `| ${t.status} | ${t.name.replace(/\|/g, '\\|')} |`), '', '## Not verified', '', '| Status | Item | Reason |', '|---|---|---|', ...spec.gaps.map(g => `| ${g.status} | ${g.item} | ${g.reason} |`), '', '## Limitations', '', ...spec.limitations.map(l => `- ${l}`)];
+  const lines = [`# ${spec.title}`, '', `**Status: ${r.status}** — ${r.counts.pass}/${r.counts.total} tests passed, ${r.counts.fail} failed, ${r.counts.skipped} skipped; ${r.cases} recorded cases, ${r.caseFailures.length} case failures.`, '', `Run at ${r.run_at}, ${(r.durationMs / 1000).toFixed(1)} s. Commit: ${r.git_commit}.`, `Source fingerprint: SHA-256 ${r.evidenceSource.fingerprint} (${Object.keys(r.evidenceSource.files).length} files).`, `Environment: ${r.environment.os} (${r.environment.arch}), tmp filesystem ${r.environment.tmpFilesystem}, Node ${r.environment.node}, SQLite ${r.environment.sqlite}, ${r.environment.cpu}.`, `Seeds: ${r.seeds.length ? r.seeds.join(', ') : 'none (deterministic)'}`, '', `Reproduce: \`${r.repro}\``, '', '## Tests', '', '| Status | Test |', '|---|---|---|', ...r.tests.map(t => `| ${t.status} | ${t.name.replace(/\|/g, '\\|')} |`), '', '## Not verified', '', '| Status | Item | Reason |', '|---|---|---|', ...spec.gaps.map(g => `| ${g.status} | ${g.item} | ${g.reason} |`), '', '## Limitations', '', ...spec.limitations.map(l => `- ${l}`)];
   return lines.join('\n');
 }
 export function summarize(report: SuiteReport): void {

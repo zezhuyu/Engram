@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js';
+import { assertDurableWriteCapacity } from '../core/storage-lifecycle.js';
 import { systemTimeZone } from './clock.js';
 import type { AdaptiveConfig, Cursors, Cycle, Lease, ScheduleEvent, Telemetry } from './types.js';
 
@@ -20,7 +21,7 @@ const safeId = (id: string) => id.replace(/[^A-Za-z0-9._-]/g, '_');
 export class AdaptiveStore {
   constructor(public readonly root: string) {}
   private async read<T>(key: string): Promise<T | undefined> { try { return JSON.parse(await fs.readFile(await safePath(this.root, key), 'utf8')) as T; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; } }
-  private async write(key: string, value: unknown): Promise<void> { await atomicWrite(this.root, key, JSON.stringify(value, null, 2)); }
+  private async write(key: string, value: unknown): Promise<void> { const serialized = JSON.stringify(value, null, 2); await assertDurableWriteCapacity(this.root, Buffer.byteLength(serialized) + 4096); await atomicWrite(this.root, key, serialized); }
   /** Short critical sections only: file IO, never model work. */
   locked<T>(action: () => Promise<T>): Promise<T> { return withVaultLock(this.root, action); }
 
@@ -32,7 +33,7 @@ export class AdaptiveStore {
 
   /** Append-only operational log. Best effort: telemetry must never fail or reorder a cycle. */
   async appendEvent(event: Omit<ScheduleEvent, 'at'> & { at?: string }): Promise<void> {
-    try { await this.locked(async () => { const file = await safePath(this.root, `${DIR}/events.jsonl`); await fs.mkdir(path.dirname(file), { recursive: true }); await fs.appendFile(file, JSON.stringify({ at: new Date().toISOString(), ...event }) + '\n', { mode: 0o600 }); }); } catch { /* advisory */ }
+    try { await this.locked(async () => { const file = await safePath(this.root, `${DIR}/events.jsonl`); const line = JSON.stringify({ at: new Date().toISOString(), ...event }) + '\n'; await assertDurableWriteCapacity(this.root, Buffer.byteLength(line) + 4096); await fs.mkdir(path.dirname(file), { recursive: true }); await fs.appendFile(file, line, { mode: 0o600 }); }); } catch { /* advisory */ }
   }
   async events(limit = 50): Promise<ScheduleEvent[]> {
     try { const lines = (await fs.readFile(await safePath(this.root, `${DIR}/events.jsonl`), 'utf8')).split('\n').filter(Boolean); return lines.slice(-limit).flatMap(line => { try { return [JSON.parse(line) as ScheduleEvent]; } catch { return []; } }); } catch { return []; }

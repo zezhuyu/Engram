@@ -38,14 +38,29 @@ export async function remoteTarget(flags: Flags, cwd = process.cwd(), env: NodeJ
 }
 
 /** CLI commands that have a server equivalent. Everything else keeps working on a local vault. */
-export const REMOTE_COMMANDS = new Set(['search', 'grep', 'context', 'get', 'history', 'put', 'patch', 'workspace', 'collection', 'memory', 'insight', 'capabilities', 'task', 'note', 'handoff', 'remote']);
-const REMOTE_SUBCOMMANDS: Record<string, string[]> = { workspace: ['list', 'create'], collection: ['list'], memory: ['recent', 'timeline', 'search', 'get'], insight: ['search'], task: ['upsert'], note: ['upsert'], handoff: ['write'], remote: ['tools', 'call'] };
+export const REMOTE_COMMANDS = new Set(['search', 'grep', 'context', 'get', 'history', 'put', 'patch', 'workspace', 'collection', 'memory', 'insight', 'capabilities', 'task', 'note', 'handoff', 'remote', 'wiki']);
+const REMOTE_SUBCOMMANDS: Record<string, string[]> = { workspace: ['list', 'create'], collection: ['list'], memory: ['recent', 'timeline', 'search', 'get'], insight: ['search'], task: ['upsert'], note: ['upsert'], handoff: ['write'], remote: ['tools', 'call'], wiki: ['lint', 'propose', 'proposals'] };
 export const usesServer = (command: string, sub: string | undefined): boolean => REMOTE_COMMANDS.has(command) && (!REMOTE_SUBCOMMANDS[command] || REMOTE_SUBCOMMANDS[command]!.includes(sub ?? ''));
 
 export async function mapCommand(command: string, args: string[], flags: Flags): Promise<{ tool: string; input: Record<string, unknown> } | 'list'> {
-  const [, sub, third] = args; const scope = scopeFlag(flags);
+  const [, sub, third] = args; const scope = command === 'wiki' ? undefined : scopeFlag(flags);
   const searchArgs = () => compact({ query: need(command === 'context' ? text(flags, 'task', sub) : sub, 'query'), mode: text(flags, 'mode', command === 'grep' ? 'grep' : 'auto'), regex: !!flags.regex, caseSensitive: !!flags['case-sensitive'], allowFallback: !!flags['allow-fallback'], includeHistory: !!flags['include-history'], limit: num(flags, 'limit'), cursor: text(flags, 'cursor'), kinds: csv(flags, 'kinds'), tags: csv(flags, 'tags'), since: text(flags, 'since'), until: text(flags, 'until'), scopes: scope ? [scope] : undefined });
   switch (command) {
+    case 'wiki': {
+      if (sub === 'proposals') return { tool: 'mdb_wiki_proposals', input: compact({ status: text(flags, 'status') }) };
+      if (sub === 'propose') {
+        const action = third; if (!['retire', 'restore', 'rename', 'merge'].includes(action ?? '')) throw new MDBError('INVALID_ARGUMENT', 'wiki propose requires retire, restore, rename, or merge');
+        const sourceRefs = csv(flags, 'source')?.map(value => { const [pageId, revisionId, ...extra] = value.split(':'); if (!pageId || !revisionId || extra.length) throw new MDBError('INVALID_ARGUMENT', '--source must be ID:REVISION'); return { pageId, revisionId }; });
+        const refs = csv(flags, 'evidence')?.map(value => { const match = /^(.*):([^:]+)(?::(.*))?$/.exec(value); if (!match?.[1]) throw new MDBError('INVALID_ARGUMENT', '--evidence must be URI:REVISION[:SPAN]'); return { uri: match[1], revisionId: match[2]!, ...(match[3] ? { span: match[3] } : {}) }; });
+        return { tool: 'mdb_wiki_propose_change', input: compact({ action, targetPageId: need(text(flags, action === 'merge' ? 'target' : 'page'), action === 'merge' ? '--target' : '--page'), targetRevisionId: need(text(flags, 'revision'), '--revision'), reason: need(text(flags, 'reason'), '--reason'), restoreRevisionId: action === 'restore' ? need(text(flags, 'to-revision'), '--to-revision') : undefined, newTitle: action === 'rename' ? need(text(flags, 'title'), '--title') : undefined, mergeSources: sourceRefs, title: action === 'merge' ? need(text(flags, 'title'), '--title') : undefined, body: action === 'merge' ? await bodyOf(flags) : undefined, evidence: action === 'merge' ? refs : undefined }) };
+      }
+      const scope = (value: string): Record<string, unknown> => {
+        const p = value.split(':'); if (p[0] === 'workspace' && p[1]) return { type: 'workspace', workspaceId: p[1], ...(p[2] ? { collectionId: p[2] } : {}) };
+        const area = p[0] === 'global' ? p[1] : p[0]; if (['wiki', 'shared', 'discoveries', 'profile'].includes(area ?? '')) return { type: 'global', area };
+        throw new MDBError('INVALID_ARGUMENT', 'Scope must be workspace:ID[:COLLECTION] or global:AREA');
+      };
+      return { tool: 'mdb_wiki_lint', input: compact({ scopes: csv(flags, 'scope')?.map(scope), checks: csv(flags, 'check'), minSeverity: text(flags, 'min-severity'), limit: num(flags, 'limit') }) };
+    }
     case 'search': case 'grep': return { tool: command === 'grep' ? 'mdb_grep' : 'mdb_search', input: searchArgs() };
     case 'context': return { tool: 'mdb_context', input: { ...searchArgs(), ...(num(flags, 'budget') ? { budgetTokens: num(flags, 'budget') } : {}) } };
     case 'get': return { tool: 'mdb_get', input: compact({ objectId: need(sub, 'object ID'), revisionId: text(flags, 'revision') }) };

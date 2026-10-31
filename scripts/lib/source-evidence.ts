@@ -10,9 +10,20 @@ export interface SourceEvidence {
   files: Record<string, string>;
 }
 
+function sourceBytes(name: string, bytes: Buffer): Buffer {
+  if (name !== 'AGENTS.md') return bytes;
+  const text = bytes.toString('utf8');
+  const open = '<claude-mem-context>', close = '</claude-mem-context>';
+  const start = text.indexOf(open);
+  if (start < 0) return bytes;
+  const end = text.indexOf(close, start + open.length);
+  if (end < 0) throw new Error('AGENTS.md has an unterminated generated claude-mem-context block');
+  return Buffer.from(`${text.slice(0, start)}${text.slice(end + close.length)}`, 'utf8');
+}
+
 const SOURCE_DIRS = ['.github', 'bin', 'ci', 'deploy', 'docs', 'fixtures', 'integrations', 'linux', 'macos', 'packages', 'scripts', 'skills', 'tests'];
 const ROOT_FILES = ['.dockerignore', '.gitignore', 'AGENTS.md', 'Makefile', 'README.md', 'package.json', 'package-lock.json', 'tsconfig.json', '.nvmrc'];
-const EVALUATION_INPUTS = ['verification/profile/labeled-corpus.json', 'fixtures/inputs/profile/holdout-corpus.json', 'verification/dream/labeled-scenarios.json', 'verification/benchmarks/corpus-manifest.json'];
+const EVALUATION_INPUTS = ['verification/profile/labeled-corpus.json', 'verification/profile/correction-corpus.json', 'fixtures/inputs/profile/holdout-corpus.json', 'verification/dream/labeled-scenarios.json', 'verification/benchmarks/corpus-manifest.json'];
 
 /** Hash application, test, deployment and evaluation inputs without consulting or changing the Git index. */
 export async function currentSourceEvidence(root = process.cwd()): Promise<SourceEvidence> {
@@ -45,7 +56,7 @@ export async function currentSourceEvidence(root = process.cwd()): Promise<Sourc
   const files: Record<string, string> = {};
   const hash = createHash('sha256');
   for (const name of [...names].sort()) {
-    const bytes = await fs.readFile(path.join(root, name));
+    const bytes = sourceBytes(name, await fs.readFile(path.join(root, name)));
     const fileHash = createHash('sha256').update(bytes).digest('hex');
     files[name] = fileHash;
     hash.update(name).update('\0').update(fileHash).update('\n');

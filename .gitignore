@@ -10,13 +10,18 @@ coverage/
 .nyc_output/
 .eslintcache
 *.tgz
-docs/*.md
+docs/
 .omx/
 verification/
+verification/
+independent-final-review/
+independent-final-reaudit-bbfb/
+.orchestrate/
 examples/
 AGENTS.md
 CLAUDE.md
 docs/
+!/docs/
 
 # ---------------------------------------------------------------------------
 # Secrets and credentials. Never commit these. Real values belong in the
@@ -215,20 +220,36 @@ scratch.*
 /docs/handoff/
 /docs/notes/
 !/docs/adr/
+/docs/adr/*
+!/docs/adr/0001-markdown-authority.md
+!/docs/adr/0002-minimal-dependencies.md
+!/docs/adr/0003-skills-and-review.md
+!/docs/adr/0004-native-memory-first.md
+!/docs/adr/0005-query-ast-and-read-snapshots.md
+!/docs/adr/0006-unix-text-tools.md
+!/docs/adr/0007-remote-mcp-web-and-agent-slack.md
 !/docs/remote-client-setup.md
+!/docs/wiki-and-memory-jobs.md
+!/docs/storage-isolation-gap-analysis.md
+!/docs/storage-remediation-priorities.md
+!/docs/storage-root-contract.md
 # per-task test fixtures that only hold recorded model transcripts
 /tests/fixtures/profile-raw/
 
 # ---------------------------------------------------------------------------
 # verification/: keep the inputs the scripts read and the hand-written protocol
 # documents; everything produced by a run, and every phase/milestone/task note,
-# is regenerated locally and stays out of the repository.
+# is regenerated locally and stays out of the repository. Storage investigation
+# design and policy documents are hand-written review inputs and are exceptions.
 # ---------------------------------------------------------------------------
 /verification/*
 !/verification/README.md
 !/verification/release-matrix.json
 !/verification/v1-gates.json
 !/verification/live-backends/
+/verification/live-backends/*
+!/verification/live-backends/README.md
+!/verification/live-backends/compose.yaml
 !/verification/profile/
 /verification/profile/*
 !/verification/profile/labeled-corpus.json
@@ -250,12 +271,33 @@ scratch.*
 !/verification/durability/vm/fsync-eio.c
 !/verification/durability/vm/run-kernel-fsync-eio.sh
 !/verification/durability/vm/run-powercuts.sh
+!/verification/durability/vm/current-source-kernel-fsync-eio.json
+!/verification/durability/vm/kernel-fsync-eio-current-source.json
+!/verification/durability/vm/kernel-fsync-eio-result.json
 !/verification/benchmarks/
 /verification/benchmarks/*
 !/verification/benchmarks/methodology.md
 !/verification/benchmarks/corpus-manifest.json
 !/verification/remote-clients/
-!/verification/remote-clients/**
+/verification/remote-clients/*
+!/verification/remote-clients/audit.md
+!/verification/remote-clients/capability-matrix.json
+!/verification/remote-clients/http-service-historical-unhashed-2026-10-15.json
+!/verification/remote-clients/http-service.json
+!/verification/remote-clients/report.json
+!/verification/remote-clients/report.md
+!/verification/wiki/
+/verification/wiki/*
+!/verification/wiki/report.md
+!/verification/wiki/report.json
+!/verification/wiki/m3.md
+!/verification/wiki/gitignore-visibility.md
+!/verification/wiki/gitignore-visibility.json
+!/verification/storage-live-monitor-design.md
+!/verification/storage-reproduction-matrix.md
+!/verification/storage-growth-attribution.md
+!/verification/storage-monitor-self-test.md
+!/docs/storage-isolation-gap-analysis.md
 
 # ---------------------------------------------------------------------------
 # Docker / compose overrides and local test infrastructure

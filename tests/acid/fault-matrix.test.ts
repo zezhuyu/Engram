@@ -20,6 +20,7 @@ type Klass = 'PRE' | 'AMBIG' | 'POST';
 const stages: { stage: string; klass: Klass; after?: string }[] = [
   { stage: 'commit.before_revision', klass: 'PRE' },
   { stage: 'revision.partial_write', klass: 'PRE' },
+  { stage: 'revision.before_temp_create', klass: 'PRE' },
   { stage: 'revision.temp_written', klass: 'PRE' },
   { stage: 'revision.temp_synced', klass: 'PRE' },
   { stage: 'revision.after_link', klass: 'PRE' },
@@ -146,7 +147,10 @@ test('repeated kills during recovery itself still converge', async t => {
   const { root, vault } = await disposableVault(t);
   const scope = { type: 'global' as const, area: 'wiki' as const };
   const doc = await vault.put({ scope, kind: 'note', title: 'x', body: 'v1' });
-  const killed = await runChild(`${faultPreamble(root, { stage: 'view.before_replace', mode: 'kill' })} await vault.patch({objectId:${JSON.stringify(doc.id)},expectedRevisionId:${JSON.stringify(doc.revisionId)},body:'v2'});`);
+  // Leave both projections stale: recovery now correctly skips a head write
+  // when the journal head is already durable and current, so a view-only
+  // interruption cannot reach recover.before_head_write on its next attempt.
+  const killed = await runChild(`${faultPreamble(root, { stage: 'head.before_replace', mode: 'kill' })} await vault.patch({objectId:${JSON.stringify(doc.id)},expectedRevisionId:${JSON.stringify(doc.revisionId)},body:'v2'});`);
   assert.equal(killed.signal, 'SIGKILL');
   for (const stage of ['recover.before_view_repair', 'recover.before_head_write']) {
     const crash = await runChild(`${faultPreamble(root, { stage, mode: 'kill' })} await vault.recover();`);
@@ -171,6 +175,40 @@ test('view replacement denied (EACCES) after the commit point: the commit stays 
   assert.equal(await fs.readFile(path.join(root, doc.path), 'utf8'), (await fs.readFile(path.join(root, `.mdb/objects/${doc.id}/revs/${(await vault.get(doc.id)).revisionId}.md`), 'utf8')));
   assert.deepEqual((await verifyInvariants(vault)).issues, []);
   recordCase({ suite: 'acid-fault-matrix', name: 'view-eacces', status: 'PASS' });
+});
+
+test('post-journal ENOSPC retries with the same idempotency key return the one durable commit', async t => {
+  const postCommitStages = [
+    'journal.after_fsync', 'after_journal', 'after_journal_append', 'before_view',
+    'before_view_update', 'head.before_replace', 'atomic.temp_written',
+    'atomic.before_rename', 'atomic.after_rename', 'view.before_replace',
+    'view.after_replace', 'commit.before_ack'
+  ];
+  for (const stage of postCommitStages) {
+    const { root } = await disposableVault(t);
+    let injected = false;
+    const input = { scope: { type: 'global' as const, area: 'wiki' as const }, kind: 'note', title: `retry ${stage}`, body: 'durable once', idempotencyKey: `retry-${stage}` };
+    const faulty = new Vault(root, undefined, { fault: point => {
+      if (!injected && point === stage) {
+        injected = true;
+        const error = new Error(`simulated ENOSPC at ${stage}`) as NodeJS.ErrnoException;
+        error.code = 'ENOSPC';
+        throw error;
+      }
+    } });
+
+    await assert.rejects(faulty.put(input), error => (error as NodeJS.ErrnoException).code === 'ENOSPC', stage);
+    assert.equal(injected, true, `${stage} was reached`);
+
+    const retry = await new Vault(root).put(input);
+    const events = (await new Vault(root).events()).filter(event => event.idempotencyKey === input.idempotencyKey);
+    assert.equal(events.length, 1, `${stage}: one journal event`);
+    assert.equal(retry.id, events[0]!.objectId, `${stage}: retry returns committed object`);
+    assert.equal(retry.revisionId, events[0]!.revisionId, `${stage}: retry returns committed revision`);
+    assert.equal(retry.body, input.body);
+    assert.deepEqual((await verifyInvariants(new Vault(root))).issues, [], `${stage}: durable state remains coherent`);
+  }
+  recordCase({ suite: 'acid-fault-matrix', name: 'post-journal-enospc-idempotent-retry', status: 'PASS', detail: { stages: postCommitStages } });
 });
 
 test('pre-authorization failure and rejected input leave no state behind', async t => {

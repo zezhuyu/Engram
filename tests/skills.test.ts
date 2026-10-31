@@ -71,8 +71,10 @@ test('export and critique expose authorized documents only and source instructio
   const { ctx, calls, fixture } = context();
   ctx.vault.get = async () => { throw new Error('not accessible'); };
   fixture.evidence = [{ uri: 'mdb://objects/private', revisionId: 'private-revision' }];
-  const report = await runSkill('knowledge-critique', {}, ctx) as { issues: { objectId: string; issue: string }[] };
-  assert.deepEqual(report.issues, [{ objectId: fixture.id, issue: 'unresolved_or_inaccessible_evidence' }]);
+  const report = await runSkill('knowledge-critique', {}, ctx) as { semanticTruthVerified: boolean; issues: { objectId: string; issue: string; severity?: string; message?: string; suggestedAction?: string }[] };
+  assert.equal(report.issues[0]?.objectId, fixture.id);
+  assert.ok(report.issues.some(issue => issue.issue === 'unresolved_or_inaccessible_evidence'));
+  assert.equal(report.semanticTruthVerified, false); assert.ok(report.issues.every(issue => issue.severity && issue.message && issue.suggestedAction));
   assert.equal(JSON.stringify(report).includes('private-revision'), false);
   const result = await runSkill('wiki-export', {}, ctx) as { documents: Document[] };
   assert.equal(result.documents.length, 1);

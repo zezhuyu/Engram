@@ -1,4 +1,5 @@
-import { Pool, type PoolClient, type QueryResult } from 'pg';
+import { createRequire } from 'node:module';
+import type { Pool, PoolClient, QueryResult } from 'pg';
 import { MDBError, type ActorContext, type Document, type Scope, type SearchInput, type SearchResult } from '../core/types.js';
 import { authorizedDocuments, FilesystemSearch, type SearchVault } from '../search-files/index.js';
 import { manifestFor } from '../search-files/manifest.js';
@@ -10,6 +11,11 @@ import type { EmbeddingProvider } from '../core/types.js';
 type Ranked = { object_id: string; revision_id: string; rank: number };
 const BATCH = 48;
 const envName = (name: string) => /^[A-Z_][A-Z0-9_]{0,127}$/.test(name);
+const require = createRequire(import.meta.url);
+function postgresPool(): typeof import('pg').Pool {
+  try { return (require('pg') as typeof import('pg')).Pool; }
+  catch { throw new MDBError('CAPABILITY_UNAVAILABLE', 'PostgreSQL search requires the optional pg package'); }
+}
 
 /** Optional PostgreSQL full-text index. Canonical reads and ACLs remain owned by Vault. */
 export class PostgresSearch {
@@ -26,7 +32,7 @@ export class PostgresSearch {
     const config = await this.config(); const envKey = config.postgres?.connectionStringEnv ?? 'MDB_POSTGRES_URL';
     const connectionString=this.options.connectionString??this.options.env?.[envKey]??process.env[envKey];
     if (!envName(envKey) || !connectionString) throw new MDBError('CAPABILITY_UNAVAILABLE', `PostgreSQL is enabled but ${envKey} is not configured`);
-    this.pool = new Pool({ connectionString, max: 8, application_name: 'engram-mdb' });
+    this.pool = new (postgresPool())({ connectionString, max: 8, application_name: 'engram-mdb' });
     return this.pool;
   }
   private async ready(): Promise<Pool> {

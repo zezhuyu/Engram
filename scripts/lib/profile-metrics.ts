@@ -71,6 +71,18 @@ export function predictionCountsByCase(rows: Array<{ expected: 'insight' | 'none
   return { positives, negatives, truePositive: correct, truePositiveCases, falseNegative: positives - truePositiveCases, falsePositive, predicted };
 }
 
+/** A correction evaluation cannot pass vacuously when the selected corpus has no supersession cases. */
+export function correctionSupersessionPass(rows: Array<{ requiresSupersession?: boolean; correctionOverride?: boolean }>): boolean {
+  const corrections = rows.filter(row => row.requiresSupersession === true);
+  return corrections.length > 0 && corrections.every(row => row.correctionOverride === true);
+}
+
+/** A corpus without correction cases does not measure supersession either way. */
+export function correctionSupersessionStatus(rows: Array<{ requiresSupersession?: boolean; correctionOverride?: boolean }>): 'PASS' | 'FAIL' | 'NOT_APPLICABLE' {
+  const corrections = rows.filter(row => row.requiresSupersession === true);
+  return corrections.length === 0 ? 'NOT_APPLICABLE' : corrections.every(row => row.correctionOverride === true) ? 'PASS' : 'FAIL';
+}
+
 /** A keyword counts as supported only when its local phrase is asserted, not explicitly negated. */
 export function assertedTermsHit(claim: string, terms: string[]): boolean {
   const words = tokenize(claim).map(canonical); const wanted = terms.flatMap(tokenize).map(canonical);

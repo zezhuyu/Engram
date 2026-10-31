@@ -44,3 +44,20 @@ export async function buildPack(vault: Vault): Promise<Pack> {
   return { ids, docs, goalId: goal.id, privateWorkspace: 'private' };
 }
 export const PACK_SIZE = specs.length;
+
+/** Isolated lexical-decoy sources used only by the real-provider negative controls. */
+export async function buildNegativeControlDocs(vault: Vault): Promise<Record<string, Document>> {
+  const sources: Array<{ key: string; domain: string; title: string; body: string; term: string }> = [
+    { key: 'javaLanguage', domain: 'programming', title: 'Java application runtime', body: 'Java is a programming language used to run enterprise applications on virtual machines.', term: 'java' },
+    { key: 'javaIsland', domain: 'geography', title: 'Java island geography', body: 'Java is an island in Indonesia with volcanic mountains and densely populated cities.', term: 'java' },
+    { key: 'pythonLanguage', domain: 'programming', title: 'Python data scripting', body: 'Python is a programming language used to process records and automate data analysis.', term: 'python' },
+    { key: 'pythonSnake', domain: 'zoology', title: 'Python snake habitat', body: 'A python is a nonvenomous snake that constricts prey and lives in warm regions.', term: 'python' },
+    { key: 'riverBank', domain: 'hydrology', title: 'River bank erosion', body: 'A river bank is the sloping land beside a watercourse and can erode during floods.', term: 'bank' },
+    { key: 'financeBank', domain: 'finance', title: 'Bank deposit accounts', body: 'A financial bank holds deposits and processes payments for account holders.', term: 'bank' },
+  ];
+  const result: Record<string, Document> = {};
+  for (const source of sources) {
+    result[source.key] = await vault.put({ scope: wiki, kind: 'wiki_page', title: source.title, body: source.body, tags: [`domain:${source.domain}`, source.term] });
+  }
+  return result;
+}

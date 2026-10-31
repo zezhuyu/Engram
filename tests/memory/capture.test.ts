@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { disposableVault } from '../helpers/disposable-vault.js';
@@ -9,8 +10,21 @@ import { Vault } from '../../packages/core/vault.js';
 import { Engram } from '../../packages/sdk/index.js';
 import { createAdapter, drainSpool, enqueueEvent, eventFromHostPayload, ingestRecord, listRegistrations, readRegistration, spoolStats, sweepAbandoned, type MemoryEvent, type Registration } from '../../packages/memory/index.js';
 import { withVaultLock } from '../../packages/storage-local/index.js';
+import { redactCaptureText } from '../../packages/memory/redact.js';
 
 type T = { after(fn: () => void | Promise<void>): void };
+test('large captured payload keeps a bounded redacted prefix instead of discarding the capture', () => {
+  const longPrompt = `Useful prefix ${'x'.repeat(1_100_000)} trailing payload ${'z'.repeat(20_000)}`;
+  const output = redactCaptureText(longPrompt, 20_000);
+  assert.equal(output.length, 20_000);
+  assert.match(output, /^Useful prefix/);
+  assert.doesNotMatch(output, /exceeds the safe processing limit/);
+
+  const nearBoundary = `${'x'.repeat(19_970)} AKIAABCDEFGHIJKLMNOP ${'z'.repeat(1_100_000)}`;
+  const redacted = redactCaptureText(nearBoundary, 20_000);
+  assert.doesNotMatch(redacted, /AKIAABCDEFGHIJKLMNOP/);
+  recordCase({ suite: 'memory', name: 'large-capture-bounded-redaction-prefix', status: 'PASS' });
+});
 async function setup(t: T, host: 'claude-code' | 'codex' = 'claude-code') {
   const { root, vault } = await disposableVault(t); await vault.createWorkspace('proj', ''); await vault.createWorkspace('other', '');
   const settingsPath = path.join(await tempDir(t, 'hostcfg'), host === 'codex' ? 'hooks.json' : 'settings.json');
@@ -20,6 +34,14 @@ async function setup(t: T, host: 'claude-code' | 'codex' = 'claude-code') {
   const hook = (payload: Record<string, unknown>) => run(['memory', 'capture', '--root', root, '--host', host, '--registration', registration.id], { input: JSON.stringify(payload) });
   return { root, vault, adapter, settingsPath, registration, hook };
 }
+test('large hook capture marks intentional prefix truncation in event metadata', async t => {
+  const s = await setup(t);
+  const event = eventFromHostPayload(s.registration, { hook_event_name: 'UserPromptSubmit', session_id: 'large-session', prompt: `Useful prefix ${'x'.repeat(1_100_000)}` })!;
+  assert.equal(event.content!.length, 20_000);
+  assert.equal(event.metadata?.truncated, true);
+  assert.equal(event.metadata?.originalCharacters, 1_100_014);
+  assert.match(event.content!, /^Useful prefix/);
+});
 /** Hooks that end a session spawn a detached drain, so a test must wait for the queue to empty rather than assume it ran the drain itself. */
 async function drainAll(root: string): Promise<void> { for (let i = 0; i < 100; i++) { const r = await drainSpool(root); if (!r.skipped && (await spoolStats(root)).queued === 0) return; await new Promise(res => setTimeout(res, 100)); } throw new Error('spool did not drain'); }
 const quiet = async (r: ReturnType<typeof run>) => { const x = await r; assert.equal(x.code, 0, x.stderr); assert.equal(x.stdout, '', 'a lifecycle hook must not write to stdout (hosts may add it to the model context)'); return x; };
@@ -138,18 +160,36 @@ test('forged or unauthorized events are rejected and persist nothing: wrong prin
   recordCase({ suite: 'memory', name: 'forged-events-rejected', status: 'PASS', detail: { forgeries: cases.length } });
 });
 
-test('overflow policy: a full queue evicts or drops low-value events first, counts what it dropped, and never blocks', async t => {
+test('overflow policy: a full queue reports rejection without evicting previously accepted capture', async t => {
   const { root } = await disposableVault(t); process.env.MDB_CAPTURE_QUEUE_CAP = '5'; t.after(() => { delete process.env.MDB_CAPTURE_QUEUE_CAP; });
   const mk = (type: MemoryEvent['type'], n: number): { registrationId: string; event: MemoryEvent } => ({ registrationId: 'reg_x', event: { eventId: `e${n}`, timestamp: new Date().toISOString(), host: 'h', sessionId: 's', workspaceId: 'w', principalId: 'p', type, classification: 'workspace_private', consentPolicyId: 'c', schemaVersion: 1 } });
   for (let i = 0; i < 5; i++) assert.equal(await enqueueEvent(root, mk('tool.result', i)), 'queued');
   assert.equal(await enqueueEvent(root, mk('tool.result', 9)), 'dropped', 'a low-value event is dropped when full');
-  assert.equal(await enqueueEvent(root, mk('user.message', 10)), 'queued', 'a high-value event evicts the oldest low-value one');
+  assert.equal(await enqueueEvent(root, mk('user.message', 10)), 'dropped', 'a high-value event is explicitly rejected rather than evicting accepted capture');
   let stats = await spoolStats(root); assert.equal(stats.queued, 5); assert.equal(stats.dropped, 2);
+  assert.deepEqual((await fs.readdir(path.join(root, '.mdb/capture/queue'))).filter(n => n.endsWith('.json')).length, 5, 'all accepted queue records remain');
   for (let i = 0; i < 4; i++) await enqueueEvent(root, mk('user.message', 20 + i));
   assert.equal(await enqueueEvent(root, mk('user.message', 99)), 'dropped', 'only when nothing low-value remains is a user message dropped');
   stats = await spoolStats(root); assert.equal(stats.queued, 5); assert.ok(stats.dropped >= 4);
   const started = Date.now(); for (let i = 0; i < 50; i++) await enqueueEvent(root, mk('tool.result', 100 + i)); assert.ok(Date.now() - started < 3000, 'overflow handling stays fast');
   recordCase({ suite: 'memory', name: 'spool-overflow', status: 'PASS' });
+});
+
+test('capture queue excludes active atomic temps from counts and reclaims only dead-owner temp files', async t => {
+  const { root } = await disposableVault(t);
+  const queue = path.join(root, '.mdb/capture/queue'); await fs.mkdir(queue, { recursive: true });
+  const uuid = '12345678-1234-4234-8234-123456789abc';
+  const active = `01793295225170-h-e792fa75.json.${process.pid}.${uuid}.tmp`;
+  const orphan = `01793295225954-h-21e6c77c.json.2147483647.${uuid}.tmp`;
+  await fs.writeFile(path.join(queue, active), 'partial active write');
+  await fs.writeFile(path.join(queue, orphan), 'partial dead-process write');
+
+  assert.equal((await spoolStats(root)).queued, 0, 'unpublished atomic temporary files are not queued events');
+  await drainSpool(root);
+  await fs.stat(path.join(queue, active));
+  await fs.rm(path.join(queue, active), { force: true });
+  await assert.rejects(fs.stat(path.join(queue, orphan)), { code: 'ENOENT' }, 'dead-owner temp is reclaimed on the next drain');
+  recordCase({ suite: 'memory', name: 'capture-spool-orphan-temp-recovery', status: 'PASS' });
 });
 
 test('fail-open: a missing, read-only, locked or corrupt vault never makes the hook fail or print; recording resumes when the vault is healthy', async t => {
@@ -169,6 +209,34 @@ test('fail-open: a missing, read-only, locked or corrupt vault never makes the h
   const killed = await run(['-e', `import {drainSpool} from ${JSON.stringify(new URL('../../packages/memory/capture.js', import.meta.url).href)};setTimeout(()=>process.kill(process.pid,'SIGKILL'),5);await drainSpool(${JSON.stringify(s.root)});`], { bin: '--input-type=module' }).catch(() => undefined); void killed;
   await drainSpool(s.root); assert.equal((await s.vault.listDocuments()).filter(d => /survives a crash/.test(d.body)).length, 1, 'recorded exactly once');
   recordCase({ suite: 'memory', name: 'fail-open-hook', status: 'PASS' });
+});
+
+test('SIGKILL after partial capture drain resumes remaining events exactly once', async t => {
+  const s = await setup(t); const p = await claudePayloads(); const expected = new Set<string>();
+  for (let i = 0; i < 40; i++) {
+    const marker = `capture-crash-resume-${String(i).padStart(2, '0')}`; expected.add(marker);
+    const event = eventFromHostPayload(s.registration, { ...p.UserPromptSubmit!, session_id: marker, prompt: `${marker} ${'x'.repeat(3000)}` });
+    assert.ok(event); assert.equal(await enqueueEvent(s.root, { registrationId: s.registration.id, event }), 'queued');
+  }
+  const moduleUrl = new URL('../../packages/memory/capture.js', import.meta.url).href;
+  const source = `import {drainSpool} from ${JSON.stringify(moduleUrl)};await drainSpool(${JSON.stringify(s.root)});`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...process.env, ENGRAM_DATA_DIR: s.root }, stdio: 'ignore' });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let interruptedPartway = false;
+  for (let i = 0; i < 1000; i++) {
+    const queued = (await spoolStats(s.root)).queued;
+    if (queued > 0 && queued < expected.size) { interruptedPartway = child.kill('SIGKILL'); break; }
+    if (child.exitCode !== null || child.signalCode !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(interruptedPartway, true, 'the test killed its owned child after progress and before the backlog drained');
+  assert.deepEqual(await closed, { code: null, signal: 'SIGKILL' });
+  const remainingAtRestart = (await spoolStats(s.root)).queued; assert.ok(remainingAtRestart > 0, 'unprocessed capture records remain queued after interruption');
+  const resumed = await drainSpool(s.root); assert.equal(resumed.skipped, undefined); assert.equal((await spoolStats(s.root)).queued, 0);
+  const observations = (await s.vault.listDocuments()).filter(document => document.kind === 'observation');
+  for (const marker of expected) assert.equal(observations.filter(document => document.body.includes(marker)).length, 1, `${marker} is committed exactly once`);
+  recordCase({ suite: 'memory', name: 'capture-partial-drain-sigkill-recovery', status: 'PASS', detail: { records: expected.size, remainingAtRestart } });
 });
 
 test('capture, drain and recall make no model call and need no provider', async t => {

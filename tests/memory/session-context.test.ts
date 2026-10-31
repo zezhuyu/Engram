@@ -13,6 +13,8 @@ import { upsertNote, upsertTask, writeHandoff } from '../../packages/memory/work
 import { createAdapter } from '../../packages/memory/adapters.js';
 import { defaultBinding, writeBinding } from '../../packages/core/project-binding.js';
 import { trustProject } from '../../packages/core/project-trust.js';
+import { contextStateFile } from '../../packages/memory/context-hook.js';
+import { resolveStoragePath } from '../../packages/core/root.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
 
@@ -91,6 +93,26 @@ test('the hook prints fresh, bounded context in the host format, caches it priva
   const expired = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env, timeoutMs: 500, cacheTtlMs: 1, now: new Date(Date.now() + 60_000) });
   assert.equal(expired.outcome, 'none'); assert.equal(expired.output, ''); assert.equal((await readdir(path.join(env.ENGRAM_CACHE_DIR!, 'context'))).length, 0, 'an expired cache is deleted');
   recordCase({ suite: 'memory', name: 'session-context-hook-cache', status: 'PASS' });
+});
+
+test('ENGRAM_DATA_DIR confines context cache and trust/state writes with isolated HOME, XDG and TMPDIR', async t => {
+  const server = await liveServer(t); const base = await temp(t, 'engram-context-root-contract-');
+  const dataRoot = path.join(base, 'data'), home = path.join(base, 'home'), tmp = path.join(base, 'os-tmp'), projectDir = path.join(base, 'project');
+  await Promise.all([mkdir(dataRoot), mkdir(home), mkdir(tmp), mkdir(projectDir)]);
+  const binding = defaultBinding({ workspaceId: 'proj', serverUrl: server.url, hosts: ['claude-code'], credentialRef: 'ENGRAM_CTX_TOKEN', captureConsent: false });
+  await writeBinding(projectDir, binding);
+  const env = { ...process.env, ENGRAM_DATA_DIR: dataRoot, HOME: home, TMPDIR: tmp, XDG_CONFIG_HOME: path.join(home, 'xdg-config'), XDG_STATE_HOME: path.join(home, 'xdg-state'), XDG_CACHE_HOME: path.join(home, 'xdg-cache'), ENGRAM_CTX_TOKEN: server.credential.token } as NodeJS.ProcessEnv;
+  for (const key of ['ENGRAM_USER_CONFIG', 'ENGRAM_STATE_DIR', 'ENGRAM_CACHE_DIR', 'ENGRAM_OUTBOX', 'ENGRAM_REMOTE_SPOOL', 'ENGRAM_TEMP_DIR', 'ENGRAM_LOG_DIR', 'ENGRAM_INDEX_SCRATCH_DIR']) delete env[key];
+  await trustProject(projectDir, binding, env);
+  const result = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env });
+  assert.equal(result.outcome, 'fresh', JSON.stringify(result));
+  const cacheRoot = path.join(dataRoot, '.engram-runtime/cache/context');
+  const cacheFiles = await readdir(cacheRoot); assert.equal(cacheFiles.length, 1);
+  assert.ok(contextStateFile(env).startsWith(path.join(dataRoot, '.engram-runtime/state')));
+  assert.ok(resolveStoragePath('config', env).startsWith(path.join(dataRoot, '.engram-runtime/config')));
+  assert.ok(await readFile(contextStateFile(env), 'utf8'));
+  assert.deepEqual(await readdir(tmp), [], 'hook cache and state writers did not use OS TMPDIR');
+  assert.deepEqual(await readdir(path.join(home, 'xdg-config')).catch(() => []), [], 'configured data root takes precedence over XDG fallback');
 });
 
 test('revoked or refused access injects nothing and removes the cache; a missing token, a foreign workspace and another project inject nothing', async t => {

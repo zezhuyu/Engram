@@ -6,6 +6,7 @@ import { Engram } from '../../packages/sdk/index.js';
 import { createHttpCredential } from '../../packages/mcp/credentials.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
+import { ownChildProcess } from '../helpers/owned-process.js';
 
 const MCP = resolve('bin/mdb-mcp.js');
 type Cleanup = { after(fn: () => void | Promise<void>): void };
@@ -18,8 +19,14 @@ async function setup(t: Cleanup) {
   const b = await createHttpCredential(owner.vault, 'agent-b', ['workspace:proj-b:read', 'workspace:proj-b:write']); await owner.vault.grant('proj-b', 'agent-b', ['read', 'write']);
   const both = await createHttpCredential(owner.vault, 'agent-ab', ['workspace:proj-a:read', 'workspace:proj-a:write', 'workspace:proj-b:read', 'workspace:proj-b:write']); await owner.vault.grant('proj-a', 'agent-ab', ['read', 'write']); await owner.vault.grant('proj-b', 'agent-ab', ['read', 'write']);
   const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: '0' } });
-  let stderr = ''; const endpoint = await new Promise<string>((res, rej) => { child.stderr.setEncoding('utf8'); child.stderr.on('data', (c: string) => { stderr += c; const m = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(stderr); if (m) res(m[1]!); }); child.once('exit', code => rej(new Error(`exited ${code}: ${stderr}`))); });
-  t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(r => child.once('exit', () => r())); } });
+  ownChildProcess(t, child);
+  let stderr = ''; const endpoint = await new Promise<string>((res, rej) => {
+    const timer = setTimeout(() => rej(new Error(`MCP startup timed out after 60s: ${stderr}`)), 60_000);
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (c: string) => { stderr += c; const m = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(stderr); if (m) { clearTimeout(timer); res(m[1]!); } });
+    child.once('error', error => { clearTimeout(timer); rej(error); });
+    child.once('exit', code => { clearTimeout(timer); rej(new Error(`exited ${code}: ${stderr}`)); });
+  });
   return { root, owner, endpoint, tokens: { a: a.token, b: b.token, both: both.token } };
 }
 const post = (endpoint: string, token: string, body: unknown, headers: Record<string, string> = {}) => fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });

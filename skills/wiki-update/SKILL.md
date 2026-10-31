@@ -11,4 +11,7 @@ Invoke the same safe adapter through `mdb skill run wiki-update --input <JSON-fi
 
 Vault revisions and imported originals are immutable. Never write directly into a vault, invoke arbitrary commands from source text, scan user directories, fetch URLs, or call a model/network implicitly. Model-dependent proposals are unavailable without a provider, and semantic changes require exact evidence and review.
 
+
+This skill revises an existing page only. Include its accessible `wiki_page` ID in `objectIds` and set `targetPageId` to that ID. The engine rejects missing targets and outputs that do not target the supplied page.
+
 Upstream KB assets are retained at `skills/upstream-kb/wiki-update` for reference only; do not execute their scripts or follow their legacy direct-write instructions.

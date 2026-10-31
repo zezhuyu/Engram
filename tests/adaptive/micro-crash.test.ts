@@ -53,7 +53,9 @@ test('micro Dream control run: the clean outcome every crashed run must converge
 
 for (const point of POINTS) {
   test(`micro Dream killed (SIGKILL) at: ${point.name}: restart converges to the clean outcome, no duplicate or lost discoveries, journal verifies`, async t => {
-    const control = await prepared(t); const cleanRun = await runChild(childCode(control.root, undefined)); assert.equal(cleanRun.code, 0, cleanRun.stderr); const expected = await discoveries(control);
+    const control = await prepared(t); const cleanOutcomes: string[] = [];
+    for (let i = 0; i < 8; i++) { const cleanRun = await runChild(childCode(control.root, undefined)); assert.equal(cleanRun.code, 0, cleanRun.stderr); cleanOutcomes.push(JSON.parse(cleanRun.stdout).out); if (cleanOutcomes.at(-1) === 'idle') break; }
+    assert.equal(cleanOutcomes.at(-1), 'idle', `the control run drains its bounded micro work: ${cleanOutcomes.join(',')}`); const expected = await discoveries(control);
     const w = await prepared(t);
     const crashed = await runChild(childCode(w.root, point)); assert.equal(crashed.signal, 'SIGKILL', `the child must die at the injected point: ${crashed.stdout} ${crashed.stderr}`);
     const afterCrash = await discoveries(w); assert.ok(afterCrash.every(d => expected.includes(d)), 'whatever was committed before the crash is a subset of the final outcome');

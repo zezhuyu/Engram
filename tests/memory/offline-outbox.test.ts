@@ -3,9 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile } from 'node:fs/promises';
 import path, { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { PassThrough } from 'node:stream';
 import { Engram } from '../../packages/sdk/index.js';
 import { createHttpCredential } from '../../packages/mcp/credentials.js';
@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import { upsertNote, upsertTask } from '../../packages/memory/workspace-ops.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
+import { defaultOutboxDirectory } from '../../packages/memory/outbox.js';
 
 type Cleanup = { after(fn: () => void | Promise<void>): void };
 const MCP = resolve('bin/mdb-mcp.js');
@@ -32,7 +33,8 @@ async function world(t: Cleanup) {
     await new Promise<void>((res, rej) => { c.stderr!.setEncoding('utf8'); c.stderr!.on('data', (d: string) => { err += d; if (/MCP HTTP listening/.test(err)) res(); }); c.once('exit', code => rej(new Error(`server exit ${code} ${err}`))); }); };
   const stop = async () => { const c = child; child = undefined; if (c && c.exitCode === null && c.signalCode === null) { c.kill('SIGTERM'); await new Promise<void>(r => c.once('exit', () => r())); } };
   stopServer = stop; await start();
-  const outbox = await mkdtemp(path.join(tmpdir(), 'engram-outbox-')); t.after(() => rm(outbox, { recursive: true, force: true }));
+  const outbox = defaultOutboxDirectory({ ENGRAM_DATA_DIR: root });
+  assert.equal(outbox, path.join(root, '.engram-runtime/outbox'), 'the replay writer resolves beneath the selected vault data root');
   // an in-process proxy wired to pipes, exactly as an agent host would talk to it over stdio
   const input = new PassThrough(), output = new PassThrough(); const pending = new Map<number, (m: any) => void>(); let nextId = 1;
   output.setEncoding('utf8'); let buffer = ''; output.on('data', (chunk: string) => { buffer += chunk; let i; while ((i = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, i); buffer = buffer.slice(i + 1); const m = JSON.parse(line); pending.get(m.id)?.(m); } });
@@ -180,6 +182,9 @@ test('long outages: unreachable attempts are not counted or rewritten; a backlog
   const ok = await drainOutboxNow({ url: w.url, token: rotated.token, workspaceId: 'proj', outbox: w.outbox, timeoutMs: 8000, waitMs: 120000 }); assert.equal(ok?.remaining, 0); assert.equal((await w.queuedFiles()).length, 0); assert.equal((await w.serverTasks()).filter(d => /^B-/.test(String(d.metadata.stableId))).length, 130, 'all 130 arrived, in one drain');
   const capped = spawnSync(process.execPath, ['--input-type=module', '-e', `const { enqueueWrite } = await import(${JSON.stringify(path.resolve('dist/packages/memory/outbox.js'))}); let n = 0, err = ''; for (let i = 0; i < 5; i++) try { await enqueueWrite(${JSON.stringify(path.join(w.outbox, 'capdir'))}, { url: 'http://x/mcp', tool: 'engram_task_upsert', arguments: { taskId: 'c' + i, title: 't', status: 'open' } }); n++; } catch (e) { err = e.message; } console.log(JSON.stringify({ n, err }));`], { env: { ...process.env, ENGRAM_OUTBOX_CAP: '3' }, encoding: 'utf8' });
   assert.deepEqual(JSON.parse(capped.stdout), { n: 3, err: 'The local outbox is full' }, 'a full outbox is an explicit error to the agent, never a silent drop');
+  const proxyModule = pathToFileURL(path.resolve('dist/packages/memory/mcp-proxy.js')).href;
+  const exitsAfterDrain = spawnSync(process.execPath, ['--input-type=module', '-e', `import { PassThrough } from 'node:stream'; import { runMcpProxy } from ${JSON.stringify(proxyModule)}; const input = new PassThrough(), output = new PassThrough(); output.resume(); input.end(); await runMcpProxy({ url: 'http://127.0.0.1:1/mcp', token: 'test', outbox: ${JSON.stringify(path.join(w.outbox, 'empty-child-outbox'))}, input, output, drainIntervalMs: 60000, drainWaitMs: 60000, autoReconnect: false });`], { encoding: 'utf8', timeout: 2500 });
+  assert.equal(exitsAfterDrain.error, undefined, `a completed proxy drain must not retain its 60-second shutdown timer: ${exitsAfterDrain.error?.message ?? ''}`);
   recordCase({ suite: 'memory', name: 'offline-outbox-long-outage-hazards', status: 'PASS' });
 });
 

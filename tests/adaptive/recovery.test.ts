@@ -86,7 +86,10 @@ test('without a model provider model-assisted stages report BLOCKED and never cl
 test('the per-run budget of model-backed stage jobs is enforced: the cycle pauses when it is spent and later resumes to completion on the same snapshot', async t => {
   const w = await world(t, { config: { maxModelCallsPerCycle: 1, dreamMode: 'micro' } }); await buildPack(w.vault); await w.say('alpha', 'I prefer TypeScript [key:a]'); await w.say('beta', 'I prefer Python [key:b]');
   let result = (await w.ai.runCycle({ kind: 'manual', idempotencyKey: 'budget', respectActivity: false })).cycle!; const manifest = result.manifestHash; let runs = 1; const jobsPerRun: number[] = [result.metrics.modelCalls ?? 0]; let previous = result.metrics.modelCalls ?? 0;
-  while (result.state === 'PAUSED' && runs < 8) { assert.equal(result.error!.category, 'RESOURCE_PRESSURE'); result = (await w.ai.resumeCycle(result.id, { respectActivity: false })).cycle!; jobsPerRun.push((result.metrics.modelCalls ?? 0) - previous); previous = result.metrics.modelCalls ?? 0; runs++; assert.equal(result.manifestHash, manifest, 'same sealed snapshot across budget pauses'); }
+  // With a one-call segment, each bounded Dream cluster may need its own resume.
+  // Bound the test well above the fixture's finite work instead of assuming it
+  // can finish in eight segments.
+  while (result.state === 'PAUSED' && runs < 32) { assert.equal(result.error!.category, 'RESOURCE_PRESSURE'); result = (await w.ai.resumeCycle(result.id, { respectActivity: false })).cycle!; jobsPerRun.push((result.metrics.modelCalls ?? 0) - previous); previous = result.metrics.modelCalls ?? 0; runs++; assert.equal(result.manifestHash, manifest, 'same sealed snapshot across budget pauses'); }
   assert.equal(result.state, 'COMPLETED', JSON.stringify({ e: result.error, runs })); assert.ok(runs >= 3, `needed ${runs} runs`); assert.ok(jobsPerRun.every(n => n <= 1), `stage jobs per run stayed within the budget: ${jobsPerRun}`);
   recordCase({ suite: 'adaptive', name: 'model-call-budget', status: 'PASS', detail: { runs, jobsPerRun } });
 });

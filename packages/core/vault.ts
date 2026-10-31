@@ -7,6 +7,7 @@ import { atomicWrite, atomicWriteVolatile, flushKeys, LocalObjectStore, mkdirDur
 import { createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 import { describeModel } from '../models/factory.js';
 import { profileAsync, profileBytes } from '../bench/instrumentation.js';
+import { assertDurableWriteCapacity } from './storage-lifecycle.js';
 import { isSensitive } from './sensitivity.js';
 import { MDBError, OWNER, type ActorContext, type Collection, type CommitEvent, type CommitJournalStore, type Document, type ObjectStore, type PatchInput, type PutInput, type Scope, type VaultConfig, type Workspace } from './types.js';
 
@@ -82,7 +83,7 @@ function hookExit():void{if(exitHooked)return;exitHooked=true;process.on('before
 export class Vault {
   readonly root: string;
   readonly store: ObjectStore;
-  constructor(root: string, readonly actor: ActorContext = OWNER, readonly options: { fault?: (stage: string) => void; idFactory?: (prefix: string) => string; now?: () => Date; store?: ObjectStore } = {}) { this.root = path.resolve(root); this.store = options.store ?? (process.env.MDB_STORAGE_BACKEND === 's3' ? createS3ObjectStoreFromEnv() : new LocalObjectStore(this.root, options.fault)); }
+  constructor(root: string, readonly actor: ActorContext = OWNER, readonly options: { fault?: (stage: string) => void; idFactory?: (prefix: string) => string; now?: () => Date; store?: ObjectStore; storageAvailableBytes?: () => Promise<number> } = {}) { this.root = path.resolve(root); this.store = options.store ?? (process.env.MDB_STORAGE_BACKEND === 's3' ? createS3ObjectStoreFromEnv() : new LocalObjectStore(this.root, options.fault)); }
   private remoteJournal(): CommitJournalStore | undefined { const store = this.store as Partial<CommitJournalStore>; return typeof store.readCommittedJournal === 'function' && typeof store.appendCommittedEvent === 'function' && typeof store.initializeJournal === 'function' ? store as CommitJournalStore : undefined; }
   private newId(prefix: string): string { return this.options.idFactory?.(prefix) ?? id(prefix); }
   private now(): Date { return this.options.now?.() ?? new Date(); }
@@ -126,12 +127,25 @@ export class Vault {
   private async requireAccess(scope: Scope, action: 'read'|'write'|'promote'): Promise<void> { if (!(await this.canAccess(scope,action))) throw inaccessible(); if (scope.type === 'workspace') { try { await this.readJSON(`workspaces/${validId(scope.workspaceId)}/.mdb/workspace.json`); if (scope.collectionId) await this.readJSON(`workspaces/${scope.workspaceId}/collections/${validId(scope.collectionId)}/.mdb/collection.json`); } catch { throw inaccessible(); } } }
   async createWorkspace(workspaceId: string, description = '', grants: Workspace['grants'] = {}): Promise<Workspace> {
     this.requireOwner(); validId(workspaceId); const workspace: Workspace = {id:workspaceId,description,grants};
-    await withVaultLock(this.root, async () => { const key=`workspaces/${workspaceId}/.mdb/workspace.json`; await rejectCaseAlias(await safePath(this.root,'workspaces'),workspaceId); if (await this.store.stat(key)) throw new MDBError('CONFLICT','Workspace already exists'); await this.store.putImmutable(key,Buffer.from(JSON.stringify(workspace))); await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(workspace)); for (const dir of ['memory/episodic','memory/semantic','memory/procedural','insights','decisions','sources/originals','sources/manifests','wiki/pages','wiki/topics','wiki/syntheses','collections']) await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/${dir}`),{recursive:true,mode:0o700}); for (const name of ['INDEX','PROFILE','OVERVIEW']) await atomicWrite(this.root,`workspaces/${workspaceId}/${name}.md`,`# ${name}\n`); }); return workspace;
+    await withVaultLock(this.root, async () => { await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(workspace)) + 16 * 1024); const key=`workspaces/${workspaceId}/.mdb/workspace.json`; await rejectCaseAlias(await safePath(this.root,'workspaces'),workspaceId); if (await this.store.stat(key)) throw new MDBError('CONFLICT','Workspace already exists'); await this.store.putImmutable(key,Buffer.from(JSON.stringify(workspace))); await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(workspace)); for (const dir of ['memory/episodic','memory/semantic','memory/procedural','insights','decisions','sources/originals','sources/manifests','wiki/pages','wiki/topics','wiki/syntheses','collections']) await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/${dir}`),{recursive:true,mode:0o700}); for (const name of ['INDEX','PROFILE','OVERVIEW']) await atomicWrite(this.root,`workspaces/${workspaceId}/${name}.md`,`# ${name}\n`); }); return workspace;
   }
-  async listWorkspaces(): Promise<Workspace[]> { const result: Workspace[]=[]; if(this.remoteJournal()){const ids=new Set<string>();for await(const entry of this.store.list('workspaces')){const match=/^workspaces\/([^/]+)\/.mdb\/workspace\.json$/.exec(entry.key);if(match)ids.add(match[1]!);}for(const id of ids)if(await this.canAccess({type:'workspace',workspaceId:id},'read'))result.push(await this.readJSON(`workspaces/${id}/.mdb/workspace.json`));return result;} for (const entry of await fs.readdir(await safePath(this.root,'workspaces'),{withFileTypes:true})) if(entry.isDirectory() && await this.canAccess({type:'workspace',workspaceId:entry.name},'read')) result.push(await this.readJSON(`workspaces/${entry.name}/.mdb/workspace.json`)); return result; }
-  async grant(workspaceId:string,actorId:string,permissions:('read'|'write'|'promote')[]):Promise<Workspace> { this.requireOwner(); validId(workspaceId); if(permissions.some(p=>!['read','write','promote'].includes(p))) throw new MDBError('INVALID_INPUT','Invalid grant'); return withVaultLock(this.root,async()=>{const key=`workspaces/${workspaceId}/.mdb/workspace.json`;const old=await this.readJSON<Workspace>(key);const w={...old,grants:{...old.grants,[actorId]:permissions}};if(this.remoteJournal()){if(!await this.store.compareAndSwapPointer(key,JSON.stringify(old),JSON.stringify(w)))throw new MDBError('CONFLICT','Workspace grants changed during update');}else await atomicWrite(this.root,key,JSON.stringify(w));await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(w));return w;}); }
+  async listWorkspaces(): Promise<Workspace[]> {
+    const result: Workspace[] = [];
+    if (this.remoteJournal()) {
+      const ids = new Set<string>();
+      for await (const entry of this.store.list('workspaces')) { const match = /^workspaces\/([^/]+)\/.mdb\/workspace\.json$/.exec(entry.key); if (match) ids.add(match[1]!); }
+      for (const id of ids) if (await this.canAccess({ type: 'workspace', workspaceId: id }, 'read')) result.push(await this.readJSON(`workspaces/${id}/.mdb/workspace.json`));
+      return result;
+    }
+    let entries;
+    try { entries = await fs.readdir(await safePath(this.root, 'workspaces'), { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return result; throw error; }
+    for (const entry of entries) if (entry.isDirectory() && await this.canAccess({ type: 'workspace', workspaceId: entry.name }, 'read')) result.push(await this.readJSON(`workspaces/${entry.name}/.mdb/workspace.json`));
+    return result;
+  }
+  async grant(workspaceId:string,actorId:string,permissions:('read'|'write'|'promote')[]):Promise<Workspace> { this.requireOwner(); validId(workspaceId); if(permissions.some(p=>!['read','write','promote'].includes(p))) throw new MDBError('INVALID_INPUT','Invalid grant'); return withVaultLock(this.root,async()=>{const key=`workspaces/${workspaceId}/.mdb/workspace.json`;const old=await this.readJSON<Workspace>(key);const w={...old,grants:{...old.grants,[actorId]:permissions}};await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(w)) + 8192);if(this.remoteJournal()){if(!await this.store.compareAndSwapPointer(key,JSON.stringify(old),JSON.stringify(w)))throw new MDBError('CONFLICT','Workspace grants changed during update');}else await atomicWrite(this.root,key,JSON.stringify(w));await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(w));return w;}); }
   async revoke(workspaceId:string,actorId:string):Promise<Workspace> { return this.grant(workspaceId,actorId,[]); }
-  async createCollection(workspaceId:string,collectionId:string,description='',grants?:Collection['grants']):Promise<Collection> { validId(workspaceId);validId(collectionId);await this.requireAccess({type:'workspace',workspaceId},'write'); if(grants && !this.owner()) throw inaccessible(); const collection:Collection={id:collectionId,workspaceId,description,...(grants?{grants}:{})}; await withVaultLock(this.root,async()=>{const key=`workspaces/${workspaceId}/collections/${collectionId}/.mdb/collection.json`;await rejectCaseAlias(await safePath(this.root,`workspaces/${workspaceId}/collections`),collectionId);if(await this.store.stat(key))throw new MDBError('CONFLICT','Collection already exists');await this.store.putImmutable(key,Buffer.from(JSON.stringify(collection))); for(const d of ['working','notes','observations','insights','sessions'])await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${d}`),{recursive:true,mode:0o700});for(const n of ['PROFILE','INDEX','state','retrospective'])await atomicWrite(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${n}.md`,`# ${n}\n`);});return collection; }
+  async createCollection(workspaceId:string,collectionId:string,description='',grants?:Collection['grants']):Promise<Collection> { validId(workspaceId);validId(collectionId);await this.requireAccess({type:'workspace',workspaceId},'write'); if(grants && !this.owner()) throw inaccessible(); const collection:Collection={id:collectionId,workspaceId,description,...(grants?{grants}:{})}; await withVaultLock(this.root,async()=>{await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(collection)) + 12 * 1024);const key=`workspaces/${workspaceId}/collections/${collectionId}/.mdb/collection.json`;await rejectCaseAlias(await safePath(this.root,`workspaces/${workspaceId}/collections`),collectionId);if(await this.store.stat(key))throw new MDBError('CONFLICT','Collection already exists');await this.store.putImmutable(key,Buffer.from(JSON.stringify(collection))); for(const d of ['working','notes','observations','insights','sessions'])await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${d}`),{recursive:true,mode:0o700});for(const n of ['PROFILE','INDEX','state','retrospective'])await atomicWrite(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${n}.md`,`# ${n}\n`);});return collection; }
   async listCollections(workspaceId:string):Promise<Collection[]> { await this.requireAccess({type:'workspace',workspaceId},'read');const result:Collection[]=[];if(this.remoteJournal()){const ids=new Set<string>();for await(const entry of this.store.list(`workspaces/${workspaceId}/collections`)){const match=new RegExp(`^workspaces/${workspaceId}/collections/([^/]+)/.mdb/collection\\.json$`).exec(entry.key);if(match)ids.add(match[1]!);}for(const id of ids)if(await this.canAccess({type:'workspace',workspaceId,collectionId:id},'read'))result.push(await this.readJSON(`workspaces/${workspaceId}/collections/${id}/.mdb/collection.json`));return result;}for(const e of await fs.readdir(await safePath(this.root,`workspaces/${workspaceId}/collections`),{withFileTypes:true}))if(e.isDirectory()&&await this.canAccess({type:'workspace',workspaceId,collectionId:e.name},'read'))result.push(await this.readJSON(`workspaces/${workspaceId}/collections/${e.name}/.mdb/collection.json`));return result; }
   /** Parsed journal prefix. The journal is append-only, so only bytes after `offset` are parsed; a replaced (new inode), shrunk or corrupt file forces a full re-read. */
   private journalCache?:{ino:number;dev:number;offset:number;events:CommitEvent[];latest:Map<string,CommitEvent>;byRevision:Map<string,CommitEvent>;purged:Set<string>;idem:Map<string,CommitEvent>};
@@ -172,7 +186,7 @@ export class Vault {
   /** The committed object created under this idempotency key in this scope, if the caller may read it (O(1): indexed from the journal). */
   async byIdempotencyKey(key:string,scope:Scope):Promise<Document|undefined> {await this.refreshJournal();const event=this.journalCache!.idem.get(`${scopeKey(scope)}\0${key}`);if(!event||this.journalCache!.purged.has(event.objectId)||!(await this.canAccess(scope,'read')))return undefined;try{return await this.get(event.objectId);}catch{return undefined;}}
   /** Owner-only configuration update, written atomically. The previous file is not kept as history; configuration is not knowledge. */
-  async setConfig(mutate:(config:VaultConfig)=>void):Promise<VaultConfig> {this.requireOwner();return withVaultLock(this.root,async()=>{const oldBytes=await this.store.read('mdb.yaml'),config=await this.config();mutate(config);if(config.schemaVersion!==1)throw new MDBError('INVALID_INPUT','Invalid vault config');const next=YAML.stringify(config);if(this.remoteJournal()){if(!await this.store.compareAndSwapPointer('mdb.yaml',Buffer.from(oldBytes).toString('utf8'),next))throw new MDBError('CONFLICT','Vault config changed during update');}else await atomicWrite(this.root,'mdb.yaml',next);return config;});}
+  async setConfig(mutate:(config:VaultConfig)=>void):Promise<VaultConfig> {this.requireOwner();return withVaultLock(this.root,async()=>{const oldBytes=await this.store.read('mdb.yaml'),config=await this.config();mutate(config);if(config.schemaVersion!==1)throw new MDBError('INVALID_INPUT','Invalid vault config');const next=YAML.stringify(config);await this.assertMutationCapacity(Buffer.byteLength(next) + 4096);if(this.remoteJournal()){if(!await this.store.compareAndSwapPointer('mdb.yaml',Buffer.from(oldBytes).toString('utf8'),next))throw new MDBError('CONFLICT','Vault config changed during update');}else await atomicWrite(this.root,'mdb.yaml',next);return config;});}
   /** Per-call memo of read access by scope: ACL files are read once per distinct scope instead of once per event. A fresh memo per call keeps grant/revoke effective immediately. */
   private readMemo():(scope:Scope)=>Promise<boolean>{const memo=new Map<string,Promise<boolean>>();return scope=>{const key=scopeKey(scope);let hit=memo.get(key);if(!hit){hit=this.canAccess(scope,'read');memo.set(key,hit);}return hit;};}
   /**
@@ -220,11 +234,11 @@ export class Vault {
     try{return await this.documentForEvent(event);}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')throw inaccessible();throw e;}
   }
   private async resolveReference(uri:string,revisionId?:string):Promise<Document> {const doc=await this.rawDocument(objectIdFromUri(uri),revisionId);if(uri!==doc.uri&&uri!==doc.id)throw inaccessible();return doc;}
-  private async visible(doc:Document):Promise<Document> {
+  private async visible(doc:Document, includeUnresolvedReferences = false):Promise<Document> {
     const result=structuredClone(doc);const offset=documentBodyLineOffset(doc);if(offset!==undefined)documentBodyLineOffsets.set(result,offset);
-    const links:Document['links']=[],evidence:Document['evidence']=[];
-    for(const l of doc.links){try{await this.resolveReference(l.target,l.revisionId);links.push(l);}catch{/* inaccessible references disclose nothing */}}
-    for(const e of doc.evidence){try{await this.resolveReference(e.uri,e.revisionId);evidence.push(e);}catch{/* inaccessible references disclose nothing */}}
+    const links:Document['links']=[],evidence:Document['evidence']=[];let unresolvedLink=false,unresolvedEvidence=false;
+    for(const l of doc.links){try{await this.resolveReference(l.target,l.revisionId);links.push(l);}catch{unresolvedLink=true;}}
+    for(const e of doc.evidence){try{await this.resolveReference(e.uri,e.revisionId);evidence.push(e);}catch{unresolvedEvidence=true;}}
     // Model-derived profile text is sensitive to changes in the source ACL after approval.
     // Do not return the claim with merely stripped references: callers commonly serialize its body.
     const derivedInsight=doc.kind==='user_insight'&&(doc.evidence.length>0||doc.metadata.insightSchema===1||typeof doc.metadata.modelProvider==='string'||Array.isArray(doc.metadata.sources));
@@ -242,30 +256,42 @@ export class Vault {
       if(!this.owner()&&!refs.size&&!(doc.metadata.evidenceClass==='explicit'&&doc.metadata.origin==='user_statement'))throw inaccessible();
       for(const ref of refs.values())try{
         const id=objectIdFromUri(ref.uri),current=await this.rawDocument(id),cited=await this.rawDocument(id,ref.revisionId);
-        if(current.uri!==ref.uri||cited.uri!==ref.uri||current.status==='deleted'||cited.status==='deleted'||current.metadata.sensitivity==='sensitive'||cited.metadata.sensitivity==='sensitive'||!this.owner()&&(isSensitive(`${current.title}\n${current.body}`)||isSensitive(`${cited.title}\n${cited.body}`)))throw inaccessible();
+        // Chat-derived profile claims describe the user's current position. If
+        // the user edits that message, an immutable historical revision remains
+        // available for audit but must not keep the superseded claim visible.
+        if(current.uri!==ref.uri||cited.uri!==ref.uri||current.status==='deleted'||cited.status==='deleted'||cited.kind==='chat_message'&&current.revisionId!==cited.revisionId||current.metadata.sensitivity==='sensitive'||cited.metadata.sensitivity==='sensitive'||!this.owner()&&(isSensitive(`${current.title}\n${current.body}`)||isSensitive(`${cited.title}\n${cited.body}`)))throw inaccessible();
       }catch{throw inaccessible();}
     }
+    // Lint needs to distinguish no evidence from inaccessible evidence and detect dangling structured links.
+    // Return at most one ID-free marker per category and source document: neither the target nor the number
+    // of hidden references is observable. Normal Vault reads retain the historical omission behavior.
+    if(includeUnresolvedReferences&&unresolvedLink)links.push({type:'unresolved',target:''});
+    if(includeUnresolvedReferences&&unresolvedEvidence)evidence.push({uri:'',revisionId:''});
     result.links=links;result.evidence=evidence;if(!this.owner())for(const key of Object.keys(result.metadata))if(key.startsWith('_'))delete result.metadata[key];return result;
   }
   async get(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.get', async () => this.visible(await this.rawDocument(objectId,revisionId))); }
-  async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[]}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||e.scope.collectionId===s.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)try{result.push(await this.visible(d));}catch(error){if(!(error instanceof MDBError)||error.code!=='NOT_FOUND_OR_FORBIDDEN')throw error;}}}return result;}
+  async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[];includeUnresolvedReferences?:boolean}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||e.scope.collectionId===s.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)try{result.push(await this.visible(d,options.includeUnresolvedReferences));}catch(error){if(!(error instanceof MDBError)||error.code!=='NOT_FOUND_OR_FORBIDDEN')throw error;}}}return result;}
   private async commit(input:PutInput,previous?:Document,operation='put',idempotencyPayloadHash?:string):Promise<Document> {
     validateInput(input);if(input.metadata?.profileRole)this.requireOwner();await this.requireAccess(input.scope,'write');const events=await this.repairJournal();await this.reconcileProjectionTail(events);this.options.fault?.('commit.before_revision');
     const payload = { ...input, idempotencyKey: undefined };
     const replayHash = idempotencyPayloadHash ?? payloadHash(operation, payload);
-    if(input.idempotencyKey){const prior=events.find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(input.scope));if(prior){if((operation==='put'||operation==='patch') && (prior.idempotencyPayloadHash!==replayHash || prior.operation!==operation || prior.idempotencyActorId!==this.actor.actorId || previous && prior.objectId!==previous.id))throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}
+    if(input.idempotencyKey){const prior=events.find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(input.scope));if(prior){if(prior.operation!==operation||prior.idempotencyActorId!==this.actor.actorId||previous&&prior.objectId!==previous.id||(operation!=='ingest'&&prior.idempotencyPayloadHash!==replayHash))throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}
     if(previous){const latest=events.findLast(e=>e.objectId===previous.id);if(latest?.revisionId!==previous.revisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');}
     const now=this.now().toISOString();const objectId=previous?.id??this.newId('obj');const revisionId=this.newId('rev');const doc:Document={id:objectId,revisionId,revisionNumber:(previous?.revisionNumber??0)+1,...(previous?{previousRevisionId:previous.revisionId}:{}),scope:input.scope,kind:input.kind,title:input.title,body:input.body,tags:input.tags??[],links:input.links??[],evidence:input.evidence??[],status:input.status??'active',createdAt:previous?.createdAt??now,updatedAt:now,createdBy:previous?.createdBy??this.actor.actorId,metadata:input.metadata??{},path:'',uri:documentUri(objectId,input.scope)};doc.path=viewPath(doc);if(!previous && events.some(e=>e.path===doc.path&&e.operation!=='purge'))throw new MDBError('CONFLICT','Named profile already exists; patch its current revision');
-    const text=serializeDocument(doc);await this.store.putImmutable(`.mdb/objects/${objectId}/revs/${revisionId}.md`,Buffer.from(text));this.options.fault?.('after_revision');this.options.fault?.('after_revision_write');this.options.fault?.('revision.after_dirsync');
+    const text=serializeDocument(doc);await this.assertMutationCapacity(Buffer.byteLength(text) + 4096);await this.store.putImmutable(`.mdb/objects/${objectId}/revs/${revisionId}.md`,Buffer.from(text));this.options.fault?.('after_revision');this.options.fault?.('after_revision_write');this.options.fault?.('revision.after_dirsync');
     const event:CommitEvent={sequence:events.length+1,transactionId:this.newId('tx'),objectId,revisionId,...(previous?{previousRevisionId:previous.revisionId}:{}),path:doc.path,scope:doc.scope,operation,timestamp:now,revisionSha256:createHash('sha256').update(text).digest('hex'),...(input.idempotencyKey?{idempotencyKey:input.idempotencyKey,idempotencyPayloadHash:replayHash,idempotencyActorId:this.actor.actorId}:{})};
     this.options.fault?.('journal.before_append');const committedEvent = await this.appendEvent(event);/* commit point: durable append or conditional S3 head publication */this.options.fault?.('after_journal');this.options.fault?.('after_journal_append');this.options.fault?.('before_view');this.options.fault?.('before_view_update');
     /* The commit point has passed. Head and view are rebuildable projections of the journal and the immutable revision: written atomically but NOT fsynced here; flushProjections() and tail reconciliation make them durable or repair them (see verification/durability/commit-protocol-adr.md). */this.options.fault?.('head.before_replace');await atomicWriteVolatile(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.noteProjections([`.mdb/heads/${objectId}.json`,doc.path]);this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');return doc;
   }
+  private async assertMutationCapacity(estimatedGrowthBytes: number): Promise<void> {
+    if (this.remoteJournal()) return; // remote backends have their own capacity and acknowledgement contract
+    await assertDurableWriteCapacity(this.root, estimatedGrowthBytes, process.env, this.options.storageAvailableBytes ? await this.options.storageAvailableBytes() : undefined);
+  }
   async put(input:PutInput):Promise<Document> { return this.visible(await withVaultLock(this.root,()=>this.commit(input))); }
   async patch(input:PatchInput):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const previous=await this.rawDocument(input.objectId);await this.requireAccess(previous.scope,'write');if(previous.kind==='source')throw new MDBError('INVALID_INPUT','Source manifests are immutable; import a new source');if(input.metadataPatch&&Object.keys(input.metadataPatch).some(k=>k.startsWith('_')))throw new MDBError('INVALID_INPUT','Protected metadata cannot be patched');if(input.metadataRemove!==undefined&&(!Array.isArray(input.metadataRemove)||input.metadataRemove.length>40||input.metadataRemove.some(k=>typeof k!=='string'||!k||k.startsWith('_'))))throw new MDBError('INVALID_INPUT','metadataRemove must list up to 40 unprotected metadata keys');const patch={...input,idempotencyKey:undefined};const replayHash=payloadHash('patch',patch);if(input.idempotencyKey){const prior=(await this.rawEvents()).find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(previous.scope));if(prior){if(prior.idempotencyPayloadHash!==replayHash||prior.idempotencyActorId!==this.actor.actorId||prior.operation!=='patch'||prior.objectId!==previous.id)throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}if(previous.revisionId!==input.expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({scope:previous.scope,kind:previous.kind,title:input.title??previous.title,body:input.body??previous.body,tags:input.tags??previous.tags,links:input.links??previous.links,evidence:input.evidence??previous.evidence,status:input.status??previous.status,metadata:Object.fromEntries(Object.entries({...previous.metadata,...input.metadataPatch}).filter(([k])=>!input.metadataRemove?.includes(k))),idempotencyKey:input.idempotencyKey},previous,'patch',replayHash);}));}
-  async delete(objectId:string,expectedRevisionId:string):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const d=await this.rawDocument(objectId);if(d.revisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({...d,body:'',status:'deleted'},d,'delete');}));}
+  async delete(objectId:string,expectedRevisionId:string,idempotencyKey?:string):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const d=await this.rawDocument(objectId);await this.requireAccess(d.scope,'write');if(idempotencyKey){const prior=(await this.rawEvents()).find(e=>e.idempotencyKey===idempotencyKey&&e.operation==='delete'&&e.objectId===objectId);if(prior){if(prior.idempotencyActorId!==this.actor.actorId||prior.previousRevisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(objectId,prior.revisionId);}}if(d.revisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({...d,body:'',status:'deleted',...(idempotencyKey?{idempotencyKey}:{})},d,'delete');}));}
   async history(objectId:string):Promise<Document[]> {await this.rawDocument(objectId);const result:Document[]=[];for(const e of await this.rawEvents())if(e.objectId===objectId)result.push(await this.get(objectId,e.revisionId));return result;}
-  async restore(objectId:string,revisionId:string,expectedRevisionId:string):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const current=await this.rawDocument(objectId);if(current.revisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');const old=await this.rawDocument(objectId,revisionId);return this.commit(old,current,'restore');}));}
+  async restore(objectId:string,revisionId:string,expectedRevisionId:string,idempotencyKey?:string):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const current=await this.rawDocument(objectId);await this.requireAccess(current.scope,'write');const old=await this.rawDocument(objectId,revisionId);if(idempotencyKey){const prior=(await this.rawEvents()).find(e=>e.idempotencyKey===idempotencyKey&&e.operation==='restore'&&e.objectId===objectId);if(prior){if(prior.idempotencyActorId!==this.actor.actorId||prior.previousRevisionId!==expectedRevisionId||prior.idempotencyPayloadHash!==payloadHash('restore',{...old,idempotencyKey:undefined}))throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(objectId,prior.revisionId);}}if(current.revisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({...old,...(idempotencyKey?{ idempotencyKey }: {})},current,'restore');}));}
   async diff(objectId:string,from:string,to:string):Promise<{from:string;to:string;diff:string}> {const a=await this.get(objectId,from),b=await this.get(objectId,to);return{from,to,diff:`--- ${from}\n+++ ${to}\n${a.body.split('\n').map(l=>'-'+l).join('\n')}\n${b.body.split('\n').map(l=>'+'+l).join('\n')}`};}
   async ingest(file:string,scope:Scope):Promise<Document> {
     await this.requireAccess(scope,'write');const absolute=path.resolve(file);const stat=await fs.lstat(absolute);if(!stat.isFile()||stat.isSymbolicLink())throw new MDBError('INVALID_INPUT','Import requires an explicit regular file');const bytes=await fs.readFile(absolute);const hash=createHash('sha256').update(bytes).digest('hex');const name=path.basename(absolute).replace(/[^a-zA-Z0-9._-]/g,'_');const originalKey=`${scopeRoot(scope)}/sources/originals/${hash}/${name}`;const textNative=['.md','.markdown','.txt'].includes(path.extname(name).toLowerCase());
@@ -296,8 +322,17 @@ export class Vault {
       this.options.fault?.('recover.before_view_repair');await atomicWrite(this.root,e.path,bytes,this.options.fault);this.options.fault?.('recover.after_view_repair');repaired=true;
     }
     const headKey=`.mdb/heads/${e.objectId}.json`;const head=JSON.stringify(e);let currentHead:string|undefined;try{currentHead=await fs.readFile(await safePath(this.root,headKey),'utf8');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-    if(mode==='recover'||currentHead!==head){this.options.fault?.('recover.before_head_write');await atomicWrite(this.root,headKey,head,this.options.fault);}
+    // Recovery validates every committed revision, but a matching durable head is
+    // already correct. Rewriting it unconditionally turns a read-only recovery
+    // into one fsync per object and holds the vault lock for the entire corpus.
+    if(currentHead!==head){this.options.fault?.('recover.before_head_write');await atomicWrite(this.root,headKey,head,this.options.fault);}
     return repaired;
+  }
+  private async projectionIsCurrent(e:CommitEvent,bytes:Uint8Array):Promise<boolean>{
+    let view:Buffer;try{view=await fs.readFile(await safePath(this.root,e.path));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+    if(!view.equals(Buffer.from(bytes)))return false;
+    let head:string;try{head=await fs.readFile(await safePath(this.root,`.mdb/heads/${e.objectId}.json`),'utf8');}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+    return head===JSON.stringify(e);
   }
   /**
    * First owner operation of a Vault instance: re-check the projections of the most recent journal events and repair any that a power loss left stale, absent or torn. Bounded (the
@@ -313,34 +348,52 @@ export class Vault {
       await this.repairProjection(e,events,bytes);
     }
   }
-  private async sweepTemps(directory:string):Promise<number> {let removed=0;let entries:string[];try{entries=await fs.readdir(await safePath(this.root,directory));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT'||(e as NodeJS.ErrnoException).code==='ENOTDIR')return 0;throw e;}for(const name of entries)if(/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(name)){await fs.rm(await safePath(this.root,`${directory}/${name}`),{force:true});removed++;}return removed;}
+  private async findTemps(directory:string):Promise<string[]> {let entries:string[];try{entries=await fs.readdir(await safePath(this.root,directory));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT'||(e as NodeJS.ErrnoException).code==='ENOTDIR')return [];throw e;}return entries.filter(name=>/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(name)).map(name=>`${directory}/${name}`);}
   async recover():Promise<{committed:number;repaired:number;orphans:number;tempRemoved:number}> {
-    this.requireOwner();return withVaultLock(this.root,async()=>{
-      let events=await this.repairJournal();
-      for(const event of events)if(event.operation==='purge')await this.finishPurge(event.objectId);
-      events=await this.rawEvents();
-      const latest=new Map(events.map(e=>[e.objectId,e]));
-      const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));
-      let repaired=0;
-      for(const e of latest.values()){
-        if(purged.has(e.objectId))continue;
-        const bytes=await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`);
-        if(e.revisionSha256&&createHash('sha256').update(bytes).digest('hex')!==e.revisionSha256)throw new MDBError('INTERNAL',`Revision content hash mismatch: ${e.objectId}/${e.revisionId}`);
-        const doc=parseDocument(Buffer.from(bytes).toString('utf8'));
-        if(doc.id!==e.objectId||doc.revisionId!==e.revisionId||doc.path!==e.path||scopeKey(doc.scope)!==scopeKey(e.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
-        if(await this.repairProjection(e,events,bytes,'recover'))repaired++;
-      }
-      let tempRemoved=0;const sweep=new Set<string>(['.mdb/heads','.mdb/events']);
-      for(const e of latest.values())if(!purged.has(e.objectId)){sweep.add(e.path.includes('/')?e.path.slice(0,e.path.lastIndexOf('/')):'.');sweep.add(`.mdb/objects/${e.objectId}/revs`);}
-      sweep.delete('.');let orphans=0;
+    this.requireOwner();
+    // Journal repair and purge completion are serialized. The potentially large
+    // verification pass is read-only and runs outside the global writer lock.
+    let events=await withVaultLock(this.root,async()=>{let current=await this.repairJournal();for(const event of current)if(event.operation==='purge')await this.finishPurge(event.objectId);return this.rawEvents();});
+    const processed=new Map<string,string>();let repaired=0;
+    const latestFor=(source:CommitEvent[])=>new Map(source.map(e=>[e.objectId,e]));
+    const verifyAndRepair=async(e:CommitEvent,source:CommitEvent[],alreadyLocked:boolean):Promise<void>=>{
+      if(e.operation==='purge'){processed.set(e.objectId,e.revisionId);return;}
+      const bytes=await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`);
+      if(e.revisionSha256&&createHash('sha256').update(bytes).digest('hex')!==e.revisionSha256)throw new MDBError('INTERNAL',`Revision content hash mismatch: ${e.objectId}/${e.revisionId}`);
+      const doc=parseDocument(Buffer.from(bytes).toString('utf8'));
+      if(doc.id!==e.objectId||doc.revisionId!==e.revisionId||doc.path!==e.path||scopeKey(doc.scope)!==scopeKey(e.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
+      if(await this.projectionIsCurrent(e,bytes)){processed.set(e.objectId,e.revisionId);return;}
+      const repair=async(latest:CommitEvent[],chosen:CommitEvent)=>{
+        if(chosen.operation==='purge'){processed.set(chosen.objectId,chosen.revisionId);return;}
+        const currentBytes=await this.store.read(`.mdb/objects/${chosen.objectId}/revs/${chosen.revisionId}.md`);
+        if(chosen.revisionSha256&&createHash('sha256').update(currentBytes).digest('hex')!==chosen.revisionSha256)throw new MDBError('INTERNAL',`Revision content hash mismatch: ${chosen.objectId}/${chosen.revisionId}`);
+        const currentDoc=parseDocument(Buffer.from(currentBytes).toString('utf8'));
+        if(currentDoc.id!==chosen.objectId||currentDoc.revisionId!==chosen.revisionId||currentDoc.path!==chosen.path||scopeKey(currentDoc.scope)!==scopeKey(chosen.scope))throw new MDBError('INTERNAL','Revision and journal disagree');
+        if(!await this.projectionIsCurrent(chosen,currentBytes)&&await this.repairProjection(chosen,latest,currentBytes,'recover'))repaired++;
+        processed.set(chosen.objectId,chosen.revisionId);
+      };
+      if(alreadyLocked){await repair(source,e);return;}
+      await withVaultLock(this.root,async()=>{const current=await this.repairJournal();const chosen=latestFor(current).get(e.objectId);if(chosen)await repair(current,chosen);});
+    };
+    let latest=latestFor(events);
+    for(const e of latest.values())await verifyAndRepair(e,events,false);
+    // A writer may commit while the read-only pass is in progress. Reconcile
+    // only those changed heads under the lock before counting orphans/sweeping.
+    // Directory scans are also read-only. Do them outside the writer lock, then
+    // reconcile the journal once more and delete only the exact temporary paths
+    // discovered before acquiring the lock.
+    events=await withVaultLock(this.root,async()=>{const current=await this.repairJournal();for(const event of current)if(event.operation==='purge')await this.finishPurge(event.objectId);return this.rawEvents();});
+    latest=latestFor(events);const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));
+    const sweep=new Set<string>(['.mdb/heads','.mdb/events']);
+    for(const e of latest.values())if(!purged.has(e.objectId)){sweep.add(e.path.includes('/')?e.path.slice(0,e.path.lastIndexOf('/')):'.');sweep.add(`.mdb/objects/${e.objectId}/revs`);}
+    sweep.delete('.');let revisionKeys:string[]=[];const objectTemps:string[]=[];for await(const entry of this.store.list('.mdb/objects')){if(entry.key.endsWith('.md'))revisionKeys.push(entry.key);else if(/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(entry.key))objectTemps.push(entry.key);}
+    const tempCandidates=[...objectTemps];for(const directory of sweep)tempCandidates.push(...await this.findTemps(directory));
+    return withVaultLock(this.root,async()=>{
+      events=await this.repairJournal();for(const event of events)if(event.operation==='purge')await this.finishPurge(event.objectId);latest=latestFor(events);
+      for(const e of latest.values())if(processed.get(e.objectId)!==e.revisionId)await verifyAndRepair(e,events,true);
       const committed=new Set(events.map(e=>`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`));
-      for await(const entry of this.store.list('.mdb/objects')){
-        if(entry.key.endsWith('.md')&&!committed.has(entry.key))orphans++;
-        if(!this.remoteJournal()&&/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(entry.key)){
-          const parent=entry.key.slice(0,entry.key.lastIndexOf('/'));if(parent)sweep.add(parent);
-        }
-      }
-      for(const directory of sweep)tempRemoved+=await this.sweepTemps(directory);
+      const orphans=revisionKeys.filter(key=>!committed.has(key)).length;
+      let tempRemoved=0;for(const key of tempCandidates){if(!/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(key))continue;try{await fs.rm(await safePath(this.root,key),{force:true});tempRemoved++;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}}
       await this.flushProjections().catch(()=>undefined);return{committed:events.length,repaired,orphans,tempRemoved};
     });
   }
@@ -349,6 +402,7 @@ export class Vault {
   private async appendEvent(event:CommitEvent):Promise<CommitEvent> {
     const remote = this.remoteJournal();
     if (remote) return remote.appendCommittedEvent(event);
+    await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(event)) + 4096);
     const journal=await safePath(this.root,'.mdb/events/commits.jsonl');
     await profileAsync('journal.append_fsync', async () => {
       const handle=await fs.open(journal,'a',0o600);
@@ -384,8 +438,9 @@ export class Vault {
   }
   async purge(objectId:string,confirm:boolean):Promise<{purged:string;removed:number;limitations:string[]}> {
     this.requireOwner();if(confirm!==true)throw new MDBError('INVALID_INPUT','Purge requires explicit confirmation');return withVaultLock(this.root,async()=>{
+      await this.assertNoBackupSnapshotPinning();
       const all=await this.repairJournal();if(all.some(e=>e.objectId===objectId&&e.operation==='purge'))return{purged:objectId,removed:await this.finishPurge(objectId),limitations:['External backups and replicas are outside local purge.']};
-      const d=await this.rawDocument(objectId);const originalPaths:string[]=[];
+      const d=await this.rawDocument(objectId);await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(all)) + 16 * 1024);const originalPaths:string[]=[];
       if(typeof d.metadata.originalPath==='string'){let shared=false;const purged=new Set(all.filter(e=>e.operation==='purge').map(e=>e.objectId));for(const event of [...new Map(all.map(e=>[e.objectId,e])).values()]){if(event.objectId===objectId||purged.has(event.objectId))continue;const other=await this.documentForEvent(event);if(other.metadata.originalPath===d.metadata.originalPath)shared=true;}if(!shared)originalPaths.push(d.metadata.originalPath);}
       await atomicWrite(this.root,`.mdb/purge-intents/${objectId}.json`,JSON.stringify({path:d.path,originalPaths}));
       await this.appendEvent({sequence:all.length+1,transactionId:this.newId('tx'),objectId,revisionId:this.newId('purged'),path:'purged',scope:d.scope,operation:'purge',timestamp:this.now().toISOString()});this.options.fault?.('after_purge_event');
@@ -402,14 +457,147 @@ export class Vault {
     const timer=setInterval(()=>{void reconcile();},intervalMs);timer.unref();return{get watcherAvailable(){return watcherAvailable;},async close(){closed=true;clearInterval(timer);if(debounce)clearTimeout(debounce);watcher?.close();while(running)await new Promise(resolve=>setTimeout(resolve,5));}};
   }
   /**
-   * Consistent-point backup (held under the writer lock). Durability is NOT relaxed: every file is written exclusively and fsynced, then each
-   * directory is fsynced once (not after every file), and a SHA-256 manifest is written, fsynced and renamed into place LAST, so a backup is complete
-   * only if its manifest exists. Files are copied concurrently to shorten the time writers are blocked.
+   * Captures a consistent immutable file snapshot while holding the writer lock, then exports it without holding that lock.
+   * Revision/source files are hard-linked into a unique same-volume operation directory; the append-only journal is copied only
+   * through its captured byte offset. The destination is trusted only after every file is fsynced and the manifest is published last.
    */
-  async backup(destination:string):Promise<{destination:string;files:number;bytes:number}> {this.requireOwner();const target=path.resolve(destination);if(target===this.root||target.startsWith(this.root+path.sep))throw new MDBError('INVALID_INPUT','Backup must be outside the vault');await fs.mkdir(target,{recursive:true,mode:0o700});if((await fs.lstat(target)).isSymbolicLink()||(await fs.readdir(target)).length)throw new MDBError('INVALID_INPUT','Backup destination must be an empty regular directory');return withVaultLock(this.root,()=>Vault.copyTree(this.root,target,{manifest:true}));}
+  async backup(destination:string):Promise<{destination:string;files:number;bytes:number}> {
+    this.requireOwner();
+    const target=path.resolve(destination);
+    if(target===this.root||target.startsWith(this.root+path.sep))throw new MDBError('INVALID_INPUT','Backup must be outside the vault');
+    await fs.mkdir(target,{recursive:true,mode:0o700});
+    if((await fs.lstat(target)).isSymbolicLink()||(await fs.readdir(target)).length)throw new MDBError('INVALID_INPUT','Backup destination must be an empty regular directory');
+    const snapshot=await withVaultLock(this.root,async()=>{
+      const parent=await safePath(this.root,'.mdb/tmp/backup-snapshots');
+      await fs.mkdir(parent,{recursive:true,mode:0o700});
+      await Vault.cleanupBackupSnapshots(parent);
+      const operationId=randomUUID();
+      const relativeRoot=`.mdb/tmp/backup-snapshots/snapshot-${operationId}`;
+      const root=await safePath(this.root,relativeRoot);
+      await fs.mkdir(root,{mode:0o700});
+      const owner={format:'engram-backup-snapshot-v1',operationId,pid:process.pid,createdAt:new Date().toISOString(),state:'pinning' as const};
+      const ownerFile=await fs.open(path.join(root,'.backup-owner.json'),'wx',0o600);
+      try{await ownerFile.writeFile(JSON.stringify(owner));await ownerFile.sync();}finally{await ownerFile.close();}
+      try{
+        await this.repairJournal();
+        // Capture only the journal boundary under the writer lock. Walking a
+        // large vault here made backup latency proportional to file count and
+        // blocked unrelated writers. Canonical revisions are immutable and
+        // purge is fenced by the pin marker until linking is complete, so the
+        // inventory and hard-link work can safely happen after releasing it.
+        const journal='.mdb/events/commits.jsonl';
+        const journalStat=await fs.stat(path.join(this.root,journal));
+        return {root,relativeRoot,journalSize:journalStat.size};
+      }catch(error){await fs.rm(root,{recursive:true,force:true}).catch(()=>undefined);throw error;}
+    });
+    try{
+      // The journal cut is captured under the writer lock, but inventory and
+      // pinning thousands of immutable files are deliberately outside it.
+      // A purge checks the pin marker under the same lock and returns retryable
+      // CONFLICT until pinning is complete, so no captured revision can vanish.
+      const files=await Vault.listFiles(this.root,relative=>Vault.skipBackupPath(relative));
+      const directories=new Set<string>();
+      for(const file of files){let dir=path.dirname(file);while(dir!=='.'){directories.add(dir);dir=path.dirname(dir);}}
+      for(const directory of [...directories].sort((a,b)=>a.split('/').length-b.split('/').length))await fs.mkdir(await safePath(snapshot.root,directory),{recursive:true,mode:0o700});
+      let next=0;
+      const linkWorker=async()=>{for(let i=next++;i<files.length;i=next++){
+        const relative=files[i]!;if(relative==='.mdb/events/commits.jsonl')continue;
+        await fs.link(await safePath(this.root,relative),await safePath(snapshot.root,relative));
+      }};
+      await Promise.all(Array.from({length:Math.min(32,Math.max(1,files.length))},linkWorker));
+      await Vault.copyJournalPrefix(path.join(this.root,'.mdb/events/commits.jsonl'),await safePath(snapshot.root,'.mdb/events/commits.jsonl'),snapshot.journalSize);
+      await atomicWrite(this.root,`${snapshot.relativeRoot}/.backup-owner.json`,JSON.stringify({format:'engram-backup-snapshot-v1',operationId:path.basename(snapshot.relativeRoot).slice('snapshot-'.length),pid:process.pid,createdAt:new Date().toISOString(),state:'pinned'}));
+      // A backup performs a large number of durable file creates. Keep that
+      // background I/O single-flight so concurrent journal commits are not
+      // queued behind a burst of parallel fsyncs on the same volume.
+      return await Vault.copyTree(snapshot.root,target,{manifest:true,files,concurrency:1});
+    }
+    finally{await fs.rm(snapshot.root,{recursive:true,force:true}).catch(()=>undefined);}
+  }
+  private static skipBackupPath(relative:string):boolean {
+    return relative===BACKUP_MANIFEST||relative==='.backup-owner.json'||relative.startsWith('.mdb/locks/')
+      ||relative.startsWith('.mdb/indexes/')||relative.startsWith('.mdb/cache/')
+      ||relative==='.mdb/global-index.sqlite'||relative.startsWith('.mdb/global-index.sqlite-')
+      ||/\/\.mdb\/index\.sqlite(?:-(?:wal|shm))?$/.test(relative)
+      // Atomic writes use UUID-suffixed sibling files before rename. They are
+      // disposable in-flight state, not committed backup content. Inventory
+      // and hard-linking happen outside the writer lock, so a writer may rename
+      // or remove one after listFiles() sees it; excluding them also prevents
+      // transient/uncommitted bytes from entering a coherent snapshot.
+      ||/(?:^|\/)[^/]*\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i.test(relative)
+      ||relative.startsWith('.mdb/tmp/backup-snapshots/');
+  }
+  private static async copyJournalPrefix(source:string,destination:string,size:number):Promise<void>{
+    await fs.mkdir(path.dirname(destination),{recursive:true,mode:0o700});
+    const input=await fs.open(source,'r');const output=await fs.open(destination,'wx',0o600);const buffer=Buffer.allocUnsafe(1024*1024);
+    try{let offset=0;while(offset<size){const length=Math.min(buffer.length,size-offset);const{bytesRead}=await input.read(buffer,0,length,offset);if(!bytesRead)throw new MDBError('CONFLICT','Commit journal changed before backup snapshot completed');await output.write(buffer,0,bytesRead,offset);offset+=bytesRead;}await output.sync();}
+    finally{await input.close();await output.close();}
+  }
+  private static async cleanupBackupSnapshots(parent:string):Promise<void>{
+    for(const entry of await fs.readdir(parent,{withFileTypes:true})){
+      if(!entry.isDirectory()||!/^snapshot-[0-9a-f-]{36}$/.test(entry.name))continue;
+      const directory=path.join(parent,entry.name),marker=path.join(directory,'.backup-owner.json');
+      try{
+        const st=await fs.lstat(marker);if(!st.isFile()||st.isSymbolicLink())continue;
+        const owner=JSON.parse(await fs.readFile(marker,'utf8')) as {format?:string;operationId?:string;pid?:number};
+        if(owner.format!=='engram-backup-snapshot-v1'||owner.operationId!==entry.name.slice('snapshot-'.length)||!Number.isInteger(owner.pid)||owner.pid!<1)continue;
+        let alive=true;try{process.kill(owner.pid!,0);}catch(error){alive=(error as NodeJS.ErrnoException).code!=='ESRCH';}
+        if(!alive)await fs.rm(directory,{recursive:true,force:true});
+      }catch{/* An unreadable/unmarked operation is ambiguous and is intentionally retained. */}
+    }
+  }
+  /** Removes only restore staging trees whose adjacent owner marker proves the process is gone. */
+  private static async cleanupRestoreStages(parent:string,base:string):Promise<void>{
+    const prefix=`.${base}.engram-restore-`;
+    for(const name of await fs.readdir(parent)){
+      if(!name.startsWith(prefix))continue;
+      const suffix=name.slice(prefix.length),ownerOnly=suffix.endsWith('.staging.owner.json');
+      const operationId=ownerOnly?suffix.slice(0,-'.staging.owner.json'.length):suffix.endsWith('.staging')?suffix.slice(0,-'.staging'.length):'';
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId))continue;
+      const staging=path.join(parent,`${prefix}${operationId}.staging`),ownerPath=`${staging}.owner.json`;
+      try{
+        const ownerStat=await fs.lstat(ownerPath);
+        if(!ownerStat.isFile()||ownerStat.isSymbolicLink())continue;
+        const owner=JSON.parse(await fs.readFile(ownerPath,'utf8')) as {format?:string;operationId?:string;pid?:number;createdAt?:string};
+        const createdAt=Date.parse(owner.createdAt??'');
+        if(owner.format!=='engram-restore-stage-v1'||owner.operationId!==operationId||!Number.isSafeInteger(owner.pid)||owner.pid!<1||!Number.isFinite(createdAt)||createdAt>Date.now())continue;
+        let alive=true;
+        try{process.kill(owner.pid!,0);}catch(error){alive=(error as NodeJS.ErrnoException).code!=='ESRCH';}
+        if(alive)continue;
+        let stageStat;
+        try{stageStat=await fs.lstat(staging);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+        if(stageStat?.isSymbolicLink()||stageStat&&!stageStat.isDirectory())continue;
+        if(stageStat)await fs.rm(staging,{recursive:true,force:false});
+        await fs.rm(ownerPath,{force:false});
+      }catch{/* Unknown, malformed, active, or unreadable staging state is retained. */}
+    }
+  }
+  private async assertNoBackupSnapshotPinning():Promise<void>{
+    const parent=await safePath(this.root,'.mdb/tmp/backup-snapshots');
+    await fs.mkdir(parent,{recursive:true,mode:0o700});
+    await Vault.cleanupBackupSnapshots(parent);
+    for(const entry of await fs.readdir(parent,{withFileTypes:true}).catch(error=>{if((error as NodeJS.ErrnoException).code==='ENOENT')return[];throw error;})){
+      if(!entry.isDirectory()||!/^snapshot-[0-9a-f-]{36}$/.test(entry.name))continue;
+      try{
+        const marker=path.join(parent,entry.name,'.backup-owner.json');const stat=await fs.lstat(marker);
+        if(!stat.isFile()||stat.isSymbolicLink())throw new Error('invalid backup pin marker');
+        const owner=JSON.parse(await fs.readFile(marker,'utf8')) as {format?:string;operationId?:string;pid?:number;state?:string};
+        if(owner.format!=='engram-backup-snapshot-v1'||owner.operationId!==entry.name.slice('snapshot-'.length)||!Number.isInteger(owner.pid)||owner.pid!<1)throw new Error('invalid backup pin owner');
+        if(owner.state==='pinned')continue;
+        let alive=true;try{process.kill(owner.pid!,0);}catch(error){alive=(error as NodeJS.ErrnoException).code!=='ESRCH';}
+        if(alive)throw new MDBError('CONFLICT','Purge is deferred while a backup snapshot is pinning immutable files; retry after backup completes');
+        await fs.rm(path.dirname(marker),{recursive:true,force:true});
+      }catch(error){
+        if(error instanceof MDBError)throw error;
+        // Unknown or malformed snapshot state is ambiguous: fail closed rather
+        // than deleting canonical revisions that the snapshot may reference.
+        throw new MDBError('CONFLICT','Purge is deferred because backup snapshot ownership is ambiguous; inspect storage state before retrying');
+      }
+    }
+  }
   private static async listFiles(root:string,skip:(relative:string)=>boolean):Promise<string[]> {const files:string[]=[];const walk=async(directory:string)=>{for(const e of await fs.readdir(directory,{withFileTypes:true})){const full=path.join(directory,e.name),relative=path.relative(root,full).split(path.sep).join('/');if(skip(relative))continue;if(e.isSymbolicLink())throw new MDBError('INVALID_INPUT','Backup cannot include symlinks');if(e.isDirectory())await walk(full);else if(e.isFile())files.push(relative);}};await walk(root);return files.sort();}
-  private static async copyTree(source:string,target:string,options:{manifest:boolean}):Promise<{destination:string;files:number;bytes:number}> {
-    const files=await Vault.listFiles(source,relative=>relative.startsWith('.mdb/locks')||relative===BACKUP_MANIFEST);
+  private static async copyTree(source:string,target:string,options:{manifest:boolean;files?:string[];concurrency?:number}):Promise<{destination:string;files:number;bytes:number}> {
+    const files=options.files??await Vault.listFiles(source,relative=>relative.startsWith('.mdb/locks')||relative===BACKUP_MANIFEST);
     const directories=new Set<string>([target]);const entries:Array<{path:string;size:number;sha256:string}>=[];let next=0,bytes=0;
     const ensureDirectory=async(directory:string)=>{if(directories.has(directory))return;await ensureDirectory(path.dirname(directory));await fs.mkdir(directory,{mode:0o700,recursive:true});directories.add(directory);};
     const worker=async()=>{for(let i=next++;i<files.length;i=next++){
@@ -417,7 +605,9 @@ export class Vault {
       const data=await fs.readFile(path.join(source,relative));const handle=await fs.open(destination,'wx',0o600);
       try{await handle.writeFile(data);await handle.sync();}finally{await handle.close();}
       entries[i]={path:relative,size:data.length,sha256:createHash('sha256').update(data).digest('hex')};bytes+=data.length;}};
-    await Promise.all(Array.from({length:Math.min(16,Math.max(1,files.length))},worker));
+    const concurrency=options.concurrency??16;
+    if(!Number.isInteger(concurrency)||concurrency<1||concurrency>64)throw new MDBError('INVALID_INPUT','Backup copy concurrency must be between 1 and 64');
+    await Promise.all(Array.from({length:Math.min(concurrency,Math.max(1,files.length))},worker));
     for(const directory of [...directories].sort((a,b)=>b.length-a.length))await syncDirectory(directory); // children before parents, each once
     if(options.manifest)await atomicWrite(target,BACKUP_MANIFEST,JSON.stringify({version:1,createdAt:new Date().toISOString(),files:entries},null,1));
     return{destination:target,files:files.length,bytes};
@@ -431,5 +621,58 @@ export class Vault {
     for(const relative of await Vault.listFiles(source,r=>r===BACKUP_MANIFEST||r.startsWith('.mdb/locks')))if(!expected.has(relative))issues.push(`Unexpected file: ${relative}`);
     return{ok:issues.length===0,issues,files:manifest.files.length};
   }
-  static async restoreBackup(source:string,destination:string):Promise<Vault> {const check=await Vault.verifyBackup(path.resolve(source));if(!check.ok)throw new MDBError('INVALID_INPUT',`Backup verification failed: ${check.issues[0]??'unknown'}`);const original=new Vault(source);const report=await original.verify();if(!report.ok)throw new MDBError('INVALID_INPUT','Backup verification failed');const target=path.resolve(destination);await fs.mkdir(target,{recursive:true,mode:0o700});if((await fs.lstat(target)).isSymbolicLink()||(await fs.readdir(target)).length)throw new MDBError('INVALID_INPUT','Restore destination must be an empty regular directory');await Vault.copyTree(path.resolve(source),target,{manifest:false});const restored=new Vault(destination);await restored.recover();return restored;}
+  static async restoreBackup(source:string,destination:string):Promise<Vault> {
+    const sourceRoot=path.resolve(source),target=path.resolve(destination);
+    if(target===sourceRoot||target.startsWith(sourceRoot+path.sep))throw new MDBError('INVALID_INPUT','Restore destination cannot be inside its backup source');
+    const check=await Vault.verifyBackup(sourceRoot);
+    if(!check.ok)throw new MDBError('INVALID_INPUT',`Backup verification failed: ${check.issues[0]??'unknown'}`);
+    const original=new Vault(sourceRoot),report=await original.verify();
+    if(!report.ok)throw new MDBError('INVALID_INPUT','Backup verification failed');
+
+    // Build and recover beside the requested destination. The public destination
+    // remains empty/unpublished until every copied file and the journal recover.
+    // A process killed during copy can leave only this uniquely named staging
+    // directory; a retry can still atomically replace the original empty target.
+    const parent=path.dirname(target),base=path.basename(target);
+    await fs.mkdir(parent,{recursive:true,mode:0o700});
+    await Vault.cleanupRestoreStages(parent,base);
+    let targetExists=true;
+    try {
+      const targetStat=await fs.lstat(target);
+      if(targetStat.isSymbolicLink()||!targetStat.isDirectory()||(await fs.readdir(target)).length)
+        throw new MDBError('INVALID_INPUT','Restore destination must be an empty regular directory');
+    } catch(error) {
+      if((error as NodeJS.ErrnoException).code==='ENOENT')targetExists=false;
+      else throw error;
+    }
+    const operationId=randomUUID();
+    const staging=path.join(parent,`.${base}.engram-restore-${operationId}.staging`);
+    const ownerPath=`${staging}.owner.json`;
+    try {
+      const ownerFile=await fs.open(ownerPath,'wx',0o600);
+      try{await ownerFile.writeFile(JSON.stringify({format:'engram-restore-stage-v1',operationId,pid:process.pid,createdAt:new Date().toISOString()}));await ownerFile.sync();}finally{await ownerFile.close();}
+      await fs.mkdir(staging,{mode:0o700});
+      await Vault.copyTree(sourceRoot,staging,{manifest:false});
+      const restored=new Vault(staging);
+      await restored.recover();
+      const restoredReport=await restored.verify();
+      if(!restoredReport.ok)throw new MDBError('INVALID_INPUT','Restored backup failed verification');
+      // POSIX rename atomically replaces an existing empty directory. If the
+      // platform refuses that operation, remove only the still-empty target;
+      // no partial restore is ever published at the requested path.
+      try { await fs.rename(staging,target); }
+      catch(error) {
+        if(!targetExists||(error as NodeJS.ErrnoException).code!=='EEXIST'&&(error as NodeJS.ErrnoException).code!=='ENOTEMPTY')throw error;
+        await fs.rmdir(target);
+        await fs.rename(staging,target);
+      }
+      await fs.rm(ownerPath,{force:true}).catch(()=>undefined);
+      await syncDirectory(parent);
+      return new Vault(destination);
+    } catch(error) {
+      await fs.rm(staging,{recursive:true,force:true}).catch(()=>undefined);
+      await fs.rm(ownerPath,{force:true}).catch(()=>undefined);
+      throw error;
+    }
+  }
 }

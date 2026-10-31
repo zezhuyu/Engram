@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { currentSourceEvidence } from './lib/source-evidence.js';
 const report = await runSuite({
   name: 'security', title: 'Security and isolation',
-  files: ['dist/tests/security.test.js', 'dist/tests/security/adversarial.test.js', 'dist/tests/security/identity.test.js', 'dist/tests/security/oauth.test.js', 'dist/tests/interfaces.test.js', 'dist/tests/security/read-only.test.js', 'dist/tests/security/private-network.test.js', 'dist/tests/security/private-network-server.test.js', 'dist/tests/security/release-policy.test.js', 'dist/tests/memory/hardening.test.js', 'dist/tests/security/tls-verification.test.js', 'dist/tests/security/ci-diagnostics.test.js'],
+  files: ['dist/tests/security.test.js', 'dist/tests/security/adversarial.test.js', 'dist/tests/security/identity.test.js', 'dist/tests/security/oauth.test.js', 'dist/tests/interfaces.test.js', 'dist/tests/security/read-only.test.js', 'dist/tests/security/private-network.test.js', 'dist/tests/security/private-network-server.test.js', 'dist/tests/security/release-policy.test.js', 'dist/tests/memory/hardening.test.js', 'dist/tests/security/tls-verification.test.js', 'dist/tests/security/ci-diagnostics.test.js', 'dist/tests/security/replay-acl.test.js', 'dist/tests/security/http-auth-admission.test.js', 'dist/tests/security/http-admission.test.js', 'dist/tests/security/prompt-redaction.test.js', 'dist/tests/security/redaction-performance.test.js', 'dist/tests/security/suite-inventory-drift.test.js', 'dist/tests/security/suite-runner-timeout.test.js', 'dist/tests/models.test.js', 'dist/tests/agents.test.js'],
   gaps: [
     { item: 'Real prompt-injection resistance of a live model', status: 'NOT_RUN', reason: 'Deterministic tests prove injected text has no authority in the runtime (validated proposals, review gate, scope checks). Behaviour of a real model under injection is a model-eval item.' },
     { item: 'Embedding leakage', status: 'UNSUPPORTED', reason: 'No embeddings exist.' },
@@ -34,3 +34,14 @@ await writeFile('verification/remote-clients/http-service.json', JSON.stringify(
   detail: 'Private loopback HTTP tests only; no tunnel, public TLS or hosted-client claim.', tests: requiredHttpTests
 }, null, 2) + '\n');
 summarize(report);
+
+// The durable-write-under-flood threshold is a performance contract, not a
+// noisy assertion to run alongside unrelated test files. Re-run the same
+// security scenario alone and bind its independent result to current source.
+const performance = await runSuite({
+  name: 'http-auth-admission-performance', title: 'Authenticated write latency under unauthorized flood',
+  files: ['dist/tests/security/http-auth-admission.test.js'], concurrency: 1,
+  env: { MDB_STRICT_PERF_TEST: '1' }, gaps: [],
+  limitations: ['Isolated local loopback benchmark; does not qualify remote network deployment or hosted MCP clients.']
+});
+summarize(performance);

@@ -69,6 +69,18 @@ test('SIGKILL right after the journal fsync leaves no projections; restart sees 
   recordCase({ suite: 'acid', name: 'projection-kill-after-journal', status: 'PASS' });
 });
 
+test('healthy recovery verifies durable heads without rewriting and fsyncing each head', async t => {
+  const { root, vault } = await disposableVault(t);
+  await put(vault, 'stable', 'already committed and projected');
+  await vault.flushProjections();
+  let headWrites = 0;
+  const recovering = new Vault(root, undefined, { fault: stage => { if (stage === 'recover.before_head_write') headWrites++; } });
+  const result = await recovering.recover();
+  assert.equal(result.repaired, 0);
+  assert.equal(headWrites, 0, 'a healthy projection is verified, not needlessly rewritten');
+  recordCase({ suite: 'acid', name: 'recovery-avoids-unnecessary-head-fsync', status: 'PASS' });
+});
+
 test('purging an object with pending projections never makes a later flush fail; a non-owner commit does not repair other people\'s projections', async t => {
   const { root, vault } = await disposableVault(t); await vault.createWorkspace('w', '', { agent: ['read', 'write'] });
   const d = await vault.put({ scope: { type: 'workspace', workspaceId: 'w' }, kind: 'note', title: 'purge me', body: 'pending then purged' }); const events = await vault.events(); void events;

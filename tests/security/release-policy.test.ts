@@ -5,7 +5,7 @@ import { createHash, generateKeyPairSync, sign as signSignature } from 'node:cry
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PRODUCTION_EVIDENCE, classifyRelease, collectProductionEvidence, currentQualityStatus, mcpEvidenceComplete, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, sourceEvidenceMatches, suiteReportConsistent, validateExclusions, type ProductionEvidence } from '../../scripts/lib/release-policy.js';
+import { PRODUCTION_EVIDENCE, classifyRelease, collectProductionEvidence, currentQualityDetail, currentQualityStatus, mcpEvidenceComplete, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, sourceEvidenceMatches, suiteReportConsistent, validateExclusions, verifyReleaseAuthorization, type ProductionEvidence } from '../../scripts/lib/release-policy.js';
 import { currentSourceEvidence } from '../../scripts/lib/source-evidence.js';
 
 const green = { storageVerdict: 'PASS', openAreas: [] as string[], openGates: [] as string[], failedGates: [] as string[] };
@@ -46,6 +46,22 @@ test('historical model PASS needs matching source evidence and never promotes mi
   assert.equal(modelEvidenceMatches({ status: 'PASS', evidenceSource: { files: {} } }, {}), false);
 });
 
+test('release quality narrative reports current model evidence instead of inheriting stale base PASS text', () => {
+  const detail = currentQualityDetail('verification/dream/real-model-evaluation.json', 'PASS', 'FAIL', {
+    status: 'FAIL', runAt: '2026-10-28T22:45:35.252Z', provider: 'ollama:gpt-oss:latest', model: 'gpt-oss:latest',
+    semanticGrounding: 'NOT_ASSESSED', humanAdjudication: 'NOT_RUN', rawResponses: 'verification/dream/raw-responses/run-1',
+    evidenceSource: { fingerprint: 'candidate-fingerprint' },
+    metrics: { modes: { micro: { meanQuality: 0.97 }, deep: { meanQuality: 0.33 }, strategic: { meanQuality: 0.94 } } },
+  });
+  assert.match(detail, /Current-source quality evidence .*: FAIL \(base PASS; evaluation FAIL\)/);
+  assert.match(detail, /Provider\/model ollama:gpt-oss:latest\/gpt-oss:latest/);
+  assert.match(detail, /Mode means: micro=0\.970, deep=0\.330, strategic=0\.940/);
+  assert.match(detail, /Semantic grounding NOT_ASSESSED; human adjudication NOT_RUN/);
+  assert.match(detail, /raw-responses\/run-1/);
+  assert.doesNotMatch(detail, /Fresh run on the combined A\+B\+C tree/);
+  assert.match(currentQualityDetail('verification/profile/real-model-evaluation.json', 'PASS', 'INCOMPLETE', undefined), /evaluation is missing/);
+});
+
 test('current-source evidence requires every consumer source hash; a partial or mismatched map is stale', () => {
   const current = { 'packages/core/vault.ts': 'vault-v2', 'packages/storage-local/index.ts': 'storage-v2', 'verification/profile/labeled-corpus.json': 'corpus-v2' };
   assert.equal(sourceEvidenceMatches(undefined, current), false);
@@ -74,6 +90,69 @@ test('mandatory suite inventory prevents reduced totals, unknown substitutions a
   assert.equal(suiteReportConsistent({ ...report, tests: [report.tests[0]!], counts: { pass: 1, fail: 0, skipped: 0, total: 1 }, cases: 1, caseDetails: [report.caseDetails[0]!] }, inventory), false, 'consistently reduced totals still omit mandatory cases');
   assert.equal(suiteReportConsistent({ ...report, caseDetails: [{ name: 'case-a', status: 'PASS' }, { name: 'unknown', status: 'PASS' }] }, inventory), false);
   assert.equal(suiteReportConsistent({ ...report, caseDetails: [{ name: 'case-a', status: 'PASS' }, { name: 'case-a', status: 'PASS' }] }, inventory), false);
+});
+
+test('security gate includes replay ACL coverage and rejects its removal from emitted evidence', () => {
+  const runner = readFileSync('scripts/verify-security.ts', 'utf8');
+  const inventory = JSON.parse(readFileSync('scripts/lib/suite-inventory.json', 'utf8')) as { suites: Record<string, { minimumTests: number; requiredTests: string[]; requiredCases: string[] }> };
+  const security = inventory.suites.security!;
+  const replayTest = 'write idempotency replays require current ACL and direct SDK status updates remain ACL-governed';
+  const replayCase = 'security/acl-current-write-before-idempotency-and-direct-retire';
+  assert.match(runner, /dist\/tests\/security\/replay-acl\.test\.js/);
+  assert.ok(security.requiredTests.includes(replayTest));
+  assert.ok(security.requiredCases.includes(replayCase));
+  const report = {
+    status: 'PASS', exitCode: 0,
+    environment: { platform: 'darwin' },
+    counts: { pass: Math.max(security.minimumTests, security.requiredTests.length), fail: 0, skipped: 0, total: Math.max(security.minimumTests, security.requiredTests.length) },
+    tests: [...security.requiredTests, ...Array.from({ length: Math.max(0, security.minimumTests - security.requiredTests.length) }, (_, i) => `extra-${i}`)].map(name => ({ name, status: 'PASS' })),
+    cases: security.requiredCases.length,
+    caseDetails: security.requiredCases.map(name => ({ name, status: 'PASS' })),
+    caseFailures: [],
+  };
+  assert.equal(suiteReportConsistent(report, security), true);
+  const regressionRemoved = { ...report, cases: report.cases - 1, caseDetails: report.caseDetails.filter(item => item.name !== replayCase) };
+  assert.equal(suiteReportConsistent(regressionRemoved, security), false, 'removing replay-ACL execution must make the security evidence inadmissible');
+});
+
+test('security inventory executes and requires the HTTP admission and prompt-redaction regressions', () => {
+  const runner = readFileSync('scripts/verify-security.ts', 'utf8');
+  const inventory = JSON.parse(readFileSync('scripts/lib/suite-inventory.json', 'utf8')) as { suites: Record<string, { minimumTests: number; requiredTests: string[]; requiredCases: string[] }> };
+  const security = inventory.suites.security!;
+  const requiredFiles = [
+    'dist/tests/security/http-auth-admission.test.js',
+    'dist/tests/security/http-admission.test.js',
+    'dist/tests/security/prompt-redaction.test.js',
+    'dist/tests/security/redaction-performance.test.js',
+    'dist/tests/models.test.js',
+    'dist/tests/agents.test.js',
+  ];
+  const requiredTests = [
+    'unauthenticated HTTP flood is rejected before repeated durable credential writes',
+    'authenticated admission is not keyed by peer sockets and admits 80 writes across proxied principals',
+    'failed-auth aggregates are durable before abrupt server termination',
+    'authenticated admission schedules principal queues round-robin',
+    'authenticated admission bounds the wait queue and cancellation removes a waiter',
+    'generation prompt redacts credentials in every user and document field',
+    'critic prompt redacts credentials in proposal, metadata, instruction, and cited evidence',
+    'credential redaction stays bounded on 900KB adversarial inputs',
+    'capture redaction bounds its scan and retains only a scrubbed prefix of oversized payloads',
+    'credential URL schemes and secret formats remain redacted',
+  ];
+  for (const file of requiredFiles) assert.ok(runner.includes(file), `security runner omits ${file}`);
+  for (const name of requiredTests) assert.ok(security.requiredTests.includes(name), `security inventory omits ${name}`);
+  const fullReport = {
+    status: 'PASS', exitCode: 0,
+    environment: { platform: 'darwin' },
+    counts: { pass: security.minimumTests, fail: 0, skipped: 0, total: security.minimumTests },
+    tests: security.requiredTests.map(name => ({ name, status: 'PASS' })),
+    cases: security.requiredCases.length,
+    caseDetails: security.requiredCases.map(name => ({ name, status: 'PASS' })),
+    caseFailures: [],
+  };
+  assert.equal(suiteReportConsistent(fullReport, security), true);
+  const regressionRemoved = { ...fullReport, tests: fullReport.tests.filter(test => test.name !== requiredTests[0]) };
+  assert.equal(suiteReportConsistent(regressionRemoved, security), false, 'removing a mandatory HTTP regression must invalidate the security evidence');
 });
 
 test('current source quality FAIL dominates base PASS, INCOMPLETE, NOT_RUN and missing reports', () => {
@@ -106,7 +185,7 @@ test('performance measurements need fresh corpus-bound finite distributions; pas
 
 test('source fingerprint covers extensionless deployment inputs and detects deletion', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'engram-source-evidence-'));
-  const samples: Array<[string, string]> = [['integrations/lifecycle.ts', 'one'], ['macos/App.swift', 'one'], ['linux/README.md', 'one'], ['macos/icon.png', 'one'], ['deploy/Caddyfile', 'one'], ['deploy/.env.example', 'one'], ['verification/profile/labeled-corpus.json', 'one'], ['verification/dream/labeled-scenarios.json', 'one'], ['verification/benchmarks/corpus-manifest.json', 'one']];
+  const samples: Array<[string, string]> = [['integrations/lifecycle.ts', 'one'], ['macos/App.swift', 'one'], ['linux/README.md', 'one'], ['macos/icon.png', 'one'], ['deploy/Caddyfile', 'one'], ['deploy/.env.example', 'one'], ['verification/profile/labeled-corpus.json', 'one'], ['verification/profile/correction-corpus.json', 'one'], ['verification/dream/labeled-scenarios.json', 'one'], ['verification/benchmarks/corpus-manifest.json', 'one']];
   for (const [name, body] of samples) { mkdirSync(path.dirname(path.join(root, name)), { recursive: true }); writeFileSync(path.join(root, name), body); }
   const before = await currentSourceEvidence(root);
   for (const name of samples.map(([name]) => name)) {
@@ -119,8 +198,19 @@ test('source fingerprint covers extensionless deployment inputs and detects dele
   assert.notEqual((await currentSourceEvidence(root)).fingerprint, beforeDelete.fingerprint, 'deleting any declared source must alter source identity');
 });
 
+test('source identity excludes only the tool-generated AGENTS memory block', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'engram-generated-agents-'));
+  const file = path.join(root, 'AGENTS.md');
+  writeFileSync(file, 'Authored policy.\n<claude-mem-context>session one</claude-mem-context>\n');
+  const first = await currentSourceEvidence(root);
+  writeFileSync(file, 'Authored policy.\n<claude-mem-context>different later session</claude-mem-context>\n');
+  assert.equal((await currentSourceEvidence(root)).fingerprint, first.fingerprint);
+  writeFileSync(file, 'Changed authored policy.\n<claude-mem-context>different later session</claude-mem-context>\n');
+  assert.notEqual((await currentSourceEvidence(root)).fingerprint, first.fingerprint);
+});
+
 test('every automated gate passing does not make a release GA while production evidence is incomplete', () => {
-  const result = classifyRelease({ ...green, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: undefined });
+  const result = classifyRelease({ ...green, profile: 'full-intelligence-beta', evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: undefined });
   assert.equal(result.automatedGatesPass, true);
   assert.equal(result.level, 'BETA');
   assert.deepEqual(result.incompleteEvidence.map(e => e.id), ['PHYSICAL_POWER_LOSS', 'TRANSPORT_TLS']);
@@ -133,16 +223,56 @@ test('a failed gate or a storage area that is not PASS is not releasable at any 
   assert.equal(classifyRelease({ ...green, evidence: evidence({ LIVE_OBJECT_STORE: 'FAIL' }), exclusions: [approved('PHYSICAL_POWER_LOSS')] }).level, 'NOT_RELEASABLE', 'a FAILED evidence item is never a mere gap');
 });
 
-test('open mandatory gates or areas keep the release at BETA even with complete evidence', () => {
+test('open mandatory gates or areas fail the selected release profile closed', () => {
   const result = classifyRelease({ ...green, openGates: ['REMOTE_CAPTURE'], openAreas: ['PERFORMANCE'], evidence: evidence(), exclusions: [] });
-  assert.equal(result.level, 'BETA'); assert.ok(result.blockers.includes('mandatory gate REMOTE_CAPTURE not PASS')); assert.ok(result.blockers.includes('area PERFORMANCE not PASS'));
+  assert.equal(result.level, 'NOT_RELEASABLE'); assert.ok(result.blockers.includes('mandatory gate REMOTE_CAPTURE not PASS')); assert.ok(result.blockers.includes('area PERFORMANCE not PASS'));
+});
+
+test('release profiles have explicit requirements and Core cannot claim excluded features without a signed disabled-feature attestation', () => {
+  const core = classifyRelease({ ...green, profile: 'core-beta', requiredAreas: [{ id: 'STORAGE', status: 'PASS' }], requiredGates: [{ id: 'AGENT_IDENTITY', status: 'PASS' }], disabledFeatures: [], evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] });
+  assert.equal(core.level, 'NOT_RELEASABLE');
+  assert.ok(core.blockers.some(b => b.includes('disabled capability')));
+  const enabled = classifyRelease({ ...green, profile: 'core-beta', requiredAreas: [{ id: 'STORAGE', status: 'PASS' }], requiredGates: [{ id: 'AGENT_IDENTITY', status: 'PASS' }], disabledFeatures: ['dream', 'preferences', 'wiki', 'adaptive'], evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] });
+  assert.equal(enabled.level, 'NOT_RELEASABLE', 'editable feature labels are not authenticated owner evidence');
+  const sourceFingerprint = 'a'.repeat(64);
+  const capabilityAttestation = sign({ profile: 'core-beta', sourceFingerprint, disabledFeatures: ['adaptive-intelligence', 'dream', 'preferences', 'wiki'], artifacts: { 'engram-core.zip': 'b'.repeat(64) }, observedAt: new Date().toISOString() });
+  const attested = classifyRelease({ ...green, profile: 'core-beta', sourceFingerprint, requiredAreas: [{ id: 'STORAGE', status: 'PASS' }], requiredGates: [{ id: 'AGENT_IDENTITY', status: 'PASS' }], disabledFeaturesAttestation: capabilityAttestation, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] }, ownerPublicKey);
+  assert.equal(attested.level, 'BETA', 'a valid profile with its required gates may be BETA while GA-only evidence remains open');
+  assert.equal(attested.automatedGatesPass, true);
+});
+
+test('every failed required area or mandatory gate is NOT_RELEASABLE for the selected profile', () => {
+  for (const status of ['FAIL', 'INCOMPLETE', 'NOT_RUN']) {
+    const result = classifyRelease({ ...green, profile: 'full-intelligence-beta', requiredAreas: [{ id: 'DREAM', status }], requiredGates: [{ id: 'DREAM_ENGINE', status: 'PASS' }], evidence: evidence(), exclusions: [] });
+    assert.equal(result.level, 'NOT_RELEASABLE', `area ${status}`);
+  }
+  const gate = classifyRelease({ ...green, profile: 'full-intelligence-beta', requiredAreas: [{ id: 'DREAM', status: 'PASS' }], requiredGates: [{ id: 'DREAM_ENGINE', status: 'FAIL' }], evidence: evidence(), exclusions: [] });
+  assert.equal(gate.level, 'NOT_RELEASABLE');
+  const gaMissingEvidence = classifyRelease({ ...green, profile: 'ga', evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] });
+  assert.equal(gaMissingEvidence.level, 'NOT_RELEASABLE', 'an explicit GA check cannot downgrade missing required production proof to a BETA result');
 });
 
 test('only trusted signed exclusions with an approver, reason, fresh date and known id count', () => {
   const bad = [{ id: 'PHYSICAL_POWER_LOSS' }, { id: 'PHYSICAL_POWER_LOSS', approvedBy: 'owner', reason: 'x' }, { id: 'PHYSICAL_POWER_LOSS', approvedBy: ' ', reason: 'x', approvedAt: '2026-10-12' }, { id: 'NOT_A_THING', approvedBy: 'owner', reason: 'x', approvedAt: '2026-10-12' }, { id: 'PHYSICAL_POWER_LOSS', approvedBy: 'owner', reason: 'x', approvedAt: 'yesterday' }, 'text', null];
   const checked = validateExclusions(bad, PRODUCTION_EVIDENCE.map(e => e.id), ownerPublicKey); assert.equal(checked.valid.length, 0); assert.equal(checked.ignored.length, bad.length);
-  const result = classifyRelease({ ...green, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: bad });
+  const result = classifyRelease({ ...green, profile: 'full-intelligence-beta', evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: bad });
   assert.equal(result.level, 'BETA'); assert.equal(result.excludedEvidence.length, 0); assert.equal(result.ignoredExclusions.length, bad.length);
+});
+
+test('release authorization signature binds the exact source, tag, commit, profile, level and freshness', () => {
+  const now = Date.now();
+  const expected = { sourceFingerprint: 'a'.repeat(64), ref: 'refs/tags/v1.2.3-beta.1', commit: 'b'.repeat(40), profile: 'full-intelligence-beta' as const, releaseLevel: 'BETA' as const };
+  const attestation = sign({ schemaVersion: 1, purpose: 'engram-release', ...expected, approvedBy: 'owner@example.test', approvedAt: new Date(now).toISOString() }, 'signature');
+  assert.equal(verifyReleaseAuthorization(attestation, expected, ownerPublicKey, now), true);
+  assert.equal(verifyReleaseAuthorization(attestation, { ...expected, sourceFingerprint: 'c'.repeat(64) }, ownerPublicKey, now), false);
+  assert.equal(verifyReleaseAuthorization(attestation, { ...expected, ref: 'refs/tags/v1.2.4' }, ownerPublicKey, now), false);
+  assert.equal(verifyReleaseAuthorization(attestation, { ...expected, commit: 'd'.repeat(40) }, ownerPublicKey, now), false);
+  assert.equal(verifyReleaseAuthorization(attestation, { ...expected, releaseLevel: 'GA_ELIGIBLE' }, ownerPublicKey, now), false);
+  assert.equal(verifyReleaseAuthorization(attestation, expected, undefined, now), false);
+  const stale = sign({ schemaVersion: 1, purpose: 'engram-release', ...expected, approvedBy: 'owner@example.test', approvedAt: new Date(now - 8 * 24 * 3600_000).toISOString() }, 'signature');
+  assert.equal(verifyReleaseAuthorization(stale, expected, ownerPublicKey, now), false);
+  const future = sign({ schemaVersion: 1, purpose: 'engram-release', ...expected, approvedBy: 'owner@example.test', approvedAt: new Date(now + 60 * 60_000).toISOString() }, 'signature');
+  assert.equal(verifyReleaseAuthorization(future, expected, ownerPublicKey, now), false);
 });
 
 test('GA eligibility needs every evidence item PASS or validly excluded, and is eligibility only', () => {
@@ -150,7 +280,7 @@ test('GA eligibility needs every evidence item PASS or validly excluded, and is 
   const excluded = classifyRelease({ ...green, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: { exclusions: [approved('PHYSICAL_POWER_LOSS'), approved('TRANSPORT_TLS')] } }, ownerPublicKey);
   assert.equal(excluded.level, 'GA_ELIGIBLE'); assert.deepEqual(excluded.excludedEvidence.sort(), ['PHYSICAL_POWER_LOSS', 'TRANSPORT_TLS']);
   assert.match(excluded.summary, /owner/); assert.doesNotMatch(excluded.summary, /^GA-ready/);
-  const partial = classifyRelease({ ...green, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: [approved('PHYSICAL_POWER_LOSS')] }, ownerPublicKey);
+  const partial = classifyRelease({ ...green, profile: 'full-intelligence-beta', evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: [approved('PHYSICAL_POWER_LOSS')] }, ownerPublicKey);
   assert.equal(partial.level, 'BETA'); assert.deepEqual(partial.incompleteEvidence.map(e => e.id), ['TRANSPORT_TLS']);
 });
 

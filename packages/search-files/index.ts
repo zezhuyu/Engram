@@ -22,11 +22,13 @@ export function scopeMatches(actual: Scope, filter: Scope): boolean {
 
 export async function authorizedDocuments(vault: SearchVault, input: SearchInput, actor: ActorContext): Promise<Document[]> {
   if (input.includeHistory && !actor.permissions.includes('*') && !actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'History search requires history:read permission');
+  if (input.includeRejected && !actor.permissions.includes('*') && !actor.permissions.includes('history:read')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Rejected discovery search requires history:read permission');
   if (actor.actorId !== vault.actor.actorId || actor.permissions.some(permission => !vault.actor.permissions.includes('*') && !vault.actor.permissions.includes(permission))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Search identity must match the trusted vault identity');
   const current = await vault.listDocuments({ includeHistory: input.includeHistory, scopes: input.scopes });
   const scoped = current.filter(doc => (!input.scopes?.length || input.scopes.some(scope => scopeMatches(doc.scope, scope))));
   const documents = scoped;
   return documents.filter(doc => doc.status !== 'deleted' && doc.status !== 'tombstone'
+    && (input.includeRejected === true || doc.kind !== 'discovery' || doc.status !== 'rejected')
     && (!input.kinds?.length || input.kinds.includes(doc.kind))
     && (!input.tags?.length || input.tags.every(tag => doc.tags.includes(tag)))
     && (!input.since || doc.updatedAt >= input.since)

@@ -4,4 +4,8 @@ dist
 .omx
 verification/benchmarks/corpora
 **/.mdb
+# The frozen, synthetic legacy-vault fixture is required by the exported-source
+# compatibility test. Keep every other vault excluded from Docker contexts.
+!tests/fixtures/wiki-legacy-vault/.mdb/
+!tests/fixtures/wiki-legacy-vault/.mdb/**
 .DS_Store

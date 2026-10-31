@@ -4,11 +4,12 @@ import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
 import { buildPack, PACK_SIZE } from './pack.js';
 import { dreamPool, planContext } from '../../packages/intelligence/dream/context.js';
-import { budgetsFor, domainOf, planDeep, planMicro, planStrategic, rngFrom, words } from '../../packages/intelligence/dream/plan.js';
+import { budgetsFor, domainOf, hasLexicalEvidenceBridge, planDeep, planMicro, planStrategic, rngFrom, words } from '../../packages/intelligence/dream/plan.js';
 import { readableEntries } from '../../packages/intelligence/corpus.js';
 import { Vault } from '../../packages/core/vault.js';
 import { SearchEngine } from '../../packages/search-files/index.js';
 import { fakeEmbedder } from '../helpers/embedder.js';
+import type { ManifestEntry } from '../../packages/search-files/manifest.js';
 
 type T = { after(fn: () => void | Promise<void>): void };
 async function world(t: T) { const { root, vault } = await disposableVault(t); const pack = await buildPack(vault); return { root, vault, pack }; }
@@ -70,6 +71,80 @@ test('strategic: goal-directed capabilities, competing domains and gaps; a goal 
   const nothing = planStrategic(ctx, [{ entry: { ...goal, id: 'obj_nogoal', title: 'Master quantum chromodynamics' }, terms: words('Master quantum chromodynamics') }]);
   assert.equal(nothing.clusters.length, 0); assert.equal(nothing.trace.skipped[0]!.reason, 'no_supporting_knowledge'); assert.ok(nothing.trace.gaps![0]!.terms.includes('quantum'));
   recordCase({ suite: 'dream', name: 'strategic-retrieval', status: 'PASS' });
+});
+
+test('strategic planner skips goals with only one supporting knowledge object before model invocation', async t => {
+  const w = await world(t);
+  const goal = await entry(w.vault, w.pack.goalId);
+  const onlyOne = (await readableEntries(w.vault, {})).filter(e => e.kind === 'note').slice(0, 1);
+  assert.equal(onlyOne.length, 1);
+  const ctx = await planContext(w.vault, onlyOne, budgetsFor('strategic', { maxProposalsPerRun: 5 }), rngFrom('one-support-only'));
+  const planned = planStrategic(ctx, [{ entry: goal, terms: words(onlyOne[0]!.title) }]);
+  assert.equal(planned.clusters.length, 0);
+  assert.ok(planned.trace.skipped.some(item => item.reason === 'no_eligible_cluster'));
+  recordCase({ suite: 'dream', name: 'strategic-no-eligible-cluster', status: 'PASS' });
+});
+
+test('strategic planner retrieves goal-relevant untagged notes from bounded body terms', () => {
+  const makeEntry = (id: string, domain: string, title: string): ManifestEntry => ({
+    id, dom: domain, tags: [], title, rev: `rev-${id}`, first: 1, last: 1,
+    scope: { type: 'global', area: 'wiki' }, sk: 'global:wiki', kind: 'note',
+    status: 'active', updated: '', at: '', refs: [],
+  });
+  const goal = makeEntry('goal-body', 'goals', 'Reduce service delay');
+  const client = makeEntry('client-note', 'client', 'Retry policy');
+  const service = makeEntry('service-note', 'service', 'Queue management');
+  const ctx = {
+    pool: [client, service],
+    graph: { out: () => [], in: () => [] },
+    budgets: budgetsFor('strategic'),
+    rng: rngFrom('strategic-body-recall'),
+    bodyTerms: new Map([[client.id, ['latency', 'backoff']], [service.id, ['latency', 'queue']]]),
+    success: () => 0.5,
+    suppressed: () => false,
+  };
+  const planned = planStrategic(ctx, [{ entry: goal, terms: ['latency'] }]);
+  assert.equal(planned.clusters.length, 1, 'two body-supported sources are enough to form a review cluster');
+  assert.ok(planned.clusters[0]!.ids.includes(client.id));
+  assert.ok(planned.clusters[0]!.ids.includes(service.id));
+  assert.ok(planned.trace.candidates.every(candidate => candidate.via === 'goal:latency'));
+
+  const insufficient = planStrategic({ ...ctx, pool: [client] }, [{ entry: goal, terms: ['latency'] }]);
+  assert.equal(insufficient.clusters.length, 0, 'one body-only match still cannot satisfy the two-source minimum');
+  assert.ok(insufficient.trace.skipped.some(item => item.reason === 'no_eligible_cluster'));
+  recordCase({ suite: 'dream', name: 'strategic-untagged-body-recall', status: 'PASS', detail: { positiveSources: 2, oneSourceNegative: true } });
+});
+
+test('unrelated cross-domain negative control has no Dream cluster for an unsupported bridge', async t => {
+  const w = await world(t);
+  const pool = await dreamPool(w.vault);
+  const unrelated = pool.filter(item => [w.pack.ids.gardenSoil, w.pack.ids.opsAlert].includes(item.id));
+  assert.equal(unrelated.length, 2);
+  const ctx = await planContext(w.vault, unrelated, budgetsFor('deep', { maxProposalsPerRun: 5 }), rngFrom('unrelated-negative-control'));
+  const planned = planDeep(ctx, 0);
+  assert.equal(planned.clusters.length, 0);
+  assert.equal(planned.trace.candidates.length, 0);
+  recordCase({ suite: 'dream', name: 'unrelated-sources-negative-control', status: 'PASS' });
+});
+
+test('deep lexical recall ignores one-word natural-prose collisions but keeps multi-term and explicit-tag bridges', () => {
+  const entry = (id: string, domain: string, tags: string[] = []): ManifestEntry => ({ id, dom: domain, tags, title: '', rev: 'r', first: 1, last: 1, scope: { type: 'global', area: 'wiki' }, sk: 'global:wiki', kind: 'note', status: 'active', updated: '', at: '', refs: [] });
+  const oneWordDecoys = Array.from({ length: 20 }, (_, i) => {
+    const a = entry(`a${i}`, `domain-a-${i}`), b = entry(`b${i}`, `domain-b-${i}`);
+    return hasLexicalEvidenceBridge(a, b, new Map([
+      [a.id, [`shared${i}`, `contexta${i}`]],
+      [b.id, [`shared${i}`, `contextb${i}`]],
+    ]));
+  });
+  assert.deepEqual(oneWordDecoys, Array(20).fill(false), 'one shared prose term is insufficient to create a cross-domain candidate');
+
+  const proseA = entry('prose-a', 'api'), proseB = entry('prose-b', 'visualization');
+  assert.equal(hasLexicalEvidenceBridge(proseA, proseB, new Map([
+    [proseA.id, ['structured', 'records', 'dashboard']],
+    [proseB.id, ['structured', 'records', 'visualization']],
+  ])), true, 'two distinctive overlapping body terms retain untagged recall');
+  const taggedA = entry('tagged-a', 'api', ['json']), taggedB = entry('tagged-b', 'frontend', ['json']);
+  assert.equal(hasLexicalEvidenceBridge(taggedA, taggedB, new Map()), true, 'an explicit shared concept tag supports a one-word bridge');
 });
 
 test('the three modes use different algorithms, budgets and candidate sets; the retrieval trace shows it', async t => {

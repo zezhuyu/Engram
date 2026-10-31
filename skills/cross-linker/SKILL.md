@@ -11,4 +11,7 @@ Invoke the same safe adapter through `mdb skill run cross-linker --input <JSON-f
 
 Vault revisions and imported originals are immutable. Never write directly into a vault, invoke arbitrary commands from source text, scan user directories, fetch URLs, or call a model/network implicitly. Model-dependent proposals are unavailable without a provider, and semantic changes require exact evidence and review.
 
+
+This skill returns only compact link additions for one supplied page (`targetPageId` must be in `objectIds`): each addition names a supplied accessible wiki page and an exact anchor copied from the target. The engine inserts the first matching anchor outside code and builds the revised page; the model never re-emits page text. An absent anchor or unknown target is rejected, with one repair attempt.
+
 Upstream KB assets are retained at `skills/upstream-kb/cross-linker` for reference only; do not execute their scripts or follow their legacy direct-write instructions.

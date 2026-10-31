@@ -77,7 +77,7 @@ test('a later correction supersedes the old preference: the next session sees on
   const s = await setup(t);
   await s.say('alpha', 'I prefer large squashed commits. [key:commits]'); await s.cycle('corr-a'); assert.match(await s.context('alpha'), /large squashed commits/);
   await s.say('alpha', 'Actually, I want small atomic commits, instead of squashed ones. [key:commits]'); const c = await s.cycle('corr-b'); assert.equal(c.state, 'COMPLETED', JSON.stringify(c.error));
-  const now = await s.context('alpha'); assert.match(now, /small atomic commits/); assert.doesNotMatch(now, /large squashed commits/, 'the superseded claim is no longer told to the agent');
+  const now = await s.context('alpha'); assert.match(now, /small atomic commits/, JSON.stringify({ cycle: c, calls: s.provider.calls.map(call => call.documents.map(doc => ({ body: doc.body, speaker: doc.metadata.speaker }))), insights: await s.insights(), proposals: await s.engine.proposals() })); assert.doesNotMatch(now, /large squashed commits/, 'the superseded claim is no longer told to the agent');
   const docs = (await s.insights()).filter(d => d.metadata.preferenceKey === 'commits'); const old = docs.find(d => /large squashed/.test(d.body))!; assert.equal(old.status, 'superseded'); assert.equal((await s.w.vault.history(old.id)).length, 2, 'accepted, then superseded: both revisions kept');
   recordCase({ suite: 'memory', name: 'preference-lifecycle-correction', status: 'PASS' });
 });

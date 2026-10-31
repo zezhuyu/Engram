@@ -15,6 +15,8 @@ export interface MemoryEvent {
 export interface Registration {
   id: string; host: string; principalId: string; workspaceId: string; collectionId?: string;
   capture: MemoryEventType[]; toolAllowlist: string[]; excludePatterns: string[]; consentPolicyId: string; createdAt: string; revoked?: boolean;
+  /** Present only for an owner-installed Engram-controlled chat client; identity is bound at registration, never taken from event payloads. */
+  chatSource?: { provider: 'chatgpt' | 'claude' | 'gemini' | 'generic'; sourceAccountId: string };
   settingsPath?: string; createdSettingsFile?: boolean; permissions: string[];
 }
 export const DEFAULT_CAPTURE: MemoryEventType[] = ['session.start', 'user.message', 'tool.result', 'session.end', 'task.completed'];

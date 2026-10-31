@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import YAML from 'yaml';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
 import { Vault } from '../../packages/core/vault.js';
 import { SearchEngine } from '../../packages/search-files/index.js';
+import { SQLiteSearch } from '../../packages/search-sqlite/index.js';
 import { resetFsIndexCache } from '../../packages/search-files/postings.js';
 import { regexRequiredLiterals } from '../../packages/search-files/retrieve.js';
 import type { Scope, SearchInput, SearchResult } from '../../packages/core/types.js';
@@ -70,6 +72,46 @@ test('filesystem trigram index: commits, edits and deletes after the build are n
   assert.deepEqual(await ids('marker-token'), [], 'a deleted object stays hidden');
   const r = await engine.query({ query: 'freshtoken', mode: 'grep' }); assert.equal(prefilter(r), 'fs-trigram');
   recordCase({ suite: 'search', name: 'fs-trigram-stale-overlay', status: 'PASS', detail: {} });
+});
+
+test('a new large vault lazily initializes its configured search index without manual rebuild', async t => {
+  const { root, vault } = await disposableVault(t);
+  let target = '';
+  for (let i = 0; i < 205; i++) {
+    const token = `automatic-index-document-${i}`;
+    await vault.put({ scope: wiki, kind: 'note', title: `Indexed ${i}`, body: `common corpus ${token}` });
+    if (i === 204) target = token;
+  }
+  const filesystem = new SearchEngine(vault);
+  const fsResult = await filesystem.query({ query: target, mode: 'grep', limit: 10 });
+  assert.equal(fsResult.hits.length, 1);
+  assert.equal(prefilter(fsResult), 'fs-trigram', 'filesystem backend builds its derived index on first useful owner query');
+  assert.ok(((await filesystem.health()) as { fsIndex?: { present: boolean } }).fsIndex?.present);
+
+  const config = await vault.config(); config.sqlite.enabled = true; await fs.writeFile(path.join(root, 'mdb.yaml'), YAML.stringify(config));
+  const sqlite = new SQLiteSearch(vault);
+  const originalSync = sqlite.sync.bind(sqlite); let releaseSync!: () => void; let startedSync!: () => void;
+  const syncStarted = new Promise<void>(resolve => { startedSync = resolve; }); let syncFinished = false;
+  const syncGate = new Promise<void>(resolve => { releaseSync = resolve; });
+  sqlite.sync = async () => { startedSync(); await syncGate; try { return await originalSync(); } finally { syncFinished = true; } };
+  const sqliteResultPromise = sqlite.query({ query: target, mode: 'grep', limit: 10 });
+  const sqliteResult = await sqliteResultPromise;
+  assert.equal(sqliteResult.hits.length, 1);
+  assert.equal(sqliteResult.backend, 'filesystem', 'the first response remains correct while a missing SQLite index is built asynchronously');
+  await syncStarted;
+  assert.equal(syncFinished, false, 'search returns using the journal overlay before deferred index maintenance completes');
+  releaseSync();
+  const syncDeadline = Date.now() + 10_000;
+  let health = await sqlite.health() as { databases?: Record<string, { ok?: boolean }> };
+  while (Date.now() < syncDeadline && !Object.values(health.databases ?? {}).some(bucket => bucket.ok)) {
+    await new Promise(resolve => setTimeout(resolve, 20)); health = await sqlite.health() as typeof health;
+  }
+  assert.ok(Object.values(health.databases ?? {}).some(bucket => bucket.ok), 'SQLite backend was initialized without an explicit rebuild');
+  assert.equal((await sqlite.query({ query: target, mode: 'grep', limit: 10 })).backend, 'sqlite');
+
+  const fresh = await vault.put({ scope: wiki, kind: 'note', title: 'Fresh post-index', body: 'automatic-index-fresh-write' });
+  assert.deepEqual((await new SearchEngine(vault).query({ query: 'automatic-index-fresh-write', mode: 'grep' })).hits.map(hit => hit.objectId), [fresh.id]);
+  recordCase({ suite: 'search', name: 'automatic-default-index-initialization', status: 'PASS', detail: { corpusDocuments: 205, filesystem: true, sqlite: true } });
 });
 
 test('filesystem trigram index: a corrupt shard, truncated metadata or a missing index never changes results; damage is reported', async t => {

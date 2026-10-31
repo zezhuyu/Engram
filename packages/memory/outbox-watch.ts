@@ -79,10 +79,11 @@ export async function watchOutbox(options: WatchOptions): Promise<void> {
 }
 
 /** Service definitions to INSTALL BY HAND (nothing here installs anything). The credential comes from a 0600 token file, never from the unit text. */
-export function watcherServiceText(platform: 'macos' | 'linux', input: { node: string; mdb: string; url: string; tokenFile: string; workspaceId?: string; outbox?: string; projectDir?: string }): string {
+export function watcherServiceText(platform: 'macos' | 'linux', input: { node: string; mdb: string; url: string; tokenFile: string; workspaceId?: string; outbox?: string; projectDir?: string; env?: NodeJS.ProcessEnv }): string {
   const args = [input.mdb, 'outbox', 'watch', '--url', input.url, '--token-file', input.tokenFile, ...(input.workspaceId ? ['--workspace', input.workspaceId] : []), ...(input.outbox ? ['--outbox', input.outbox] : []), ...(input.projectDir ? ['--project-dir', input.projectDir] : [])];
   const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-  if (platform === 'macos') return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>dev.engram.outbox-watch</string>\n<key>ProgramArguments</key><array>${[input.node, ...args].map(a => `<string>${xml(a)}</string>`).join('')}</array>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>/tmp/engram-outbox-watch.log</string>\n</dict></plist>\n`;
+  // Do not ask launchd to append an unbounded file under ENGRAM_DATA_DIR. macOS may discard this optional diagnostic stream.
+  if (platform === 'macos') return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>dev.engram.outbox-watch</string>\n<key>ProgramArguments</key><array>${[input.node, ...args].map(a => `<string>${xml(a)}</string>`).join('')}</array>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n</dict></plist>\n`;
   const quote = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `"${value.replace(/(["\\$`])/g, '\\$1')}"`;
   return `[Unit]\nDescription=Engram outbox watcher (delivers writes kept while the server was unreachable)\nAfter=network-online.target\n\n[Service]\nExecStart=${[input.node, ...args].map(quote).join(' ')}\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n`;
 }

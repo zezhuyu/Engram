@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { MDBError } from '../core/types.js';
+import { ensureStorageDirectory, hasExplicitDataDir, resolveStoragePath } from '../core/root.js';
 import { remoteUrlAllowed } from '../core/private-network.js';
 import { BINDING_HOSTS, type BindingHost } from '../core/project-binding.js';
+import { assertDurableWriteCapacity } from '../core/storage-lifecycle.js';
 
 /**
  * User-level capture settings, written once after the user's explicit consent. They name a server, the environment variable that holds the token, the user's own
  * workspace and registration, and what to leave out. No token or secret is ever stored. The file is machine-local and owner-only.
  */
 export interface UserConfig { schemaVersion: 1; serverUrl: string; tokenEnv: string; workspaceId: string; registrationId: string; principalId: string; hosts: BindingHost[]; captureConsent: true; paused: boolean; excludeProjects: string[]; /** when non-empty, ONLY working directories matching one of these patterns are recorded; exclusions still win */ includeProjects?: string[] }
-export const userConfigPath = (env: NodeJS.ProcessEnv = process.env): string => env.ENGRAM_USER_CONFIG ?? path.join(env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'), 'engram', 'user.json');
+export const userConfigPath = (env: NodeJS.ProcessEnv = process.env): string => resolveStoragePath('config', env);
 const invalid = (message: string): never => { throw new MDBError('INVALID_INPUT', `Invalid user config: ${message}`); };
 const KEYS = new Set(['schemaVersion', 'serverUrl', 'tokenEnv', 'workspaceId', 'registrationId', 'principalId', 'hosts', 'captureConsent', 'paused', 'excludeProjects', 'includeProjects']);
 export function parseUserConfig(raw: unknown): UserConfig {
@@ -29,12 +30,14 @@ export function parseUserConfig(raw: unknown): UserConfig {
   return v as unknown as UserConfig;
 }
 export async function readUserConfig(env: NodeJS.ProcessEnv = process.env): Promise<UserConfig | undefined> {
-  const file = userConfigPath(env);
+  const file = userConfigPath(env); if (hasExplicitDataDir(env)) await ensureStorageDirectory('config', env);
   try { const info = await fs.lstat(file); if (info.isSymbolicLink()) throw new MDBError('INVALID_INPUT', 'User config must not be a symlink'); return parseUserConfig(JSON.parse(await fs.readFile(file, 'utf8'))); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 export async function writeUserConfig(config: UserConfig, env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  parseUserConfig(config); const file = userConfigPath(env); await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  parseUserConfig(config); const file = userConfigPath(env); await ensureStorageDirectory('config', env);
+  const serialized = `${JSON.stringify(config, null, 2)}\n`;
+  await assertDurableWriteCapacity(path.dirname(file), Buffer.byteLength(serialized) + 4096, env);
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try { await fs.writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: 'wx' }); await fs.rename(temp, file); } finally { await fs.rm(temp, { force: true }); }
+  try { await fs.writeFile(temp, serialized, { mode: 0o600, flag: 'wx' }); await fs.rename(temp, file); } finally { await fs.rm(temp, { force: true }); }
 }

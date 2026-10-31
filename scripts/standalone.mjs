@@ -6,7 +6,7 @@
  *        node scripts/standalone.mjs uninstall
  * Packaging is intentionally explicit; this source file does not build artifacts.
  */
-import { access, mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir, platform, arch } from 'node:os';
@@ -26,6 +26,14 @@ function run(executable, args, options = {}) {
   const result = spawnSync(executable, args, { stdio: 'inherit', ...options });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${executable} exited with status ${result.status}`);
+}
+
+async function removeSourceMaps(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const file = join(directory, entry.name);
+    if (entry.isDirectory()) await removeSourceMaps(file);
+    else if (entry.isFile() && entry.name.endsWith('.map')) await rm(file);
+  }
 }
 
 async function requireUnusedServicePath(path) {
@@ -71,10 +79,17 @@ async function packageBundle() {
   run('tar', ['-xzf', temp, '-C', runtimeDir, '--strip-components=1']);
   await rm(temp, { force: true });
   await mkdir(join(out, 'app'), { recursive: true });
-  for (const path of ['dist', 'bin', 'package.json', 'package-lock.json']) {
+  // Distribute only runtime output. `tsconfig.json` also compiles tests,
+  // fixtures, and build scripts into dist; copying the whole tree would ship
+  // synthetic credentials and non-runtime material in client/server bundles.
+  await mkdir(join(out, 'app', 'dist'), { recursive: true });
+  for (const path of ['dist/packages', 'dist/integrations', 'bin', 'skills', 'package.json', 'package-lock.json']) {
     run('cp', ['-R', join(root, path), join(out, 'app', path)]);
   }
-  run('npm', ['ci', '--omit=dev', '--ignore-scripts', '--prefix', join(out, 'app')], { cwd: root });
+  await removeSourceMaps(join(out, 'app', 'dist'));
+  // These are upstream reference corpora, not runtime skill instructions.
+  await rm(join(out, 'app', 'skills', 'upstream-kb'), { recursive: true, force: true });
+  run('npm', ['ci', '--omit=dev', '--omit=optional', '--ignore-scripts', '--prefix', join(out, 'app')], { cwd: root });
   const launcher = `#!/bin/sh\nset -eu\nHERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nENV_FILE="\${HOME}/.config/engram/engram.env"\nif [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi\nexport MDB_MCP_TRANSPORT="\${MDB_MCP_TRANSPORT:-http}"\nexport MDB_MCP_TOOLSET="\${MDB_MCP_TOOLSET:-remote-web}"\nexec "$HERE/runtime/bin/node" "$HERE/app/bin/mdb-mcp.js"\n`;
   await writeFile(join(out, 'engram-mcp'), launcher, { mode: 0o755 });
   await writeFile(join(out, 'README.txt'), `Engram standalone bundle\nTarget: ${platformName}-${architecture}\nNode: ${nodeVersion}\n\nCreate ~/.config/engram/engram.env with MDB_ROOT and any required auth/server variables. Keep this file private (chmod 600). The launcher loads it.\nRun ./engram-mcp for the local MCP server. Use the standalone script install command to register a per-user startup service.\n`);

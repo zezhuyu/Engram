@@ -1,0 +1,14 @@
+schemaVersion: 1
+sqlite:
+  enabled: false
+postgres:
+  enabled: false
+capture:
+  enabled: false
+  allowedSources: []
+model:
+  provider: auto
+  allowNetwork: false
+dream:
+  enabled: false
+  maxCandidates: 20

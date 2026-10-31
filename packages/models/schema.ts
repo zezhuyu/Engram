@@ -1,12 +1,14 @@
-import { MDBError, type CriticVerdict, type Evidence, type ModelProposal } from '../core/types.js';
+import { MDBError, type CriticVerdict, type Evidence, type ModelProposal, type Relation } from '../core/types.js';
 
 /** Strict validation of untrusted model output. Messages name the failing path, never echo values. */
-const PROPOSAL_KEYS = new Set(['kind', 'title', 'body', 'evidence', 'status', 'metadata']);
+const PROPOSAL_KEYS = new Set(['kind', 'title', 'body', 'evidence', 'tags', 'links', 'status', 'metadata']);
 const EVIDENCE_KEYS = new Set(['uri', 'revisionId', 'span']);
+const LINK_KEYS = new Set(['type', 'target', 'revisionId']);
 const VERDICT_KEYS = new Set(['verdict', 'rationale', 'flags']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 /** Reserved kind for a valid, schema-conformant "nothing to propose" answer. */
 export const ABSTENTION_KIND = 'no_insight';
+export type DreamModelResult = { type: 'discovery'; proposal: ModelProposal } | { type: 'abstain'; reason: string };
 export const LIMITS = { title: 300, body: 100000, evidence: 40, uri: 500, revisionId: 200, span: 100, status: 40, metadataChars: 20000, metadataDepth: 4, rationale: 2000, flags: 10, flag: 40 };
 
 /** Models often emit null or "" for optional fields; treat that as absent. Wrong types and unknown fields are still rejected. */
@@ -45,6 +47,14 @@ export function parseModelProposal(raw: unknown): ModelProposal {
     return { uri: str(item.uri, `proposal.evidence[${i}].uri`, LIMITS.uri, 1), revisionId: str(item.revisionId, `proposal.evidence[${i}].revisionId`, LIMITS.revisionId, 1), ...(absent(item.span) ? {} : { span: str(item.span, `proposal.evidence[${i}].span`, 100_000, 1).slice(0, LIMITS.span) }) };
   });
   const result: ModelProposal = { kind, title, body, evidence };
+  if (!absent(value.tags)) { if (!Array.isArray(value.tags) || value.tags.length > 100 || value.tags.some(tag => typeof tag !== 'string' || tag.length > 100)) fail('proposal.tags', 'expected up to 100 short strings'); result.tags = value.tags as string[]; }
+  if (!absent(value.links)) {
+    if (!Array.isArray(value.links) || value.links.length > 100) fail('proposal.links', 'expected up to 100 links');
+    result.links = (value.links as unknown[]).map((entry, index): Relation => {
+      const item = plain(entry, `proposal.links[${index}]`); onlyKeys(item, LINK_KEYS, `proposal.links[${index}]`);
+      return { type: str(item.type, `proposal.links[${index}].type`, 80, 1), target: str(item.target, `proposal.links[${index}].target`, 512, 1), ...(absent(item.revisionId) ? {} : { revisionId: str(item.revisionId, `proposal.links[${index}].revisionId`, LIMITS.revisionId, 1) }) };
+    });
+  }
   if (!absent(value.status)) result.status = str(value.status, 'proposal.status', LIMITS.status, 1);
   if (!absent(value.metadata)) {
     const metadata = plain(value.metadata, 'proposal.metadata');
@@ -53,6 +63,15 @@ export function parseModelProposal(raw: unknown): ModelProposal {
     result.metadata = metadata;
   }
   return result;
+}
+
+/** Dream-only discriminated response: abstention is complete and valid, never a repairable discovery schema error. */
+export function parseDreamResponse(raw: unknown): DreamModelResult {
+  const proposal = parseModelProposal(raw);
+  if (proposal.kind !== ABSTENTION_KIND) return { type: 'discovery', proposal };
+  if (proposal.evidence.length !== 0 || proposal.metadata || proposal.status || proposal.tags || proposal.links)
+    fail('proposal', 'a Dream abstention must contain only kind, title, body, and an empty evidence array');
+  return { type: 'abstain', reason: proposal.body.trim() };
 }
 
 export function parseVerdict(raw: unknown): CriticVerdict {

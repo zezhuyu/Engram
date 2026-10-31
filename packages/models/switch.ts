@@ -9,11 +9,16 @@ const FUNCTIONS = ['user insight and interest collection (profile)', 'dream', 'w
 
 export interface ModelSetInput {
   provider?: string | null; localAgent?: 'claude' | 'codex' | 'auto'; api?: string; modelName?: string; baseUrl?: string; apiKeyEnv?: string; command?: string;
-  allowNetwork?: boolean; allowPrivateContentToRemote?: boolean; timeoutMs?: number; maxOutputTokens?: number; maxInputTokens?: number; locality?: 'local' | 'remote'; check?: boolean;
+  allowNetwork?: boolean; allowPrivateContentToRemote?: boolean; redactPiiForLocal?: boolean; timeoutMs?: number; maxOutputTokens?: number; maxInputTokens?: number; locality?: 'local' | 'remote'; check?: boolean;
 }
 
 export const providerKind = (name: string | null): 'none' | 'local agent CLI' | 'OpenAI-compatible API' | 'custom (SDK-supplied)' =>
   !name ? 'none' : (CLI_AGENTS as readonly string[]).includes(name) || name === 'auto' ? 'local agent CLI' : isBuiltinProvider(name) ? 'OpenAI-compatible API' : 'custom (SDK-supplied)';
+const reasoningModel = (name: string | undefined): boolean => !!name && /(gpt-oss|\bo[134]\b|deepseek-r1|\bqwq\b|(?:^|[-/])[^/]*-thinking(?:$|[-/]))/iu.test(name);
+function outputBudgetWarning(model: ModelConfig): string[] {
+  return reasoningModel(model.modelName) && (model.maxOutputTokens ?? 4_000) < 4_000
+    ? ['Reasoning model names usually need model.maxOutputTokens >= 4000; raise the configured output token limit to avoid truncation.'] : [];
+}
 
 /** Read-only, offline: never calls a model or the network and never discloses a key value (only the variable name and whether it is set). */
 export function showModel(config: VaultConfig, env: Record<string, string | undefined> = process.env): Record<string, unknown> {
@@ -23,7 +28,8 @@ export function showModel(config: VaultConfig, env: Record<string, string | unde
     kind: providerKind(effective), provider: effective, configuredProvider: model.provider, overriddenByEnvironment: overridden, available: state.available, ...(state.locality ? { locality: state.locality } : {}), ...(state.reason ? { reason: state.reason } : {}),
     ...(model.modelName ? { modelName: model.modelName } : {}), ...(model.baseUrl ? { baseUrl: model.baseUrl } : {}), ...(model.command ? { command: model.command } : {}),
     ...(model.apiKeyEnv ? { apiKeyEnv: model.apiKeyEnv, apiKeySet: !!env[model.apiKeyEnv] } : {}),
-    allowNetwork: model.allowNetwork, allowPrivateContentToRemote: !!model.allowPrivateContentToRemote,
+    allowNetwork: model.allowNetwork, allowPrivateContentToRemote: !!model.allowPrivateContentToRemote, redactPiiForLocal: !!model.redactPiiForLocal,
+    warnings: outputBudgetWarning(model),
     privateContentGate: state.locality === 'remote' && !model.allowPrivateContentToRemote ? 'workspace content is NOT sent to this provider (jobs on private workspaces refuse; relevance ranking is skipped)' : 'open for this provider',
     usedFor: effective ? FUNCTIONS : [], providers: [...PROVIDER_NAMES, 'none']
   };
@@ -50,6 +56,7 @@ export function applyModelSet(current: ModelConfig, input: ModelSetInput): Model
   if (input.command !== undefined) next.command = input.command;
   if (input.allowNetwork !== undefined) next.allowNetwork = input.allowNetwork;
   if (input.allowPrivateContentToRemote !== undefined) next.allowPrivateContentToRemote = input.allowPrivateContentToRemote;
+  if (input.redactPiiForLocal !== undefined) next.redactPiiForLocal = input.redactPiiForLocal;
   if (input.timeoutMs !== undefined) next.timeoutMs = input.timeoutMs;
   if (input.maxOutputTokens !== undefined) next.maxOutputTokens = input.maxOutputTokens;
   if (input.maxInputTokens !== undefined) next.maxInputTokens = input.maxInputTokens;
@@ -80,6 +87,6 @@ export async function testModel(provider: ModelProvider | undefined, config: Vau
   const started = Date.now();
   try {
     const result = await provider.generate({ job: 'model-test', documents: [TEST_DOCUMENT], goals: 'connectivity check', instruction: TEST_INSTRUCTION }, { maxOutputTokens: 200 });
-    return { ok: true, provider: provider.id, locality: provider.locality ?? 'local', latencyMs: Date.now() - started, replyKind: result.kind, sentVaultContent: false };
+    return { ok: true, provider: provider.id, locality: provider.locality ?? 'local', latencyMs: Date.now() - started, replyKind: result.kind, sentVaultContent: false, warnings: outputBudgetWarning(config.model) };
   } catch (error) { return { ok: false, provider: provider.id, locality: provider.locality ?? 'local', latencyMs: Date.now() - started, error: (error as Error).message, sentVaultContent: false }; }
 }

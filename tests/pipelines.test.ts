@@ -23,6 +23,7 @@ async function fixture(t: T) {
 }
 async function configure(vault: Vault, patch: (config: Awaited<ReturnType<Vault['config']>>) => void) { const config = await vault.config(); patch(config); await fs.writeFile(path.join(vault.root, 'mdb.yaml'), YAML.stringify(config)); }
 const refs = (docs: Document[]) => docs.map(doc => ({ uri: doc.uri, revisionId: doc.revisionId }));
+const dreamRefs = (docs: Document[]) => docs.map(doc => ({ uri: doc.uri, revisionId: doc.revisionId, span: doc.body.slice(0, Math.min(80, doc.body.length)) }));
 /** Evidence as the profile rules require it: a verbatim quote from the cited source. */
 const quoted = (doc: Document, span: string) => [{ uri: doc.uri, revisionId: doc.revisionId, span }];
 const userWords = (vault: Vault, body: string) => vault.put({ scope: shared, kind: 'observation', title: 'User message', body, metadata: { speaker: 'user', evidenceClass: 'user_authored', eventType: 'user.message' } });
@@ -156,7 +157,7 @@ async function dreamFixture(t: T) {
 }
 /** A well-formed micro discovery, as the strict dream schema requires. */
 const discoveryMeta = { subtype: 'composition', novelty: 'new_to_user', reasoningSummary: 'The JSON one produces is what the other consumes, so they may compose.', limitations: ['Integration, auth and deployment are untested.'], proposedValidation: 'Build a minimal service and client and record whether a round trip works.', testPlan: ['Define one JSON schema', 'Serve it from the API and render it in the client'], counterarguments: ['The composition is familiar and may add no value.'] };
-const dream = (body: string, title = 'Full-stack notebook'): ((input: ModelRequest) => ModelProposal) => ({ documents }) => ({ kind: 'discovery', title, body, evidence: refs(documents), metadata: { ...discoveryMeta } });
+const dream = (body: string, title = 'Full-stack notebook'): ((input: ModelRequest) => ModelProposal) => ({ documents }) => ({ kind: 'discovery', title, body, evidence: dreamRefs(documents), metadata: { ...discoveryMeta } });
 const liveDiscoveries = async (vault: Vault) => (await kinds(vault, 'discovery')).filter(d => d.status !== 'rejected');
 
 test('critic: duplicate and over-certain dreams are rejected with preserved rationale; no second discovery is stored', async t => {

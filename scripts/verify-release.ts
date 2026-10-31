@@ -2,10 +2,11 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { environment, gitCommit, type SuiteReport } from './lib/suite.js';
+import { environment, gitCommit, loadSuiteReport, type SuiteReport } from './lib/suite.js';
 import { inputPath } from './lib/suite.js';
-import { classifyRelease, collectProductionEvidence, currentQualityStatus, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, sourceEvidenceMatches, suiteReportConsistent, type PhysicalHostsReport } from './lib/release-policy.js';
+import { classifyRelease, collectProductionEvidence, currentQualityDetail, currentQualityStatus, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, sourceEvidenceMatches, suiteReportConsistent, type CurrentQualityRecord, type PhysicalHostsReport, type ReleaseProfileName } from './lib/release-policy.js';
 import { currentSourceEvidence } from './lib/source-evidence.js';
+import { inventoryDrift, MANDATORY_SUITE_NAMES } from './lib/suite-inventory.js';
 
 /**
  * Release aggregator. The decision is computed from machine-readable reports, never from prose. It does NOT run the suites:
@@ -18,15 +19,29 @@ interface Gate { id: string; title: string; severity: 'P0' | 'P1'; area: Area; s
 const read = async <T>(file: string): Promise<T | undefined> => { try { return JSON.parse(await fs.readFile(file, 'utf8')) as T; } catch { return undefined; } };
 const maxAgeMs = 24 * 3600 * 1000;
 const recent = (at: unknown): boolean => { const time = typeof at === 'string' ? Date.parse(at) : NaN; const age = Date.now() - time; return Number.isFinite(age) && age >= 0 && age < 30 * 24 * 3600_000; };
+const profileArgument = process.argv.slice(2).find(value => value.startsWith('--profile='))?.slice('--profile='.length);
+const profileText = profileArgument ?? process.env.MDB_RELEASE_PROFILE ?? 'full-intelligence-beta';
+if (!['core-beta', 'full-intelligence-beta', 'ga'].includes(profileText)) {
+  console.error(`Unknown release profile ${JSON.stringify(profileText)}; expected core-beta, full-intelligence-beta, or ga.`);
+  process.exit(2);
+}
+const releaseProfile = profileText as ReleaseProfileName;
 const sourceEvidence = await currentSourceEvidence();
 const suiteInventory = await read<{ version: number; suites: Record<string, { minimumTests: number; requiredTests: string[]; requiredCases: string[] }> }>('scripts/lib/suite-inventory.json');
 const releaseTrustKey = process.env.MDB_RELEASE_TRUSTED_PUBLIC_KEY ?? (process.env.MDB_RELEASE_TRUSTED_PUBLIC_KEY_FILE ? readFileSync(process.env.MDB_RELEASE_TRUSTED_PUBLIC_KEY_FILE, 'utf8') : undefined);
 const suites: Record<string, SuiteReport | undefined> = {};
-for (const name of ['acid', 'security', 'search', 'intelligence', 'recovery', 'platforms', 'memory', 'profile', 'wiki', 'dream', 'adaptive', 'query', 'unix']) {
-  const r = await read<SuiteReport>(path.join('verification', name, 'report.json'));
+const inventoryDriftFailures: string[] = [];
+for (const name of MANDATORY_SUITE_NAMES) {
+  const r = await loadSuiteReport(path.join('verification', name, 'report.json'));
   const age = r ? Date.now() - Date.parse(r.run_at) : NaN;
   const inventory = suiteInventory?.version === 1 ? suiteInventory.suites[name] : undefined;
-  suites[name] = r && inventory && suiteReportConsistent(r, inventory) && Number.isFinite(age) && age >= 0 && age < maxAgeMs && sourceEvidenceMatches(r, sourceEvidence.files) ? r : undefined;
+  const drift = inventoryDrift(r, inventory);
+  if (drift.length) inventoryDriftFailures.push(`${name}: ${drift.join('; ')}`);
+  suites[name] = r && inventory && !drift.length && suiteReportConsistent(r, inventory) && Number.isFinite(age) && age >= 0 && age < maxAgeMs && sourceEvidenceMatches(r, sourceEvidence.files) ? r : undefined;
+}
+if (inventoryDriftFailures.length) {
+  console.error('Mandatory suite inventory drift:');
+  for (const failure of inventoryDriftFailures) console.error(`  ${failure}`);
 }
 const matrix = await read<{ supportedPlatforms: string[]; decisionNotes: string[] }>(inputPath('release-matrix.json')) ?? { supportedPlatforms: [], decisionNotes: [] };
 type MandatoryStatus = 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NOT_RUN';
@@ -72,10 +87,10 @@ const allMandatory: MandatoryGate[] = [...baseMandatory.map(remoteGate), ...comp
 // A stale result cannot promote a gate to PASS, nor can a base PASS hide a current quality FAIL.
 for (const gate of allMandatory.filter(g => ['PREFERENCES', 'DREAM_ENGINE'].includes(g.id))) {
   const file = gate.id === 'PREFERENCES' ? 'verification/profile/real-model-evaluation.json' : 'verification/dream/real-model-evaluation.json';
-  const evaluation = await read<{ status?: string; runAt?: string; evidenceSource?: { files?: Record<string, string> } }>(file);
+  const evaluation = await read<CurrentQualityRecord & { evidenceSource?: { files?: Record<string, string>; fingerprint?: string } }>(file);
   const before = gate.status;
   gate.status = currentQualityStatus(gate.status, evaluation, sourceEvidence.files) as MandatoryStatus;
-  if (gate.status !== before) gate.detail = `Quality evidence ${file}: ${gate.status} (base ${before}; evidence ${evaluation?.status ?? 'missing'}). ${gate.detail}`;
+  gate.detail = currentQualityDetail(file, before, gate.status, evaluation);
 }
 const fromSuite = (name: string, filter?: (n: string) => boolean): { status: Status; cases: number } => { const r = suites[name]; if (!r) return { status: 'NOT_RUN', cases: 0 }; const cases = r.caseDetails.filter(c => !filter || filter(c.name)); const failed = cases.some(c => c.status === 'FAIL'); return { status: r.status === 'FAIL' || failed ? 'FAIL' : cases.length ? r.status : 'NOT_RUN', cases: cases.length }; };
 const baseline = spawnSync('npm', ['run', '--silent', 'lint'], { encoding: 'utf8' });
@@ -137,17 +152,34 @@ gates.push(budget('keyword p95', metricPass(keyword, 150), big && keyword ? `${k
 
 const verdictFor = (area: Gate['area']) => { const g = gates.filter(x => x.area === area); const p0 = g.filter(x => x.severity === 'P0'); if (p0.some(x => x.status === 'FAIL')) return 'FAIL'; if (p0.some(x => x.status !== 'PASS')) return 'INCOMPLETE'; if (g.some(x => x.status === 'FAIL')) return 'FAIL'; if (g.some(x => x.status !== 'PASS' && x.severity === 'P1')) return area === 'PERFORMANCE' ? 'INCOMPLETE' : 'PASS'; return 'PASS'; };
 const verdicts = Object.fromEntries(AREAS.map(a => [a, verdictFor(a)])) as Record<Area, string>; const storage = verdicts.STORAGE;
-const open = AREAS.filter(a => verdicts[a] !== 'PASS');
 /** A mandatory v1 gate that is not PASS (INCOMPLETE, NOT_RUN or FAIL) keeps the release below GO, whatever the area verdicts say. */
-const openGates = allMandatory.filter(g => g.status !== 'PASS').map(g => g.id);
+const coreAreas: Area[] = ['STORAGE', 'MEMORY', 'QUERY', 'UNIX', 'PLATFORM', 'PERFORMANCE'];
+const selectedAreas = releaseProfile === 'core-beta' ? coreAreas : AREAS;
+const selectedMandatoryIds = releaseProfile === 'core-beta' ? ['REMOTE_CAPTURE', 'AGENT_IDENTITY'] : allMandatory.map(g => g.id);
+const selectedAreaStatuses = selectedAreas.map(id => ({ id, status: verdicts[id] ?? 'NOT_RUN' }));
+const selectedMandatory = allMandatory.filter(g => selectedMandatoryIds.includes(g.id));
+const profileOpenAreas = selectedAreaStatuses.filter(area => area.status !== 'PASS').map(area => area.id);
+const profileOpenGates = selectedMandatory.filter(g => g.status !== 'PASS').map(g => g.id);
+const profileFailedGates = [...gates.filter(g => selectedAreas.includes(g.area) && g.status === 'FAIL').map(g => g.id), ...selectedMandatory.filter(g => g.status === 'FAIL').map(g => g.id)];
 /** Release policy (scripts/lib/release-policy.ts): automated gates passing never implies GA. Production evidence and owner-approved exclusions are separate inputs. */
-const failedGates = [...gates.filter(g => g.status === 'FAIL').map(g => g.id), ...allMandatory.filter(g => g.status === 'FAIL').map(g => g.id)];
 const readSync = (file: string): unknown => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return undefined; } };
 const productionEvidence = collectProductionEvidence(readSync, physical as PhysicalHostsReport | undefined, process.cwd(), sourceEvidence.files, releaseTrustKey);
-const policy = classifyRelease({ storageVerdict: verdicts.STORAGE, openAreas: open, openGates, failedGates, evidence: productionEvidence, exclusions: readSync(inputPath('release-exclusions.json')) }, releaseTrustKey);
+const policy = classifyRelease({
+  profile: releaseProfile,
+  storageVerdict: verdicts.STORAGE,
+  openAreas: profileOpenAreas,
+  openGates: profileOpenGates,
+  failedGates: profileFailedGates,
+  requiredAreas: selectedAreaStatuses,
+  requiredGates: selectedMandatory.map(g => ({ id: g.id, status: g.status })),
+  disabledFeaturesAttestation: readSync('verification/release-capabilities.json'),
+  sourceFingerprint: sourceEvidence.fingerprint,
+  evidence: productionEvidence,
+  exclusions: readSync(inputPath('release-exclusions.json'))
+}, releaseTrustKey);
 const decision = policy.level === 'NOT_RELEASABLE' ? 'NO-GO' : policy.level === 'GA_ELIGIBLE' ? 'GA-ELIGIBLE (owner decision required)' : `BETA (not GA: ${policy.blockers.join('; ')})`;
 const env = environment(); const commit = currentCommit;
-const result = { commit, run_at: new Date().toISOString(), environment: env, evidenceSource: sourceEvidence, verdict: verdicts, mandatoryV1Gates: allMandatory, decision, releaseLevel: policy.level, releasePolicy: { automatedGatesPass: policy.automatedGatesPass, productionEvidence, validExclusions: policy.validExclusions, ignoredExclusions: policy.ignoredExclusions, blockers: policy.blockers, summary: policy.summary }, gates, decisionNotes: matrix.decisionNotes };
+const result = { commit, run_at: new Date().toISOString(), environment: env, evidenceSource: sourceEvidence, releaseProfile, releaseProfileRequirements: { areas: selectedAreas, mandatoryGates: selectedMandatoryIds, excludedAreas: AREAS.filter(a => !selectedAreas.includes(a)), excludedMandatoryGates: allMandatory.map(g => g.id).filter(id => !selectedMandatoryIds.includes(id)) }, verdict: verdicts, mandatoryV1Gates: allMandatory, decision, releaseLevel: policy.level, releasePolicy: { automatedGatesPass: policy.automatedGatesPass, productionEvidence, validExclusions: policy.validExclusions, ignoredExclusions: policy.ignoredExclusions, blockers: policy.blockers, summary: policy.summary }, gates, decisionNotes: matrix.decisionNotes };
 await fs.mkdir('verification', { recursive: true });
 const gateOf = (id: string) => allMandatory.find(g => g.id === id)?.status ?? 'NOT_RUN'; const gStatus = (id: string) => gates.find(g => g.id === id)?.status ?? 'NOT_RUN';
 const finalQuestions: Array<[string, string]> = [
@@ -163,8 +195,9 @@ const finalQuestions: Array<[string, string]> = [
   ['10. Does feedback measurably change later Dream selection, and is model quality separate?', `DREAM_LEARNING ${gateOf('DREAM_LEARNING')} (temporal holdout, synthetic reviewer); model quality is DREAM_ENGINE ${gateOf('DREAM_ENGINE')} (real-model evaluation). They are separate claims: neither implies a completed unattended model-backed cycle.`]
 ];
 await fs.writeFile('verification/release-report.json', JSON.stringify({ ...result, finalQuestions: finalQuestions.map(([question, answer]) => ({ question, answer })) }, null, 2) + '\n');
-const md = [`# Engram/MDB Release Verification — ${commit}`, '', '## Verdict', ...AREAS.map(a => `${a.replace('_', ' ')}${a === 'INTELLIGENCE' ? ' (pipelines/providers)' : ''}: ${verdicts[a]}`), '', '## Mandatory v1 feature gates', '| Gate | Status | Evidence | Result / limitation |', '|---|---|---|---|', ...allMandatory.map(g => `| ${g.id} | ${g.status} | ${g.evidence.join(', ') || 'none'} | ${g.detail} |`), '', '## Release eligibility', `**Level: ${policy.level}**. ${policy.summary}`, '', '### 1. Automated gate results', `${policy.automatedGatesPass ? 'All areas and mandatory gates PASS.' : `Not all PASS (failed: ${policy.failedGates.join(', ') || 'none'}; open areas: ${policy.openAreas.join(', ') || 'none'}; open mandatory gates: ${policy.openGates.join(', ') || 'none'}).`} Passing is necessary, never sufficient, for GA.`, '', '### 2. Production evidence', '| Item | Status | Source | Detail |', '|---|---|---|---|', ...productionEvidence.map(e => `| ${e.id} ${e.title} | ${e.status} | ${e.source} | ${e.detail}${e.id === 'TRANSPORT_TLS' && physical?.transport ? ` (transport: ${physical.transport}${physical.tlsVerified === false ? ', TLS NOT tested' : ''})` : ''} |`), '', '### 3. Approved scope exclusions (owner-written, tracked in fixtures/inputs/release-exclusions.json)', ...(policy.validExclusions.length ? policy.validExclusions.map(x => `- ${x.id}: approved by ${x.approvedBy} on ${x.approvedAt}: ${x.reason}`) : ['- none']), ...policy.ignoredExclusions.map(x => `- IGNORED (${x.problem}): ${JSON.stringify(x.entry)}`), '', '### 4. Final eligibility', `${policy.level}: ${policy.blockers.length ? `${policy.blockers.length} open item(s): ${policy.blockers.join('; ')}` : 'no open items'}.`, '', '## Environment', `${env.os} / ${env.arch} / ${env.tmpFilesystem} / ${env.cpu} / ${Math.round(Number(env.memoryBytes) / 2 ** 30)} GiB / Node ${env.node} / SQLite ${env.sqlite} / commit ${commit}`, '', '## Matrix', '| Gate | Sev | Status | Cases | Evidence | Limitations |', '|---|---|---|---|---|---|', ...gates.map(g => `| ${g.id} ${g.title} | ${g.severity} | ${g.status} | ${g.cases} | ${g.evidence} | ${g.limitation} |`), '', '## ACID scope and caveats', `Transaction = one logical operation in one vault (all objects of a put/patch/delete/ingest). Commit point = journal record appended and fsynced. Isolation = writes serialized by one vault-wide lock plus optimistic expected-revision conflicts; readers are lock-free and see whole committed revisions. Cross-workspace atomic transactions are not offered. Unacknowledged transactions past the commit point may appear after recovery. Power loss: QEMU abrupt-stop and kernel fsync-EIO evidence is ${powerLossStatus === 'PASS' ? 'PASS on the recorded storage sources' : 'NOT_RUN or does not match this checkout'}; physical power removal and volatile device-cache loss are NOT_RUN.`, '', '## Final questions', ...finalQuestions.flatMap(([q, a]) => [`**${q}**`, a, '']), '## Decision', decision, '', ...matrix.decisionNotes.map(n => `- ${n}`), '', 'Generated by scripts/verify-release.ts from verification/*/report.json; status words come from reports, not opinion.'].join('\n');
+const areaLabel = (area: Area) => area === 'DREAM' ? 'DREAM (deterministic suite)' : area.replace('_', ' ');
+const md = [`# Engram/MDB Release Verification — ${commit}`, '', '## Verdict', `Selected profile: ${releaseProfile}`, `Required areas: ${selectedAreas.join(', ')}`, `Required mandatory gates: ${selectedMandatoryIds.join(', ')}`, `Excluded areas: ${AREAS.filter(a => !selectedAreas.includes(a)).join(', ') || 'none'}`, `Excluded mandatory gates: ${allMandatory.map(g => g.id).filter(id => !selectedMandatoryIds.includes(id)).join(', ') || 'none'}`, ...AREAS.map(a => `${areaLabel(a)}${a === 'INTELLIGENCE' ? ' (pipelines/providers)' : ''}: ${verdicts[a]}`), 'The DREAM area is deterministic test-suite evidence; real-model quality is reported separately by DREAM_ENGINE.', '', '## Mandatory v1 feature gates', '| Gate | Status | Evidence | Result / limitation |', '|---|---|---|---|', ...allMandatory.map(g => `| ${g.id} | ${g.status} | ${g.evidence.join(', ') || 'none'} | ${g.detail} |`), '', '## Release eligibility', `**Profile ${releaseProfile}: ${policy.level}**. ${policy.summary}`, '', '### 1. Automated gate results', `${policy.automatedGatesPass ? 'All selected profile areas and mandatory gates PASS.' : `Selected profile not PASS (failed: ${policy.failedGates.join(', ') || 'none'}; open areas: ${policy.openAreas.join(', ') || 'none'}; open mandatory gates: ${policy.openGates.join(', ') || 'none'}).`} A non-PASS selected profile exits nonzero. Production evidence remains a separate GA requirement.`, '', '### 2. Production evidence', '| Item | Status | Source | Detail |', '|---|---|---|---|', ...productionEvidence.map(e => `| ${e.id} ${e.title} | ${e.status} | ${e.source} | ${e.detail}${e.id === 'TRANSPORT_TLS' && physical?.transport ? ` (transport: ${physical.transport}${physical.tlsVerified === false ? ', TLS NOT tested' : ''})` : ''} |`), '', '### 3. Approved scope exclusions (owner-written, tracked in fixtures/inputs/release-exclusions.json)', ...(policy.validExclusions.length ? policy.validExclusions.map(x => `- ${x.id}: approved by ${x.approvedBy} on ${x.approvedAt}: ${x.reason}`) : ['- none']), ...policy.ignoredExclusions.map(x => `- IGNORED (${x.problem}): ${JSON.stringify(x.entry)}`), '', '### 4. Final eligibility', `${policy.level}: ${policy.blockers.length ? `${policy.blockers.length} open item(s): ${policy.blockers.join('; ')}` : 'no open items'}.`, '', '## Environment', `${env.os} / ${env.arch} / ${env.tmpFilesystem} / ${env.cpu} / ${Math.round(Number(env.memoryBytes) / 2 ** 30)} GiB / Node ${env.node} / SQLite ${env.sqlite} / commit ${commit}`, '', '## Matrix', '| Gate | Sev | Status | Cases | Evidence | Limitations |', '|---|---|---|---|---|---|', ...gates.map(g => `| ${g.id} ${g.title} | ${g.severity} | ${g.status} | ${g.cases} | ${g.evidence} | ${g.limitation} |`), '', '## ACID scope and caveats', `Transaction = one logical operation in one vault (all objects of a put/patch/delete/ingest). Commit point = journal record appended and fsynced. Isolation = writes serialized by one vault-wide lock plus optimistic expected-revision conflicts; readers are lock-free and see whole committed revisions. Cross-workspace atomic transactions are not offered. Unacknowledged transactions past the commit point may appear after recovery. Power loss: QEMU abrupt-stop and kernel fsync-EIO evidence is ${powerLossStatus === 'PASS' ? 'PASS on the recorded storage sources' : 'NOT_RUN or does not match this checkout'}; physical power removal and volatile device-cache loss are NOT_RUN.`, '', '## Final questions', ...finalQuestions.flatMap(([q, a]) => [`**${q}**`, a, '']), '## Decision', decision, '', ...matrix.decisionNotes.map(n => `- ${n}`), '', 'Generated by scripts/verify-release.ts from current source and verification reports.'].join('\n');
 await fs.writeFile('verification/release-report.md', md + '\n');
-console.log(`${AREAS.map(a => `${a} ${verdicts[a]}`).join(' | ')} => ${decision}`);
+console.log(`Profile ${releaseProfile} | ${AREAS.map(a => `${a === 'DREAM' ? 'DREAM_DETERMINISTIC' : a} ${verdicts[a]}`).join(' | ')} => ${decision}`);
 for (const g of gates.filter(x => x.status !== 'PASS')) console.log(`  ${g.status.padEnd(8)} ${g.severity} ${g.id} ${g.title}`);
-if (gates.some(g => g.severity === 'P0' && g.area === 'STORAGE' && g.status !== 'PASS')) process.exitCode = 1;
+if (policy.level === 'NOT_RELEASABLE' || (releaseProfile === 'ga' && policy.level !== 'GA_ELIGIBLE')) process.exitCode = 1;

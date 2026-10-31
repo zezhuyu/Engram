@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hasExactSourceEvidence, predictionCounts, predictionCountsByCase, predictionTermsMatch, profileClaimMatches } from '../../scripts/lib/profile-metrics.js';
+import { correctionSupersessionPass, correctionSupersessionStatus, hasExactSourceEvidence, predictionCounts, predictionCountsByCase, predictionTermsMatch, profileClaimMatches } from '../../scripts/lib/profile-metrics.js';
 
 test('Preferences precision counts wrong-category retained outputs as false positives', () => {
   const counts = predictionCounts([
@@ -21,6 +21,19 @@ test('Preferences scores every retained output even when an incorrect proposal p
   ]);
   assert.deepEqual(counts, { positives: 2, negatives: 1, truePositive: 1, truePositiveCases: 1, falseNegative: 1, falsePositive: 2, predicted: 3 });
   assert.equal(counts.truePositive / counts.predicted, 1 / 3);
+});
+
+test('correction evaluation fails when no supersession case exists and requires every labeled correction to link', () => {
+  assert.equal(correctionSupersessionPass([]), false);
+  assert.equal(correctionSupersessionPass([{ correctionOverride: true }]), false);
+  assert.equal(correctionSupersessionPass([{ requiresSupersession: true, correctionOverride: true }]), true);
+  assert.equal(correctionSupersessionPass([{ requiresSupersession: true, correctionOverride: true }, { requiresSupersession: true, correctionOverride: false }]), false);
+});
+
+test('correction metric is not applicable to a separate corpus with no correction cases', () => {
+  assert.equal(correctionSupersessionStatus([{ correctionOverride: false }, {}]), 'NOT_APPLICABLE');
+  assert.equal(correctionSupersessionStatus([{ requiresSupersession: true, correctionOverride: true }]), 'PASS');
+  assert.equal(correctionSupersessionStatus([{ requiresSupersession: true, correctionOverride: true }, { requiresSupersession: true, correctionOverride: false }]), 'FAIL');
 });
 
 test('profile evaluation normalizes Unicode dashes without erasing polarity or relation order', () => {

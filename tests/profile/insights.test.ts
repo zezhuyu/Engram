@@ -8,8 +8,8 @@ import { recordCase } from '../helpers/report.js';
 import { Vault } from '../../packages/core/vault.js';
 import { MDBError } from '../../packages/core/types.js';
 import { IntelligenceEngine } from '../../packages/intelligence/index.js';
-import { evaluateInsight, repairTerminalCitationPunctuation } from '../../packages/intelligence/insights.js';
-import { generationMessages } from '../../packages/models/prompts.js';
+import { commitInsight, evaluateInsight, explicitCorrectionApplies, repairTerminalCitationPunctuation } from '../../packages/intelligence/insights.js';
+import { critiqueMessages, generationMessages } from '../../packages/models/prompts.js';
 import { Engram, ingestRecord, eventFromHostPayload, readRegistration, createAdapter, type Document, type ModelProposal, type ModelProvider, type ModelRequest, type Scope } from '../../packages/sdk/index.js';
 import { tempDir, claudePayloads } from '../helpers/host.js';
 
@@ -23,6 +23,15 @@ async function world(t: T) {
   return { root, vault, userSaid, agentSaid, wikiPage };
 }
 const ref = (d: Document, span: string) => ({ uri: d.uri, revisionId: d.revisionId, span });
+
+test('profile critic preserves faithful user statements while deterministic dedup remains authoritative', () => {
+  const profile = critiqueMessages({ instruction: 'Evaluate support and honesty.', proposal: { kind: 'user_insight', title: 'The user prefers detailed review notes.', body: 'The user prefers detailed review notes.', evidence: [] }, evidence: [] }).map(message => message.content).join('\n');
+  assert.match(profile, /faithful restatement of the user’s own explicitly stated preference.*must not be rejected merely for restating/i);
+  assert.match(profile, /Deterministic checks handle duplicate and conflict decisions/i);
+  assert.doesNotMatch(profile, /Reject if it restates the evidence without adding value/i);
+  const other = critiqueMessages({ instruction: 'Evaluate support.', proposal: { kind: 'wiki_page', title: 'A fact', body: 'A claim.', evidence: [] }, evidence: [] }).map(message => message.content).join('\n');
+  assert.match(other, /it restates the evidence without adding value/i);
+});
 interface Spec { body: string; category?: string; key?: string; evidence: Array<{ doc: Document; span: string }>; explicit?: boolean; sensitivity?: string; extra?: Record<string, unknown> }
 function fakeProvider(spec: () => Spec | undefined): ModelProvider & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
@@ -111,6 +120,174 @@ test('free-text correction reconciles a differently keyed inference by matching 
   await engine.review(proposal.id, true, 'explicit correction');
   assert.equal((await w.vault.get(old.id)).status, 'superseded');
   recordCase({ suite: 'profile', name: 'correction-reconciles-different-generated-key', status: 'PASS' });
+});
+
+test('contrastive now-prefer correction supersedes a differently keyed feedback preference', async t => {
+  const w = await world(t);
+  const old = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Concise code review feedback', body: 'The user prefers concise code review feedback.', status: 'accepted', metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'code-review-style', evidenceClass: 'inferred', confidenceLabel: 'low', scopeLabel: 'global', sensitivity: 'none' } });
+  const message = await w.userSaid('I used to prefer concise code review feedback, but I now prefer detailed feedback with the reasoning explained.', undefined, profile);
+  const proposal = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: 'Detailed feedback', body: 'The user prefers detailed code review feedback with the reasoning explained.', status: 'proposal', evidence: [ref(message, 'but I now prefer detailed feedback with the reasoning explained')], metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'feedback_detail' } });
+  assert.equal(proposal.verdict, 'accept');
+  assert.deepEqual(proposal.supersede, [old.id]);
+  assert.ok(proposal.flags.includes('supersedes_earlier'));
+  recordCase({ suite: 'profile', name: 'contrastive-now-prefer-feedback-supersession', status: 'PASS' });
+});
+
+test('synonymous and negated feedback corrections reconcile to the same preference family', async t => {
+  const w = await world(t);
+  const prior = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Brief reviews', body: 'The user prefers concise code review feedback.', status: 'accepted', metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'code-review-style', evidenceClass: 'explicit', scopeLabel: 'global' } });
+  for (const [text, span, key, claim] of [
+    ['I no longer want terse code review feedback. I want detailed explanations instead.', 'I no longer want terse code review feedback. I want detailed explanations instead.', 'review_explanations', 'The user prefers detailed code review feedback with explanations.'],
+    ['For future code reviews, do not keep feedback short; give me detailed reasoning for each finding.', 'do not keep feedback short; give me detailed reasoning for each finding', 'review_reasoning', 'The user prefers comprehensive feedback for code reviews.'],
+  ] as const) {
+    const source = await w.userSaid(text, undefined, profile);
+    const evaluated = await evaluateInsight(w.vault, { scope: profile, kind: 'user_insight', title: claim, body: claim, status: 'proposal', evidence: [ref(source, span)], metadata: { insightSchema: 1, category: 'preference', preferenceKey: key } });
+    assert.ok(evaluated.supersede.includes(prior.id), `${text}: ${JSON.stringify(evaluated)}`);
+    assert.equal(evaluated.patch.evidenceClass, 'explicit');
+  }
+  recordCase({ suite: 'profile', name: 'synonym-and-negation-correction-family-match', status: 'PASS' });
+});
+
+test('explicit answer-length correction supersedes a differently keyed accepted preference in the same scope only', async t => {
+  const w = await world(t);
+  const old = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Very short answers', body: 'The user prefers very short answers.', status: 'accepted', metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'response-length', evidenceClass: 'explicit', confidenceLabel: 'high', scopeLabel: 'global', sensitivity: 'none' } });
+  const message = await w.userSaid('Actually, I changed my mind: I now prefer long detailed answers with examples.', undefined, profile);
+  const engine = new IntelligenceEngine(w.vault, fakeProvider(() => ({ body: 'The user prefers long detailed answers with examples.', key: 'answer_detail', evidence: [{ doc: message, span: 'I now prefer long detailed answers with examples' }] })));
+  await engine.enqueue('profile', { scope: profile, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 1 });
+  const proposal = await last(engine);
+  assert.equal(proposal.status, 'pending'); assert.ok(proposal.flags!.includes('supersedes_earlier'));
+  const committed = await engine.review(proposal.id, true, 'explicit correction');
+  assert.equal((await w.vault.get(old.id)).status, 'superseded');
+  assert.ok((await w.vault.history(old.id)).length >= 2, 'supersession keeps the immutable earlier revision');
+  assert.equal(committed.objectId, (await w.vault.listDocuments()).find(d => d.metadata.preferenceKey === 'answer_detail')?.id);
+
+  const workspaceOld = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Workspace answer preference', body: 'The user prefers concise answers in Atlas.', status: 'accepted', metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'atlas-answer-style', evidenceClass: 'explicit', scopeLabel: 'atlas', sensitivity: 'none' } });
+  const second = await w.userSaid('Actually, for this project I now prefer detailed answers.', undefined, proj);
+  const scoped = await evaluateInsight(w.vault, { scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Detailed project answers', body: 'The user prefers detailed responses in Atlas.', status: 'proposal', evidence: [ref(second, 'I now prefer detailed answers')], metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'atlas-response-detail' } });
+  assert.equal(scoped.supersede.includes(workspaceOld.id), false, 'a correction in another applicability scope must not replace the old preference');
+  recordCase({ suite: 'profile', name: 'explicit-answer-correction-cross-key', status: 'PASS' });
+});
+
+test('projection recovers an interrupted supersession from the durable correction link', async t => {
+  const w = await world(t);
+  const old = await w.vault.put({ scope: profile, kind: 'user_insight', title: 'Very short answers', body: 'The user prefers very short answers.', status: 'accepted', metadata: { insightSchema: 1, category: 'preference', preferenceKey: 'response-length', evidenceClass: 'explicit', confidenceLabel: 'high', scopeLabel: 'global', sensitivity: 'none' } });
+  const message = await w.userSaid('Actually, I changed my mind: I now prefer long detailed answers with examples.', undefined, profile);
+  const engine = new IntelligenceEngine(w.vault, fakeProvider(() => ({ body: 'The user prefers long detailed answers with examples.', key: 'answer_detail', evidence: [{ doc: message, span: 'I now prefer long detailed answers with examples' }] })));
+  await engine.enqueue('profile', { scope: profile, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 1 });
+  const proposal = await last(engine); const evaluated = await evaluateInsight(w.vault, proposal.input);
+  assert.ok(evaluated.supersede.includes(old.id), `correction did not link old preference: ${JSON.stringify({ flags: proposal.flags, metadata: proposal.input.metadata, evaluated })}`);
+  assert.equal(proposal.status, 'pending', `proposal was settled before injected commit failure: ${proposal.status} ${proposal.reason ?? ''}`);
+  const patch = w.vault.patch.bind(w.vault); let interrupted = false;
+  w.vault.patch = (async input => { if (!interrupted && input.objectId === old.id) { interrupted = true; throw new Error('simulated stop between correction commit and old-status patch'); } return patch(input); }) as typeof w.vault.patch;
+  const correction = await commitInsight(w.vault, proposal.input, proposal.id, 'explicit correction', evaluated.supersede);
+  w.vault.patch = patch;
+  assert.ok(Array.isArray(correction.metadata.supersedes) && correction.metadata.supersedes.includes(old.id), 'new accepted value stores the immutable supersession link first');
+  assert.equal((await w.vault.get(old.id)).status, 'accepted', 'fault was injected before the old object patch');
+  await new IntelligenceEngine(w.vault).projectProfile();
+  assert.equal((await w.vault.get(old.id)).status, 'superseded', 'projection restart reconciles the old status');
+  const projected = await read(w.root, 'PROFILE.md'); assert.match(projected, /long detailed answers/); assert.doesNotMatch(projected, /Very short answers/);
+  assert.equal((await w.vault.history(old.id)).length, 2, 'the earlier accepted revision remains immutable and traceable');
+  recordCase({ suite: 'profile', name: 'interrupted-supersession-projection-recovery', status: 'PASS' });
+});
+
+test('explicit correction failures remain visible for review and never supersede automatically', async t => {
+  const channels = ['abstain', 'missing-key', 'critic-reject', 'malformed'] as const;
+  for (const channel of channels) {
+    const w = await world(t);
+    const seedEngine = new IntelligenceEngine(w.vault);
+    const old = await seedEngine.correctInsight({ scope: profile, preferenceKey: 'js-test-framework', claim: 'The user prefers Jest for JavaScript testing.', category: 'preference' });
+    const message = await w.userSaid('Going forward I want Vitest for JavaScript testing rather than Jest.', undefined, profile);
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: `correction-${channel}`,
+      async generate(req) {
+        calls++;
+        if (channel === 'abstain') return { kind: 'no_insight', title: 'No insight', body: 'No enduring preference.', evidence: [] };
+        if (channel === 'malformed') return { kind: 'user_insight', title: '', body: '', evidence: [] } as ModelProposal;
+        return {
+          kind: 'user_insight', title: 'Vitest for JavaScript tests', body: 'The user prefers Vitest for JavaScript testing rather than Jest.',
+          evidence: [{ uri: message.uri, revisionId: message.revisionId, span: 'I want Vitest for JavaScript testing rather than Jest' }],
+          metadata: { category: 'preference', sensitivity: 'none', explicitStatement: true, ...(channel === 'missing-key' ? {} : { preferenceKey: 'javascript-testing' }) },
+        };
+      },
+      ...(channel === 'critic-reject' ? { async critique() { return { verdict: 'reject' as const, rationale: 'synthetic critic rejection' }; } } : {}),
+    };
+    const engine = new IntelligenceEngine(w.vault, provider);
+    await engine.enqueue('profile', { scope: profile, objectIds: [message.id] });
+    await engine.run({ job: 'profile', limit: 1 });
+    const candidates = (await engine.proposals()).filter(proposal => proposal.input.kind === 'user_insight'
+      && proposal.status === 'pending' && proposal.input.evidence?.some(item => item.uri === message.uri)
+      // A deterministic fallback is explicitly review-gated. A structurally
+      // valid extracted proposal is also visible as a candidate even when its
+      // critic accepts it; this engine path still requires review() to commit.
+      && (proposal.input.metadata?.correctionFallback === true || proposal.critic?.verdict === 'review_required' || proposal.input.metadata?.correctionDetected === true));
+    assert.equal(candidates.length, 1, `${channel}: exactly one review-gated correction is visible; proposals=${JSON.stringify(await engine.proposals())}; jobs=${JSON.stringify(await engine.jobs())}`);
+    assert.equal((await w.vault.get(old.id)).status, 'accepted', `${channel}: old preference remains current pending human review`);
+    assert.ok(candidates[0]!.flags?.some(flag => flag === 'correction_unresolved' || flag === 'supersedes_earlier'));
+    if (channel === 'abstain') {
+      const approved = await engine.review(candidates[0]!.id, true, 'owner approved deterministic correction');
+      assert.equal(approved.status, 'approved');
+      assert.equal((await w.vault.get(old.id)).status, 'superseded');
+      assert.ok((await w.vault.history(old.id)).length >= 2);
+    } else if (channel === 'critic-reject') {
+      await engine.review(candidates[0]!.id, false, 'keep existing preference');
+      assert.equal((await w.vault.get(old.id)).status, 'accepted');
+    }
+    assert.ok(calls >= 1);
+  }
+  recordCase({ suite: 'profile', name: 'correction-failure-review-fallback', status: 'PASS' });
+});
+
+test('correction detector covers a separate 30-phrase phrasing set and ignores unrelated statements', () => {
+  const old = 'The user prefers Jest for JavaScript testing.';
+  const heldOut = [
+    'Actually I want Vitest for JavaScript testing instead of Jest.',
+    'Correction: I prefer Vitest rather than Jest for JavaScript tests.',
+    'I changed my mind about JavaScript tests; use Vitest, not Jest.',
+    'Going forward, choose Vitest for JavaScript testing instead of Jest.',
+    'I no longer want Jest for JavaScript tests; I prefer Vitest.',
+    'I meant Vitest for JavaScript testing, not Jest.',
+    'I was wrong earlier: JavaScript tests should use Vitest rather than Jest.',
+    'From now on I want Vitest instead of Jest for JavaScript testing.',
+    'I do not want Jest anymore; use Vitest for JavaScript tests.',
+    'Please replace Jest with Vitest for JavaScript testing.',
+    'I now prefer Vitest over Jest when testing JavaScript.',
+    'Actually, switch JavaScript tests from Jest to Vitest.',
+    'For JavaScript testing, I changed my preference from Jest to Vitest.',
+    'Correction, Vitest is now my choice for JavaScript tests, not Jest.',
+    'I have changed my mind and want Vitest rather than Jest for JS testing.',
+    'Going forward use Vitest, not Jest, for JavaScript tests.',
+    'Jest no longer works for my preference; I want Vitest for JavaScript testing.',
+    'Instead of Jest, I now want Vitest for JavaScript testing.',
+    'I would rather use Vitest than Jest for JavaScript testing now.',
+    'I prefer Vitest for JavaScript tests; please stop using Jest.',
+    'Actually, update my JavaScript test framework preference to Vitest rather than Jest.',
+    'I changed my mind: Vitest should replace Jest for JavaScript tests.',
+    'No longer Jest for JavaScript tests; I want Vitest from now on.',
+    'Correction to my earlier choice: Vitest instead of Jest for JS tests.',
+    'I want to move JavaScript testing from Jest over to Vitest now.',
+    'My new preference is Vitest for JavaScript tests rather than Jest.',
+    'I do not prefer Jest anymore; I now prefer Vitest for JavaScript testing.',
+    'Please use Vitest in place of Jest for JavaScript tests going forward.',
+    'I meant that Vitest is my preferred JavaScript test framework, not Jest.',
+    'For JavaScript tests I now want Vitest, whereas I previously preferred Jest.',
+  ];
+  assert.equal(heldOut.length, 30);
+  for (const phrase of heldOut) assert.equal(explicitCorrectionApplies(phrase, 'js-test-framework', old), true, phrase);
+  assert.equal(explicitCorrectionApplies('Vitest looks useful for JavaScript testing.', 'js-test-framework', old), false);
+  assert.equal(explicitCorrectionApplies('Actually I prefer PostgreSQL for storage.', 'js-test-framework', old), false);
+  recordCase({ suite: 'profile', name: 'heldout-correction-phrasing-30', status: 'PASS' });
+});
+
+test('explicit correction fallback does not create a review item for an unrelated preference topic', async t => {
+  const w = await world(t);
+  const seed = new IntelligenceEngine(w.vault);
+  await seed.correctInsight({ scope: profile, preferenceKey: 'js-test-framework', claim: 'The user prefers Jest for JavaScript testing.', category: 'preference' });
+  const message = await w.userSaid('Actually, I now prefer PostgreSQL for database storage.', undefined, profile);
+  const engine = new IntelligenceEngine(w.vault, { id: 'abstaining', async generate() { return { kind: 'no_insight', title: 'No insight', body: 'No relevant correction.', evidence: [] }; } });
+  await engine.enqueue('profile', { scope: profile, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 1 });
+  assert.equal((await engine.proposals()).filter(proposal => proposal.input.metadata?.correctionFallback === true).length, 0);
+  recordCase({ suite: 'profile', name: 'correction-fallback-unrelated-topic', status: 'PASS' });
 });
 
 test('model abstentions are rejected instead of being stored as user insights', async t => {
@@ -311,7 +488,7 @@ test('passively captured user messages feed profile extraction incrementally, ah
   const proposal = await last(engine); assert.equal(proposal.status, 'pending'); assert.equal(proposal.input.metadata!.scopeLabel, 'proj'); assert.equal(proposal.input.scope.type, 'global');
   const afterFirst = provider.calls.length; await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 1, 'the resumable job gets one bounded retry per run call, never a tight loop');
   await feed('UserPromptSubmit', { prompt: 'Also keep functions under thirty lines.', prompt_id: 'b' });
-  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 2, 'new evidence remains reachable by a bounded retry; a repeated output leaves the job incomplete rather than consuming the cursor'); assert.equal((await engine.proposals()).filter(p => p.input.kind === 'user_insight').length, 1, 'no duplicate proposal across consecutive jobs'); void wikiNote;
+  await engine.run({ limit: 10 }); assert.equal(provider.calls.length, afterFirst + 2, 'new evidence remains reachable by a bounded retry; a repeated output leaves the job incomplete rather than consuming the cursor'); assert.equal((await engine.jobs()).filter(job => job.kind === 'profile').length, 1, 'new arrivals coalesce into the same resumable incremental cursor'); assert.equal((await engine.proposals()).filter(p => p.input.kind === 'user_insight').length, 1, 'no duplicate proposal across consecutive jobs'); void wikiNote;
   const sourcesSeen = provider.calls[afterFirst + 1]!.documents.map(d => d.body); assert.ok(sourcesSeen.some(b => /thirty lines/.test(b))); assert.ok(sourcesSeen.some(b => /giant files/.test(b)), 'a repeated known claim keeps the whole eligible batch unconsumed until explicit abstention');
   recordCase({ suite: 'profile', name: 'passive-capture-to-profile', status: 'PASS' });
 });

@@ -66,11 +66,13 @@ export async function mkdirDurable(directory: string, fault?: FaultHook): Promis
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   for (const dir of created.reverse()) await syncDirectory(path.dirname(dir), fault);
 }
-export async function atomicWrite(root: string, key: string, data: string | Uint8Array, fault?: FaultHook): Promise<void> {
+export async function atomicWrite(root: string, key: string, data: string | Uint8Array, fault?: FaultHook, temporaryOwnerPid?: number): Promise<void> {
   const target = await safePath(root, key);
   await mkdirDurable(path.dirname(target), fault);
   await safePath(root, key);
-  const temporary = target + '.' + randomUUID() + '.tmp';
+  const owner = Number.isSafeInteger(temporaryOwnerPid) && temporaryOwnerPid! > 0 ? `${temporaryOwnerPid}.` : '';
+  const temporary = target + '.' + owner + randomUUID() + '.tmp';
+  fault?.('atomic.before_temp_create');
   const handle = await openVerifiedTemp(root, temporary);
   try {
     try { await handle.writeFile(data); fault?.('atomic.temp_written'); fault?.('fsync.file.before'); await profileAsync('fsync.file', () => handle.sync()); fault?.('fsync.file.after'); }
@@ -208,6 +210,7 @@ export class LocalObjectStore implements ObjectStore {
     await mkdirDurable(path.dirname(target), this.fault);
     await safePath(this.root, key);
     const temporary = target + '.' + randomUUID() + '.tmp';
+    this.fault?.('revision.before_temp_create');
     const handle = await openVerifiedTemp(this.root, temporary);
     try {
       try {

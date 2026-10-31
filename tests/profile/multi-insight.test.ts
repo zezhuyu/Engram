@@ -184,9 +184,11 @@ test('a truncated or failed later call keeps the earlier proposals, reports part
 test('a first-call failure proposes nothing and leaves the cursor alone', async t => {
   const w = await world(t); const message = await w.said(FOUR);
   const failing = new IntelligenceEngine(w.vault, scripted([new Error('provider down'), new Error('provider down'), new Error('provider down')]));
-  await failing.enqueue('profile', { scope: proj, incremental: true }); const [job] = await failing.run({ job: 'profile', limit: 1 });
-  assert.notEqual(job!.status, 'complete'); assert.equal((await pendingInsights(failing)).length, 0);
-  const ok = scripted(four(message)); await ((async () => { const e = new IntelligenceEngine(w.vault, ok); await e.enqueue('profile', { scope: proj, incremental: true, instruction: 'retry after outage' }); await e.run({ job: 'profile', limit: 1 }); })()); assert.ok(ok.calls[0]!.documents.some(d => d.id === message.id), 'the evidence was never consumed');
+  const jobId = await failing.enqueue('profile', { scope: proj, incremental: true }); const [job] = await failing.run({ jobId: jobId.id, limit: 1 });
+  assert.ok(job); assert.notEqual(job.status, 'complete'); assert.equal((await pendingInsights(failing)).length, 0);
+  const ok = scripted(four(message)); const restarted = new IntelligenceEngine(w.vault, ok);
+  assert.equal(await restarted.retryNow(job.id, { force: true }), true, 'the persisted retryable job resumes after its backoff');
+  await restarted.run({ jobId: job.id, limit: 1 }); assert.ok(ok.calls[0]!.documents.some(d => d.id === message.id), 'the evidence was never consumed');
   recordCase({ suite: 'profile', name: 'multi-insight-first-call-failure', status: 'PASS' });
 });
 

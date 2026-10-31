@@ -71,7 +71,9 @@ test('extraction failures are persisted as incomplete with the real counts and a
   const w = await world(t, 10); const m = await w.said(TEXT);
   const down = new IntelligenceEngine(w.vault, counting([new Error('provider down'), new Error('provider down'), new Error('provider down')])); const failed = await run(down);
   assert.notEqual(failed.status, 'complete'); assert.equal(failed.telemetry?.terminal, 'provider_error'); assert.equal(failed.telemetry?.complete, false); assert.equal(failed.telemetry?.proposals, 0); assert.equal(failed.telemetry?.calls?.generate, 1);
-  const broken = new IntelligenceEngine(w.vault, counting([BROKEN, BROKEN, BROKEN])); const bad = await run(broken, { instruction: 'malformed' }); assert.equal(bad.telemetry?.terminal, 'malformed'); assert.equal(bad.telemetry?.complete, false); assert.deepEqual(bad.telemetry?.calls, { generate: 1, repair: 2, critic: 0 }); assert.equal(bad.status, 'dead_letter');
+  const broken = new IntelligenceEngine(w.vault, counting([BROKEN, BROKEN, BROKEN]));
+  assert.equal(await broken.retryNow(failed.id, { force: true }), true, 'retry uses the persisted job after its configured backoff');
+  const [bad] = await broken.run({ jobId: failed.id, limit: 1 }); assert.ok(bad); assert.equal(bad.telemetry?.terminal, 'malformed'); assert.equal(bad.telemetry?.complete, false); assert.deepEqual(bad.telemetry?.calls, { generate: 1, repair: 2, critic: 0 }); assert.equal(bad.status, 'dead_letter');
   const ok = counting([THREE(m)[0]!, NOTHING]); await run(new IntelligenceEngine(w.vault, ok), { instruction: 'recovered' }); assert.ok(ok.generated[0]!.documents.some(d => d.id === m.id), 'evidence still unprocessed after both failures');
 });
 

@@ -73,4 +73,4 @@ export type AuthScope = Scope;
 
 /** Structured, content-free scheduler telemetry (append-only .mdb/adaptive/events.jsonl). Never contains document text, titles or model output. */
 export type ScheduleEventType = 'dream_scheduled' | 'dream_claimed' | 'dream_started' | 'dream_completed' | 'dream_skipped' | 'dream_retry' | 'dream_dead_letter' | 'feedback_applied';
-export interface ScheduleEvent { at: string; type: ScheduleEventType; runId?: string; scheduleId?: string; cycleId?: string; trigger?: 'daily' | 'micro' | 'manual'; watermark?: number; fromSequence?: number; toSequence?: number; state?: string; reason?: string; durationMs?: number; attempts?: number; instance?: string; family?: string; label?: string }
+export interface ScheduleEvent { at: string; type: ScheduleEventType; runId?: string; jobId?: string; scheduleId?: string; cycleId?: string; trigger?: 'daily' | 'micro' | 'manual'; watermark?: number; fromSequence?: number; toSequence?: number; state?: string; reason?: string; durationMs?: number; attempts?: number; instance?: string; family?: string; label?: string }

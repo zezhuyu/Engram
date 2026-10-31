@@ -5,7 +5,7 @@ import { CliAgentProvider, findExecutable, type CliKind } from './cli.js';
 
 export const CLI_AGENTS = ['claude-cli', 'codex-cli'] as const;
 export const PROVIDER_NAMES = ['auto', ...CLI_AGENTS, 'openai', 'ollama', 'openai-compatible'] as const;
-export const MODEL_DEFAULTS = { timeoutMs: 60_000, maxRetries: 2, maxInputTokens: 12_000, maxOutputTokens: 2_000 };
+export const MODEL_DEFAULTS = { timeoutMs: 60_000, maxRetries: 2, maxInputTokens: 12_000, maxOutputTokens: 4_000 };
 const CLI_DEFAULTS = { timeoutMs: 180_000, maxRetries: 1 };
 const CLI_COMMAND: Record<(typeof CLI_AGENTS)[number], CliKind> = { 'claude-cli': 'claude', 'codex-cli': 'codex' };
 
@@ -39,6 +39,7 @@ export function createProviderFromConfig(config: ModelConfig, env: Record<string
     if (!resolved) throw new MDBError('CAPABILITY_UNAVAILABLE', `Agent CLI "${command}" was not found on PATH`);
     return new CliAgentProvider({
       id: `${name}${config.modelName ? ':' + config.modelName : ''}`, kind, command: resolved, ...(config.modelName ? { model: config.modelName } : {}), locality: config.locality ?? 'remote',
+      redactPiiForLocal: config.redactPiiForLocal,
       timeoutMs: bounded(config.timeoutMs, CLI_DEFAULTS.timeoutMs, 100, 1_800_000, 'timeoutMs'), maxRetries: bounded(config.maxRetries, CLI_DEFAULTS.maxRetries, 0, 4, 'maxRetries'),
       maxInputTokens: bounded(config.maxInputTokens, MODEL_DEFAULTS.maxInputTokens, 500, 200_000, 'maxInputTokens'), env: env as NodeJS.ProcessEnv
     });
@@ -55,7 +56,7 @@ export function createProviderFromConfig(config: ModelConfig, env: Record<string
   if (name === 'openai' && !apiKey) throw new MDBError('CAPABILITY_UNAVAILABLE', `Environment variable ${keyName} is not set`);
   if (config.apiKeyEnv && !apiKey) throw new MDBError('CAPABILITY_UNAVAILABLE', `Environment variable ${config.apiKeyEnv} is not set`);
   return new OpenAICompatibleProvider({
-    id: `${name}:${config.modelName}`, baseUrl, model: config.modelName, ...(apiKey ? { apiKey } : {}), locality: config.locality ?? locality,
+    id: `${name}:${config.modelName}`, baseUrl, model: config.modelName, ...(apiKey ? { apiKey } : {}), locality: config.locality ?? locality, redactPiiForLocal: config.redactPiiForLocal,
     timeoutMs: bounded(config.timeoutMs, MODEL_DEFAULTS.timeoutMs, 100, 600_000, 'timeoutMs'),
     maxRetries: bounded(config.maxRetries, MODEL_DEFAULTS.maxRetries, 0, 6, 'maxRetries'),
     maxInputTokens: bounded(config.maxInputTokens, MODEL_DEFAULTS.maxInputTokens, 500, 200_000, 'maxInputTokens'),

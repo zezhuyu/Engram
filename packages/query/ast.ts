@@ -12,7 +12,7 @@ export type SourceName = (typeof SOURCES)[number];
 export const SEARCH_MODES = ['exact', 'keyword', 'regex', 'semantic', 'hybrid', 'auto'] as const;
 export type SearchMode = (typeof SEARCH_MODES)[number];
 
-export interface QueryScope { workspace?: string; collection?: string; includeShared?: boolean }
+export interface QueryScope { workspace?: string; collection?: string; includeShared?: boolean; includeRejected?: boolean }
 export type CompareOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'contains' | 'exists' | 'isNull';
 export type Expr =
   | { op: 'and' | 'or'; args: Expr[] }
