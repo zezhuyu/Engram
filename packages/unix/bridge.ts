@@ -59,7 +59,8 @@ export function planFor(tool: string, argv: string[]): Plan {
       else if (a.startsWith('-') && a !== '-') fail(`awk option '${a}' is not allowed (program files, includes and extensions are refused)`);
       else if (program === undefined) program = a; else fail(`awk input files are not allowed ('${a}'): pipe data on stdin`);
     }
-    if (program === undefined) fail('awk needs a program'); return { bin: st.path, args: [...args, '--', program!] };
+    if (program === undefined) fail('awk needs a program'); if (/\bENVIRON\b/.test(program!)) fail('awk program uses ENVIRON, which is not allowed (the environment is not exposed to filters)');
+    return { bin: st.path, args: [...args, '--', program!] };
   }
   for (let i = 0; i < argv.length; i++) { // sed
     const a = argv[i]!;

@@ -1,0 +1,89 @@
+{
+  "jobs": [
+    {
+      "id": "8e739b92-bd6b-4871-a6e3-f94cb7ccbae3",
+      "kind": "wiki",
+      "input": {
+        "scope": {
+          "type": "global",
+          "area": "wiki"
+        },
+        "objectIds": [
+          "obj_mvm43bso_faa91de3d8d1483c9bd0a4c8564b51bb"
+        ],
+        "instruction": "legacy finished wiki task"
+      },
+      "status": "completed",
+      "attempts": 0,
+      "nextAt": 0,
+      "result": {
+        "status": "completed",
+        "proposalIds": []
+      }
+    },
+    {
+      "id": "88341423-36e0-4934-abbd-6f4d407078b0",
+      "kind": "wiki",
+      "input": {
+        "scope": {
+          "type": "global",
+          "area": "wiki"
+        },
+        "objectIds": [
+          "obj_mvm43bt2_24440061f5884e13bed3a6b72208c3a2"
+        ],
+        "instruction": "legacy queued wiki task"
+      },
+      "status": "pending",
+      "attempts": 0,
+      "nextAt": 0
+    }
+  ],
+  "proposals": [
+    {
+      "id": "85ed2721-992e-4f2f-a43f-2e0602867af0",
+      "input": {
+        "scope": {
+          "type": "global",
+          "area": "wiki"
+        },
+        "kind": "wiki_page",
+        "title": "Legacy pending page",
+        "body": "A pending legacy proposal [1].",
+        "evidence": [
+          {
+            "uri": "mdb://wiki/objects/obj_mvm43bso_faa91de3d8d1483c9bd0a4c8564b51bb",
+            "revisionId": "rev_mvm43bso_1cd1e71853ee480bb298bcbf31ede9af",
+            "span": "opens every evening at dusk"
+          }
+        ]
+      },
+      "fingerprint": "726b3dc961c580e3e7360862c00807a9404bb8247a45dbf122dd84250b3a2bd4",
+      "status": "pending"
+    },
+    {
+      "id": "eb542e44-fc99-4969-be24-5944683ae95f",
+      "input": {
+        "scope": {
+          "type": "global",
+          "area": "wiki"
+        },
+        "kind": "wiki_page",
+        "title": "Legacy approved page",
+        "body": "An approved legacy proposal [1].",
+        "evidence": [
+          {
+            "uri": "mdb://wiki/objects/obj_mvm43bso_faa91de3d8d1483c9bd0a4c8564b51bb",
+            "revisionId": "rev_mvm43bso_1cd1e71853ee480bb298bcbf31ede9af",
+            "span": "opens every evening at dusk"
+          }
+        ]
+      },
+      "fingerprint": "50cec24ba0644356262d8af5076c430340ec1064f8cedf1374fbbdf7ad64edf5",
+      "status": "approved",
+      "reason": "legacy fixture approval",
+      "objectId": "obj_mvm43bup_b9652eb5070746bca973a2840359b6c7"
+    }
+  ],
+  "cursor": 0
+}

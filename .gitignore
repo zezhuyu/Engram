@@ -131,6 +131,8 @@ venv/
 /qbench-*/
 # the shipped synthetic example is the only vault allowed in the tree
 !examples/sample-vault/
+# the frozen pre-wiki-change vault fixture needs its .mdb journal, heads and objects as test inputs
+!/tests/fixtures/wiki-legacy-vault/.mdb/
 
 # derived indexes and databases (rebuildable from the Markdown vault)
 *.sqlite
