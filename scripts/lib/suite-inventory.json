@@ -1553,6 +1553,7 @@
           "memory/adapter-safety-and-codex-coverage",
           "memory/auto-reconnect-is-the-default",
           "memory/capture-partial-drain-sigkill-recovery",
+          "memory/capture-spool-orphan-temp-recovery",
           "memory/claude-payload-pipeline",
           "memory/cli-recall",
           "memory/codex-capture-hooks-exact-trust",
@@ -2269,6 +2270,7 @@
           "dream/strategic-goal-evidence-repair",
           "dream/strategic-no-eligible-cluster",
           "dream/strategic-retrieval",
+          "dream/strategic-untagged-body-recall",
           "dream/unrelated-sources-negative-control"
         ]
       }
@@ -2452,6 +2454,7 @@
           "adaptive/historical-retrieval",
           "adaptive/idle-gate-and-telemetry-privacy",
           "adaptive/micro-cap-local-midnight",
+          "adaptive/micro-completed-job-enqueue-race",
           "adaptive/micro-crash-after-claim-before-run",
           "adaptive/micro-crash-after-cursor-checkpoint-before-return",
           "adaptive/micro-crash-after-job-complete-before-outcome-check",

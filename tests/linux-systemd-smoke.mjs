@@ -58,6 +58,8 @@ test('live Linux systemd installs, supervises and removes both background roles'
         const result = spawnSync('systemctl', ['show', '--property=MainPID', '--value', name], { encoding: 'utf8' });
         return result.stdout.trim() !== '0' && result.stdout.trim() !== first;
       });
+      // The new MainPID appears while a Type=exec unit is still 'activating' (is-active exits 3 until the exec completes): wait for 'active' instead of sampling once.
+      await waitFor(async () => spawnSync('systemctl', ['is-active', name], { encoding: 'utf8' }).stdout.trim() === 'active');
       assert.equal(run('systemctl', ['is-active', name]), 'active');
       // A separate installer process has exited; the worker remains supervised.
       run('systemctl', ['restart', name]);
