@@ -7,6 +7,7 @@ import { runChild } from '../helpers/child.js';
 import { world, type World } from './helpers.js';
 import { buildPack } from '../dream/pack.js';
 import { IntelligenceEngine } from '../../packages/intelligence/index.js';
+import { MicroTrigger } from '../../packages/adaptive/worker.js';
 
 const url = (p: string) => new URL(p, import.meta.url).href;
 const M = { vault: url('../../packages/core/vault.js'), adaptive: url('../../packages/adaptive/index.js'), engine: url('../../packages/intelligence/index.js'), dreamer: url('../dream/helpers.js') };
@@ -75,4 +76,25 @@ test('two micro workers at the same moment: one job, no duplicate discoveries', 
   for (let i = 0; i < 3; i++) { const r = await runChild(childCode(w.root, undefined)); if (JSON.parse(r.stdout).out === 'idle') break; await expireLeases(w.root); }
   assert.deepEqual(await discoveries(w), expected); assert.equal((await w.vault.verify()).ok, true);
   recordCase({ suite: 'adaptive', name: 'micro-two-workers', status: 'PASS', detail: { outcomes: [JSON.parse(a.stdout).out, JSON.parse(b.stdout).out] } });
+});
+
+test('micro worker reuses a job completed after recovery check but before enqueue', async t => {
+  const w = await prepared(t); const control = await prepared(t); await runChild(childCode(control.root, undefined)); const expected = await discoveries(control);
+  let completed = false;
+  const trigger = new MicroTrigger(w.vault, w.provider, w.ai.store, {
+    beforeEnqueue: async (engine, input) => {
+      const job = await engine.enqueue('dream', input);
+      await engine.run({ jobId: job.id, limit: 1 });
+      completed = true;
+    },
+  });
+  const outcome = await trigger.tick(new Date(Date.now() + 11 * 60_000));
+  assert.equal(completed, true);
+  assert.equal(outcome, 'completed');
+  const jobs = await new IntelligenceEngine(w.vault).jobs();
+  const rangeJobs = jobs.filter(job => job.kind === 'dream' && job.input.trigger === 'micro');
+  assert.equal(rangeJobs.length, 1, 'enqueue reuses the terminal job for the exact bounded range');
+  assert.deepEqual(await discoveries(w), expected, 'the interleaving produces the same proposals as one clean run');
+  assert.equal((await w.vault.verify()).ok, true);
+  recordCase({ suite: 'adaptive', name: 'micro-completed-job-enqueue-race', status: 'PASS' });
 });

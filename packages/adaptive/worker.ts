@@ -14,6 +14,7 @@ export interface WorkerOptions {
   now?: () => Date; sleep?: (ms: number, signal?: AbortSignal) => Promise<void>; maxTicks?: number;
   onTick?: (summary: WorkerTick) => void;
 }
+export interface MicroTriggerHooks { beforeEnqueue?: (engine: IntelligenceEngine, input: { mode: 'micro'; trigger: 'micro'; range: [number, number] }) => Promise<void> }
 export interface WorkerTick { at: string; daily: string; micro: string; error?: string }
 export interface WorkerSummary { ticks: number; errors: number; started: number; stopped: 'aborted' | 'max-ticks' }
 
@@ -24,7 +25,7 @@ const realSleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promi
  * Opt-in (config.micro.enabled). Discoveries and the pipeline's own commits never trigger it, so it cannot recurse; a running daily cycle has priority.
  */
 export class MicroTrigger {
-  constructor(private readonly vault: Vault, private readonly provider: ModelProvider | undefined, private readonly store: AdaptiveStore) {}
+  constructor(private readonly vault: Vault, private readonly provider: ModelProvider | undefined, private readonly store: AdaptiveStore, private readonly hooks: MicroTriggerHooks = {}) {}
   async tick(now: Date, signal?: AbortSignal): Promise<string> {
     const config = await this.store.config(); if (!config.micro.enabled || config.paused) return 'disabled';
     const cursors = await this.store.cursors(); const head = (await this.vault.eventsSince(0)).at(-1)?.sequence ?? 0;
@@ -45,24 +46,25 @@ export class MicroTrigger {
     // enqueueing a second job that would select the next clusters in the same
     // range and exceed the original micro batch.
     const completedJob = (await engine.jobs()).filter(job => job.kind === 'dream' && job.input.trigger === 'micro' && job.input.range?.[0] === from && job.input.range?.[1] === to && ['complete', 'dead_letter'].includes(job.status)).at(-1);
-    if (completedJob) {
+    const recoverCompleted = async (job: NonNullable<typeof completedJob>): Promise<string> => {
       const events = await this.store.events(500);
-      const started = events.filter(event => event.type === 'dream_started' && event.trigger === 'micro' && event.fromSequence === from && event.toSequence === to && (!event.jobId || event.jobId === completedJob.id)).at(-1);
+      const started = events.filter(event => event.type === 'dream_started' && event.trigger === 'micro' && event.fromSequence === from && event.toSequence === to && (!event.jobId || event.jobId === job.id)).at(-1);
       const runId = started?.runId ?? randomUUID();
-      const terminalType = completedJob.status === 'complete' ? 'dream_completed' : 'dream_dead_letter';
-      const terminal = events.some(event => event.type === terminalType && event.runId === runId && (!event.jobId || event.jobId === completedJob.id));
+      const terminalType = job.status === 'complete' ? 'dream_completed' : 'dream_dead_letter';
+      const terminal = events.some(event => event.type === terminalType && event.runId === runId && (!event.jobId || event.jobId === job.id));
       if (!terminal) {
-        const recoveryIds = { ...ids, runId, jobId: completedJob.id };
+        const recoveryIds = { ...ids, runId, jobId: job.id };
         if (!started) {
           await this.store.appendEvent({ type: 'dream_scheduled', ...recoveryIds, reason: 'RECOVER_COMPLETED_JOB' });
           await this.store.appendEvent({ type: 'dream_claimed', ...recoveryIds, reason: 'RECOVER_COMPLETED_JOB' });
           await this.store.appendEvent({ type: 'dream_started', ...recoveryIds, reason: 'RECOVER_COMPLETED_JOB' });
         }
-        await this.store.appendEvent({ type: terminalType, ...recoveryIds, durationMs: 0, attempts: completedJob.attempts, state: completedJob.status === 'complete' ? 'complete' : 'dead_letter', ...(completedJob.status === 'dead_letter' ? { reason: 'JOB_FAILED' } : {}) });
+        await this.store.appendEvent({ type: terminalType, ...recoveryIds, durationMs: 0, attempts: job.attempts, state: job.status === 'complete' ? 'complete' : 'dead_letter', ...(job.status === 'dead_letter' ? { reason: 'JOB_FAILED' } : {}) });
       }
       await this.store.advanceCursors(c => { c.micro = Math.max(c.micro ?? 0, to); });
-      return completedJob.status === 'complete' ? 'completed' : 'dead-lettered';
-    }
+      return job.status === 'complete' ? 'completed' : 'dead-lettered';
+    };
+    if (completedJob) return recoverCompleted(completedJob);
     const today = localParts(now, config.timezone).date;
     const ranToday = (await this.store.events(500)).filter(e => e.type === 'dream_started' && e.trigger === 'micro' && localParts(new Date(e.at), config.timezone).date === today).length;
     const skip = async (reason: string): Promise<string> => { const last = (await this.store.events(1))[0]; if (!(last?.type === 'dream_skipped' && last.reason === reason && last.trigger === 'micro')) await this.store.appendEvent({ type: 'dream_skipped', reason, ...ids }); return reason; };
@@ -70,7 +72,9 @@ export class MicroTrigger {
     if (!this.provider) return skip('MODEL_UNAVAILABLE');
     const lease = await this.store.lease(); if (lease && Date.parse(lease.expiresAt) > now.getTime()) return skip('DAILY_CYCLE_RUNNING');
     const runId = randomUUID(); const startedAt = Date.now();
-    const job = await engine.enqueue('dream', jobInput); // identical range => the same job, never a second one
+    await this.hooks.beforeEnqueue?.(engine, jobInput);
+    const job = await engine.enqueue('dream', jobInput); // a bounded micro range remains idempotent after job completion
+    if (job.status === 'complete' || job.status === 'dead_letter') return recoverCompleted(job);
     const runIds = { runId, jobId: job.id, ...ids };
     await this.store.appendEvent({ type: 'dream_scheduled', ...runIds }); await this.store.appendEvent({ type: 'dream_claimed', ...runIds }); await this.store.appendEvent({ type: 'dream_started', ...runIds });
     await engine.run({ jobId: job.id, limit: 1, ...(signal ? { signal } : {}) });

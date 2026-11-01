@@ -270,9 +270,15 @@ export class IntelligenceEngine {
         ? (job: Job) => job.kind === 'profile' && job.input.incremental === true && !job.input.objectIds
           && digest(job.input.scope ?? null) === digest(input.scope ?? null)
         : undefined;
-      const existing = state.jobs.find(job => job.kind === kind
+      const boundedMicroRange = kind === 'dream' && input.trigger === 'micro'
+        && Array.isArray(input.range) && input.range.length === 2
+        ? (job: Job) => job.kind === 'dream' && job.input.trigger === 'micro'
+          && job.input.range?.[0] === input.range![0] && job.input.range?.[1] === input.range![1]
+          && ['pending', 'running', 'blocked', 'complete', 'dead_letter'].includes(job.status)
+        : undefined;
+      const existing = state.jobs.find(job => (boundedMicroRange?.(job) ?? (job.kind === kind
         && (sameIncrementalProfileScope?.(job) ?? digest(job.input) === digest(input))
-        && ['pending', 'running', 'blocked'].includes(job.status));
+        && ['pending', 'running', 'blocked'].includes(job.status))));
       if (existing) {
         if (existing.status === 'blocked' && this.provider) { existing.status = 'pending'; existing.nextAt = 0; }
         return existing;
