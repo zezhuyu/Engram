@@ -668,7 +668,7 @@
       }
     },
     "security": {
-      "minimumTests": 128,
+      "minimumTests": 129,
       "requiredTests": [
         "CI failure diagnostics show the assertion but never credentials, secret environment values or the home directory",
         "CRITICAL: a binding that arrived with a cloned repository is never obeyed; nothing is sent, no credential leaves the machine",
@@ -793,6 +793,7 @@
         "unauthenticated HTTP flood is rejected before repeated durable credential writes",
         "unauthorized objects, scope lists, histories and journal metadata are non-disclosing",
         "verification suite timeout terminates only its owned process group, including a signal-resistant descendant",
+        "verification timeout reaps a detached signal-resistant descendant that keeps output pipes open",
         "with the opt-in a LAN or public bind address is still refused",
         "without the opt-in a non-loopback plain-HTTP bind is refused, even on a tailnet address or 0.0.0.0",
         "workspace IDs differing only by case cannot alias one directory (case-insensitive filesystems)",
@@ -1202,7 +1203,7 @@
       }
     },
     "memory": {
-      "minimumTests": 155,
+      "minimumTests": 156,
       "requiredTests": [
         ".gitignore handling is idempotent, keeps other lines and CRLF endings, and never removes anything",
         "CLI switches added for project setup never capture a flag that other commands use with a value",
@@ -1261,6 +1262,7 @@
         "another actor without access to the workspace cannot read its ranking",
         "authorization: readers see only granted scopes, grants and revocations apply immediately, MCP rejects asserted identities",
         "cached context is bound to the credential identity: another credential, token or user is never served what the previous one saw",
+        "capture queue excludes active atomic temps from counts and reclaims only dead-owner temp files",
         "capture, drain and recall make no model call and need no provider",
         "concurrent drains never fail on the lock, and the lock is always released with nothing left behind",
         "concurrent edits never overwrite: the stale writer gets a conflict and its version is kept as its own note",
@@ -1366,6 +1368,7 @@
         "memory/adapter-safety-and-codex-coverage",
         "memory/auto-reconnect-is-the-default",
         "memory/capture-partial-drain-sigkill-recovery",
+        "memory/capture-spool-orphan-temp-recovery",
         "memory/claude-payload-pipeline",
         "memory/cli-recall",
         "memory/codex-capture-hooks-exact-trust",
@@ -1458,6 +1461,7 @@
           "memory/adapter-safety-and-codex-coverage",
           "memory/auto-reconnect-is-the-default",
           "memory/capture-partial-drain-sigkill-recovery",
+          "memory/capture-spool-orphan-temp-recovery",
           "memory/claude-payload-pipeline",
           "memory/cli-recall",
           "memory/codex-capture-hooks-exact-trust",
@@ -2074,7 +2078,7 @@
       }
     },
     "dream": {
-      "minimumTests": 60,
+      "minimumTests": 61,
       "requiredTests": [
         "CLI --origin records provenance for ratings and rejects unknown origins",
         "Dream abstention is a valid discriminated result and rejects discovery-shaped abstentions",
@@ -2128,6 +2132,7 @@
         "privacy: an agent cannot dream over what it cannot read; a remote model never sees private notes; private-derived ideas are reviewed and kept out of shared indexes",
         "retrieval respects authorization: an agent without access to the private workspace never gets its objects into the pool, graph or plan",
         "strategic discoveries get one bounded repair when required goal metadata is missing",
+        "strategic planner retrieves goal-relevant untagged notes from bounded body terms",
         "strategic planner skips goals with only one supporting knowledge object before model invocation",
         "strategic repair restores the goal object to evidence when a model omits it",
         "strategic: goal-directed capabilities, competing domains and gaps; a goal nothing supports yields a gap report and no model call",
@@ -2177,6 +2182,7 @@
         "dream/strategic-goal-evidence-repair",
         "dream/strategic-no-eligible-cluster",
         "dream/strategic-retrieval",
+        "dream/strategic-untagged-body-recall",
         "dream/unrelated-sources-negative-control"
       ],
       "casesByPlatform": {
@@ -2220,6 +2226,7 @@
           "dream/strategic-goal-evidence-repair",
           "dream/strategic-no-eligible-cluster",
           "dream/strategic-retrieval",
+          "dream/strategic-untagged-body-recall",
           "dream/unrelated-sources-negative-control"
         ],
         "linux": [
@@ -2267,7 +2274,7 @@
       }
     },
     "adaptive": {
-      "minimumTests": 51,
+      "minimumTests": 52,
       "requiredTests": [
         "CLI: schedule configure/status/pause and cycles list/show, run --snapshot now, workspace daily list/show",
         "DST: the spring-forward gap does not skip the day, and the fall-back repeated hour does not run twice",
@@ -2301,6 +2308,7 @@
         "micro Dream killed (SIGKILL) at: during-provider-call: restart converges to the clean outcome, no duplicate or lost discoveries, journal verifies",
         "micro Dream trigger: opt-in, debounced, one bounded job per accepted-change range, no recursion, daily cap, no model means a logged skip",
         "micro trigger without a provider and when disabled: no model call, explicit reason",
+        "micro worker reuses a job completed after recovery check but before enqueue",
         "multi-process writers during a cycle: no lost writes, journal verifies, and exactly the writes after W are deferred to the next cycle",
         "multiple active workspaces get evidence-linked summaries; an inactive workspace is an explicit NO_ELIGIBLE_CHANGES success; no cross-workspace text leaks",
         "no model provider: the cycle is blocked and reported as MODEL_UNAVAILABLE, never faked as success; the event log says so",
@@ -2335,6 +2343,7 @@
         "adaptive/historical-retrieval",
         "adaptive/idle-gate-and-telemetry-privacy",
         "adaptive/micro-cap-local-midnight",
+        "adaptive/micro-completed-job-enqueue-race",
         "adaptive/micro-crash-after-claim-before-run",
         "adaptive/micro-crash-after-cursor-checkpoint-before-return",
         "adaptive/micro-crash-after-job-complete-before-outcome-check",
@@ -2389,6 +2398,7 @@
           "adaptive/historical-retrieval",
           "adaptive/idle-gate-and-telemetry-privacy",
           "adaptive/micro-cap-local-midnight",
+          "adaptive/micro-completed-job-enqueue-race",
           "adaptive/micro-crash-after-claim-before-run",
           "adaptive/micro-crash-after-cursor-checkpoint-before-return",
           "adaptive/micro-crash-after-job-complete-before-outcome-check",

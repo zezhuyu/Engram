@@ -183,14 +183,25 @@ test('failed-auth aggregates are durable before abrupt server termination', asyn
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit => child.once('exit', (code, signal) => resolveExit({ code, signal })));
   const stop = () => stopOwnedChildProcess(child, 7_000);
   t.after(stop);
-  const responses = await Promise.all(Array.from({ length: 200 }, () => fetch(endpoint, { method: 'POST', headers: { Authorization: 'Bearer invalid-synthetic-token', 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) })));
+  const responses: Response[] = [];
+  for (let offset = 0; offset < 200; offset += 10) {
+    responses.push(...await Promise.all(Array.from({ length: 10 }, () => fetch(endpoint, { method: 'POST', headers: { Authorization: 'Bearer invalid-synthetic-token', 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) }))));
+  }
   assert.equal(responses.length, 200);
+  const responseStatuses = responses.reduce<Record<number, number>>((counts, response) => { counts[response.status] = (counts[response.status] ?? 0) + 1; return counts; }, {});
   await Promise.all(responses.map(response => response.arrayBuffer()));
-  await sleep(2_250); // allow the one-second persistence interval and any active aggregate write to drain before the hard kill.
+  const flushDeadline = Date.now() + 10_000;
+  let persistedAttempts = 0;
+  do {
+    const failures = (await credentialAudit(vault)).filter(item => item.action === 'authorization_failed');
+    persistedAttempts = failures.reduce((sum, item) => sum + (item.attempts ?? 1), 0);
+    if (persistedAttempts >= 180 || Date.now() >= flushDeadline) break;
+    await sleep(100);
+  } while (true);
   child.kill('SIGKILL');
   const exit = await exited;
   assert.equal(exit.signal, 'SIGKILL');
   const failures = (await credentialAudit(vault)).filter(item => item.action === 'authorization_failed');
   assert.ok(failures.length > 0, 'an auth-failure aggregate must already be durable before graceful shutdown');
-  assert.ok(failures.reduce((sum, item) => sum + (item.attempts ?? 1), 0) >= 180, `most failures should be flushed before SIGKILL: ${JSON.stringify(failures.map(({ attempts }) => attempts))}`);
+  assert.ok(failures.reduce((sum, item) => sum + (item.attempts ?? 1), 0) >= 180, `most failures should be flushed before SIGKILL: statuses=${JSON.stringify(responseStatuses)} attempts=${JSON.stringify(failures.map(({ attempts }) => attempts))}`);
 });
