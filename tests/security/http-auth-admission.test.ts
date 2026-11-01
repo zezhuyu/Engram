@@ -109,9 +109,18 @@ test('unauthenticated HTTP flood is rejected before repeated durable credential 
 
   // Auth must be checked before consuming even an oversized request body.
   await sleep(1_100); // allow the bounded invalid-token burst window to expire.
-  const oversized = await fetch(endpoint, { method: 'POST', headers: { Authorization: 'Bearer malformed', 'Content-Type': 'application/json', Accept: 'application/json' }, body: 'x'.repeat(2_200_000), signal: AbortSignal.timeout(3000) });
-  assert.equal(oversized.status, 401);
-  await oversized.arrayBuffer();
+  // The server answers 401 without reading the body and may reset the connection while the client is still uploading 2.2 MB. Depending on the OS the client then
+  // sees the 401 or a transport reset (undici reports `fetch failed`); either outcome shows that auth ran before the body was consumed. Any other failure is real.
+  let oversizedOutcome: number | string;
+  try {
+    const oversized = await fetch(endpoint, { method: 'POST', headers: { Authorization: 'Bearer malformed', 'Content-Type': 'application/json', Accept: 'application/json' }, body: 'x'.repeat(2_200_000), signal: AbortSignal.timeout(3000) });
+    oversizedOutcome = oversized.status; await oversized.arrayBuffer().catch(() => undefined);
+  } catch (error) {
+    const code = (error as { cause?: { code?: string } }).cause?.code ?? '';
+    assert.ok(['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET'].includes(code), `oversized unauthenticated request failed for an unexpected reason: ${String(error)} cause=${JSON.stringify((error as { cause?: unknown }).cause, Object.getOwnPropertyNames((error as { cause?: object }).cause ?? {}))}`);
+    oversizedOutcome = `reset:${code}`;
+  }
+  assert.ok(oversizedOutcome === 401 || String(oversizedOutcome).startsWith('reset:'), `oversized unauthenticated body must be refused with 401 or a connection reset, got ${oversizedOutcome}`);
 
   // A peer that never completes its headers is bounded by Node's header timeout.
   const slowClient = net.connect(new URL(endpoint).port ? Number(new URL(endpoint).port) : 80, '127.0.0.1');
