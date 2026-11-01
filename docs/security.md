@@ -1,0 +1,42 @@
+# Security and privacy
+
+MDB trusts the local host, not imported documents or tool arguments. The SDK binds `ActorContext` once. The local CLI represents the owner; HTTP MCP resolves each bearer credential to a server-side actor and scoped permissions before creating tools or returning content. The optional legacy HTTP token still maps every holder to one process actor; prefer one scoped credential per agent. Do not expose an owner CLI or owner-bound SDK as an untrusted remote service. Document text cannot supply identity or permissions.
+
+Workspace ACLs and optional collection restrictions govern access. Global areas require their own capabilities. Read, write, history, promotion and purge authority are distinct. Authorization precedes document metadata, snippets, search scoring, references, context assembly and model inputs. Missing/forbidden object access avoids confirming protected existence. An unrestricted `OWNER` actor is intended only for trusted local administration.
+
+## Inputs and evidence
+
+Imported Markdown, original attachments, copied KB documentation and model output are untrusted data. MDB never executes their instructions. Paths are validated against traversal, absolute-path writes and symlink escapes. Existing vault symlinks are rejected by safe-path operations. These checks do not replace OS isolation against a malicious privileged process racing filesystem operations.
+
+Generated knowledge requires accessible exact revision evidence. A proposal cannot use unavailable/private cross-scope evidence to publish globally. Shared knowledge must be a separately reviewed sanitized promotion. Source revisions and originals remain unchanged. Prompt instructions remind providers of this boundary, but schema validation, authorization and explicit review enforce persistence rules. Review establishes acceptance, not factual truth.
+
+Wiki retire, restore, rename and merge follow the same review boundary: agents may propose, but only the trusted host may approve or reject through actor-bound SDK/CLI operations. MCP exposes proposal creation, visible proposal listing and read-only revision diff; it exposes no wiki-change approval/rejection or direct delete tool. Proposal listing checks read access to the target and every merge source. Proposal creation and approval check write access for every touched page. Each commit uses Vault with expected revisions; merges checkpoint and resume individual target/source operations, and a changed source is never tombstoned.
+
+The reviewed-proposal gate applies to the new `wiki_change` proposal tools and model-assisted wiki engine. Direct writes continue to follow ordinary ACL grants: an actor with workspace `write` access can call `mdb_patch` / `engram_patch` with `status: "deleted"` to retire a page without creating a wiki proposal. This capability was verified through the SDK with a credential-bound agent. The change is journaled as a new revision, remains available in history, and can be restored through Vault operations; applications that require every retirement to receive proposal review must withhold direct write grants from those agents.
+
+## Capture and providers
+
+Automatic capture is disabled by default and requires consent both when the server registration is created and when a host hook is installed. Claude Code and Codex send only selected lifecycle fields to the authenticated capture endpoint. The remote client writes a minimized, redacted delivery spool under `~/.Engram-remote-spool`; bearer credentials are read from the environment and never stored there. Observation text receives a limited pattern-based secret redaction pass; it cannot guarantee removal of all secrets. Review selected input before enabling capture.
+
+No model/provider means no model calls. The trusted host configures a built-in provider in `mdb.yaml` or supplies one through the SDK; the CLI and MCP host load that configured provider. A configured provider may send supplied documents outside the machine if it does so. MDB ships no hosted provider implementation. Restrict the actor and provider's network execution environment accordingly. Semantic embeddings are unavailable in this MVP.
+
+## Disk and erasure limits
+
+Local-owner direct filesystem access bypasses application ACLs. Revisions, current views, journal, SQLite indexes, intelligence queues, exports and backups can contain private text; restrict disk access and use OS encryption where required. Indexes are not a privacy boundary simply because they are disposable. Purge cannot erase external input files or arbitrary backups/replicas; retain and delete those under a separate operational policy.
+
+HTTP MCP is self-hosted and bearer-authenticated, but does not terminate TLS itself; use HTTPS at a trusted proxy or network layer. Credentials scope actor identity and permissions, and server-side workspace ACLs still govern every read/write. The server spool is durable within the canonical local vault; remote shared access is not multi-region replication or a distributed transaction. See `verification/` and tests for exercised attacks and remaining coverage; do not infer universal security from a passing local suite.
+
+### TLS reverse proxy (Caddy)
+
+Bind Engram to loopback and terminate public TLS at Caddy. `deploy/Caddyfile` is the supported minimal configuration. Keep bearer tokens in each agent's secret environment; Caddy forwards `Authorization` and the MCP session headers by default. Do not set `MDB_MCP_HTTP_HOST=0.0.0.0` when the service is intended to be reachable only through the proxy. Credential create, revoke, rotation, and failed bearer authorization are recorded in the owner-readable `.mdb/http-credentials.json` audit list; token values and hashes are never included in audit records.
+
+```sh
+MDB_MCP_TRANSPORT=http MDB_MCP_HTTP_HOST=127.0.0.1 MDB_MCP_HTTP_PORT=3333 node bin/mdb-mcp.js --root /srv/engram
+caddy run --config deploy/Caddyfile
+```
+
+Point the sample domain at the deployment and verify the certificate and endpoint with `curl --fail-with-body https://memory.example.com/health`. For an internal-only deployment, use a private CA and install its trust root on every agent machine.
+
+## Model provider boundary
+
+Model output is untrusted. It is schema-validated, bound to supplied evidence, staged as a proposal and committed only by explicit review through `Vault`. Remote providers need `allowNetwork` and, for workspace content, `allowPrivateContentToRemote`; prompts are redacted for secrets; errors never include prompts, bodies or keys. Local Ollama/loopback endpoints are treated as local. Common SSN, email and valid card-number redaction is available for local providers with `model.redactPiiForLocal: true` (or `mdb model set --redact-pii-for-local true`). It is off by default to preserve existing local-model behavior, is pattern based, and is not a complete PII detector. A malicious provider endpoint chosen by the vault owner can still read whatever the owner permits it to receive.

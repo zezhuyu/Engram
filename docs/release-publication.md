@@ -1,0 +1,29 @@
+# Release publication authorization
+
+The CI workflow builds short-lived internal artifacts for ordinary pushes, but it does not publish a GitHub Release. Publication is restricted to a manually dispatched workflow on a semantic version tag (`vMAJOR.MINOR.PATCH`, with optional prerelease/build metadata), and the tagged commit must be reachable from `main`. Current source verification and the release policy run before the publish job.
+
+## Required repository configuration
+
+Before enabling publication, a repository owner must configure the `engram-release` GitHub Actions environment with:
+
+- Required reviewers limited to the release owner(s).
+- Prevent self-review enabled.
+- Deployment branches/tags restricted to version tags (`v*`).
+- No environment secrets unless a documented release step requires one.
+- `ENGRAM_RELEASE_AUTHORIZATION_JSON` containing a short-lived owner-signed authorization and `ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY` containing the corresponding trusted public key. The private signing key must remain offline and must never be stored in GitHub.
+- Repository Actions permissions set to read-only by default; the publish job alone receives `contents: write`.
+
+The workflow's `authorize_release` checkbox is a deliberate dispatch record, not a replacement for the protected environment approval. If the environment has not been configured with the requirements above, publication is not authorized. Do not test this by publishing a release.
+
+## Release sequence
+
+1. Complete review and authorize a version tag through the repository's normal protected-branch process.
+2. Allow tag CI to build and qualify the source. A tag push alone cannot publish.
+3. An authorized maintainer manually dispatches the workflow against that exact version tag and checks `authorize_release`.
+4. A separate required reviewer approves the protected `engram-release` environment.
+5. Before publication, the workflow verifies the owner's detached signature over an authorization bound to the exact source fingerprint, commit SHA, semantic-version tag, release profile, release level, approver and fresh timestamp. The signature is checked against `ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY`; editable dispatch inputs do not count as authorization.
+6. The workflow publishes direct installer assets only if current full verification and the selected release profile are eligible and the exact-source owner authorization verifies.
+
+The authorization JSON has `schemaVersion: 1`, `purpose: "engram-release"`, `sourceFingerprint`, `ref` (for example `refs/tags/v1.2.3`), `commit`, `profile`, `releaseLevel` (`BETA` or `GA_ELIGIBLE`), `approvedBy`, `approvedAt` (no more than seven days old), and a base64 Ed25519 `signature`. Sign the canonical JSON object with the `signature` field omitted. The verifier rejects missing keys, stale/future timestamps, signature changes, or any source/ref/commit/profile/level mismatch. A BETA signature authorizes only the exact BETA candidate named; it does not promote Engram to GA.
+
+The current Engram candidate remains BETA / NO-GO, so the release policy prevents publication. The owner has not provided a signed release authorization; no release is authorized.
