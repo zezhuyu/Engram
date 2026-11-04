@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { Engram, resolveRoot } from '../sdk/index.js';
 import { runCaptured, UNIX_COMMANDS } from '../unix/index.js';
@@ -29,6 +30,10 @@ const recallProperties: Record<string, Schema> = { scope: { enum: ['current_coll
 const loose: Schema = { type: 'object', additionalProperties: true };
 const queryProperties: Record<string, Schema> = { version: { enum: [1] }, from: { enum: ['documents', 'observations', 'wiki', 'insights', 'discoveries', 'edges', 'saved'] }, saved: string, scope: loose, search: loose, where: loose, orderBy: array(loose), pipe: array(loose), limit: { type: 'integer', minimum: 0, maximum: 100000 }, cursor: string, groupBy: array(string), aggregate: loose, select: array(string) };
 const queryOptions: Schema = object({ deadlineMs: { type: 'integer', minimum: 1, maximum: 120000 }, maxRows: { type: 'integer', minimum: 1, maximum: 100000 }, maxBytes: { type: 'integer', minimum: 1024, maximum: 32000000 }, allowCursorDrift: boolean });
+const serverPackage = (() => {
+  try { return createRequire(import.meta.url)('../../../package.json') as { name?: string; version?: string }; }
+  catch { return { version: process.env.ENGRAM_VERSION ?? 'unknown' }; }
+})();
 /** Per-call options may only tighten the host's budgets; the principal never comes from the call. */
 const queryCall = (client: Engram, a: Record<string, unknown>): { ast: Record<string, unknown>; ctx: Record<string, unknown> } => { const { options, ...ast } = a; const o = (options ?? {}) as Record<string, number>; const base = client.queries.engine.contextFor(); const tighten = (key: 'deadlineMs' | 'maxRows' | 'maxBytes') => o[key] ? { [key]: Math.min(o[key]!, base[key]) } : {}; const ws = process.env.MDB_QUERY_WORKSPACE; return { ast, ctx: { ...tighten('deadlineMs'), ...tighten('maxRows'), ...tighten('maxBytes'), ...(o.allowCursorDrift ? { allowCursorDrift: true } : {}), ...(ws ? { defaultScope: { workspace: ws } } : {}) } }; };
 interface Tool { name: string; description: string; inputSchema: Schema; execute: (args: Record<string, unknown>) => Promise<unknown> }
@@ -334,6 +339,16 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
     if (oauthMetadata && (endpoint.pathname === '/.well-known/oauth-protected-resource' || endpoint.pathname === protectedResourcePath)) { jsonResponse(response, 200, oauthMetadata); return; }
     const allowedHosts = (env.MDB_MCP_HTTP_ALLOWED_HOSTS ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
     if (allowedHosts.length && !allowedHosts.includes((request.headers.host ?? '').toLowerCase())) { jsonResponse(response, 403, { error: 'Host not allowed' }); return; }
+    if (endpoint.pathname === '/version') {
+      if (request.method !== 'GET') { jsonResponse(response, 405, { error: 'Method not allowed' }, { Allow: 'GET' }); return; }
+      if (!allowedOrigin(request.headers.origin, env)) { jsonResponse(response, 403, { error: 'Origin not allowed' }); return; }
+      const cancelled = new AbortController(); request.once('aborted', () => cancelled.abort());
+      const release = await admission.acquire('public:version', cancelled.signal);
+      if (!release) { jsonResponse(response, 503, { error: 'Server is busy' }, { 'Retry-After': '1' }); return; }
+      try { jsonResponse(response, 200, { name: 'engram', version: serverPackage.version ?? 'unknown' }, { 'X-Content-Type-Options': 'nosniff' }); }
+      finally { release(); }
+      return;
+    }
     const peer = request.socket.remoteAddress ?? 'unknown'; const now = Date.now(); let peerFailures = authFailuresByPeer.get(peer);
     if (peerFailures && now - peerFailures.window >= AUTH_WINDOW_MS) { authFailuresByPeer.delete(peer); peerFailures = undefined; }
     const refuseEarly = (retryAfter: number) => { jsonResponse(response, 429, { error: 'Authentication temporarily rate limited' }, { 'Retry-After': String(retryAfter), Connection: 'close' }); response.once('finish', () => request.socket.destroy()); };

@@ -50,6 +50,8 @@ export class Engram {
   readonly memory: MemoryRecall;
   /** Typed query AST engine (operators, joins, graph, time, saved queries). Same engine behind `mdb query` and the MCP mdb_query tool. */
   readonly queries: QueryApi;
+  /** Environment used for provider discovery and construction. */
+  readonly modelEnv: Record<string, string | undefined>;
   /** Account-scoped provider project links stored as ordinary journaled Personal workspace documents. */
   readonly chatProjects: ChatProjectRegistry;
   /** ACL-filtered imported conversation retrieval and search. */
@@ -59,9 +61,12 @@ export class Engram {
   /** Creates a review-only user insight from exact repeated wording in multiple currently authorized linked chat projects. */
   proposeCrossProjectChatInsight(input: CrossProjectChatInsightInput) { return proposeCrossProjectChatInsight(this.vault, this.chatProjects, this.intelligence, input); }
   private readonly modelProvider: ModelProvider | undefined; private adaptiveCache: AdaptiveIntelligence | undefined;
+  /** Host-supplied provider, when present; callers must still check describeModel/config policy before use. */
+  get provider(): ModelProvider | undefined { return this.modelProvider; }
   /** Adaptive background intelligence (daily sealed-snapshot cycles). Owner only. */
   get adaptive(): AdaptiveIntelligence { return this.adaptiveCache ??= new AdaptiveIntelligence(this.vault, this.modelProvider); }
   constructor(root: string = resolveRoot(), actor: ActorContext = OWNER, provider?: ModelProvider, options: { embedder?: EmbeddingProvider; store?: ObjectStore; env?: Record<string,string|undefined> } = {}) {
+    this.modelEnv = options.env ?? process.env;
     this.modelProvider = provider;
     this.vault = new Vault(root, actor, options.store ? { store: options.store } : {});
     this.search = new SearchEngine(this.vault, options);

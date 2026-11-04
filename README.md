@@ -43,6 +43,8 @@ Replace the uppercase placeholders with actual returned values. Restore creates 
 
 ## SDK and agent integration
 
+Run the client outbox delivery watcher persistently on macOS or Linux with `mdb service install`; see [client daemon setup](docs/client-daemon.md) for secure token-file configuration, lifecycle commands, and the macOS server-version menu bar app.
+
 After building, import the SDK from `./dist/packages/sdk/index.js` (or `engram-mdb` when installed):
 
 ```js

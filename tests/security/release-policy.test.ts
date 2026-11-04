@@ -5,7 +5,7 @@ import { createHash, generateKeyPairSync, sign as signSignature } from 'node:cry
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PRODUCTION_EVIDENCE, classifyRelease, collectProductionEvidence, currentQualityDetail, currentQualityStatus, mcpEvidenceComplete, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, sourceEvidenceMatches, suiteReportConsistent, validateExclusions, verifyReleaseAuthorization, type ProductionEvidence } from '../../scripts/lib/release-policy.js';
+import { PRODUCTION_EVIDENCE, RELEASE_POLICY_VERSION, classifyRelease, collectProductionEvidence, currentQualityDetail, currentQualityStatus, mcpEvidenceComplete, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, releaseCapabilitiesValid, sourceEvidenceMatches, suiteReportConsistent, validateExclusions, verifyReleaseAuthorization, type ProductionEvidence, type TrustedExclusionContext } from '../../scripts/lib/release-policy.js';
 import { currentSourceEvidence } from '../../scripts/lib/source-evidence.js';
 
 const green = { storageVerdict: 'PASS', openAreas: [] as string[], openGates: [] as string[], failedGates: [] as string[] };
@@ -14,7 +14,11 @@ const ownerPublicKey = ownerKeys.publicKey.export({ type: 'spki', format: 'pem' 
 const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object' ? `{${Object.entries(value as Record<string, unknown>).filter(([k]) => k !== 'signature' && k !== 'attestationSignature').sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}` : JSON.stringify(value) ?? 'null';
 const sign = <T extends Record<string, unknown>>(value: T, field: 'signature' | 'attestationSignature' = 'attestationSignature'): T & Record<string, string> => ({ ...value, [field]: signSignature(null, Buffer.from(canonical(value)), ownerKeys.privateKey).toString('base64') }) as T & Record<string, string>;
 const evidence = (over: Record<string, ProductionEvidence['status']> = {}): ProductionEvidence[] => PRODUCTION_EVIDENCE.map(({ id, title }) => ({ id, title, status: over[id] ?? 'PASS', detail: '', source: 'test' }));
-const approved = (id: string) => sign({ id, approvedBy: 'owner', reason: 'private tailnet only', approvedAt: new Date().toISOString() }, 'signature');
+const exclusionContext: TrustedExclusionContext = { fingerprint: 'a'.repeat(64), commit: 'b'.repeat(40), profile: 'ga', policyVersion: RELEASE_POLICY_VERSION };
+const approved = (id: string, over: Record<string, unknown> = {}) => {
+  const approvedAt = new Date().toISOString();
+  return sign({ id, approvedBy: 'owner', reason: 'private tailnet only', approvedAt, expiresAt: new Date(Date.parse(approvedAt) + 30 * 24 * 3600_000).toISOString(), sourceFingerprint: exclusionContext.fingerprint, git_commit: exclusionContext.commit, profile: 'ga' as const, policyVersion: RELEASE_POLICY_VERSION, nonce: `${id}-${Math.random()}`, ...over }, 'signature');
+};
 
 test('MCP evidence separates private HTTP, tunnel transport and actual hosted invocations', () => {
   const checks = { discovery: true, authorizedRead: true, rejectedAccess: true, clientIsolation: true, versionedWrite: true };
@@ -235,8 +239,11 @@ test('release profiles have explicit requirements and Core cannot claim excluded
   const enabled = classifyRelease({ ...green, profile: 'core-beta', requiredAreas: [{ id: 'STORAGE', status: 'PASS' }], requiredGates: [{ id: 'AGENT_IDENTITY', status: 'PASS' }], disabledFeatures: ['dream', 'preferences', 'wiki', 'adaptive'], evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] });
   assert.equal(enabled.level, 'NOT_RELEASABLE', 'editable feature labels are not authenticated owner evidence');
   const sourceFingerprint = 'a'.repeat(64);
-  const capabilityAttestation = sign({ profile: 'core-beta', sourceFingerprint, disabledFeatures: ['adaptive-intelligence', 'dream', 'preferences', 'wiki'], artifacts: { 'engram-core.zip': 'b'.repeat(64) }, observedAt: new Date().toISOString() });
-  const attested = classifyRelease({ ...green, profile: 'core-beta', sourceFingerprint, requiredAreas: [{ id: 'STORAGE', status: 'PASS' }], requiredGates: [{ id: 'AGENT_IDENTITY', status: 'PASS' }], disabledFeaturesAttestation: capabilityAttestation, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] }, ownerPublicKey);
+  const sourceCommit = 'a'.repeat(40);
+  const capabilityAttestation = sign({ profile: 'core-beta', sourceFingerprint, git_commit: sourceCommit, disabledFeatures: ['adaptive-intelligence', 'dream', 'preferences', 'wiki'], artifacts: { 'engram-core.zip': 'b'.repeat(64) }, observedAt: new Date().toISOString() });
+  assert.equal(releaseCapabilitiesValid(capabilityAttestation, 'core-beta', sourceFingerprint, sourceCommit, ownerPublicKey), true);
+  assert.equal(releaseCapabilitiesValid({ ...capabilityAttestation, git_commit: 'c'.repeat(40) }, 'core-beta', sourceFingerprint, sourceCommit, ownerPublicKey), false);
+  const attested = classifyRelease({ ...green, profile: 'core-beta', sourceFingerprint, sourceCommit, requiredAreas: [{ id: 'STORAGE', status: 'PASS' }], requiredGates: [{ id: 'AGENT_IDENTITY', status: 'PASS' }], disabledFeaturesAttestation: capabilityAttestation, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [] }, ownerPublicKey);
   assert.equal(attested.level, 'BETA', 'a valid profile with its required gates may be BETA while GA-only evidence remains open');
   assert.equal(attested.automatedGatesPass, true);
 });
@@ -254,9 +261,52 @@ test('every failed required area or mandatory gate is NOT_RELEASABLE for the sel
 
 test('only trusted signed exclusions with an approver, reason, fresh date and known id count', () => {
   const bad = [{ id: 'PHYSICAL_POWER_LOSS' }, { id: 'PHYSICAL_POWER_LOSS', approvedBy: 'owner', reason: 'x' }, { id: 'PHYSICAL_POWER_LOSS', approvedBy: ' ', reason: 'x', approvedAt: '2026-10-12' }, { id: 'NOT_A_THING', approvedBy: 'owner', reason: 'x', approvedAt: '2026-10-12' }, { id: 'PHYSICAL_POWER_LOSS', approvedBy: 'owner', reason: 'x', approvedAt: 'yesterday' }, 'text', null];
-  const checked = validateExclusions(bad, PRODUCTION_EVIDENCE.map(e => e.id), ownerPublicKey); assert.equal(checked.valid.length, 0); assert.equal(checked.ignored.length, bad.length);
+  const checked = validateExclusions(bad, PRODUCTION_EVIDENCE.map(e => e.id), ownerPublicKey, exclusionContext); assert.equal(checked.valid.length, 0); assert.equal(checked.ignored.length, bad.length);
   const result = classifyRelease({ ...green, profile: 'full-intelligence-beta', evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: bad });
-  assert.equal(result.level, 'BETA'); assert.equal(result.excludedEvidence.length, 0); assert.equal(result.ignoredExclusions.length, bad.length);
+  assert.equal(result.level, 'BETA'); assert.equal(result.excludedEvidence.length, 0); assert.equal(result.ignoredExclusions.length, 0, 'Core and Full do not read or report exclusions');
+});
+
+test('GA exclusions are signed, provenance-bound, single-use per file, expiring approvals', () => {
+  const good = approved('PHYSICAL_POWER_LOSS');
+  const now = Date.now();
+  const accepted = validateExclusions([good], ['PHYSICAL_POWER_LOSS'], ownerPublicKey, exclusionContext, now);
+  assert.equal(accepted.valid.length, 1, 'isolated exact-match fixture is accepted');
+  const signRecord = (fields: Record<string, unknown>) => sign(fields, 'signature');
+  const at = new Date(now).toISOString();
+  const fields = { id: 'PHYSICAL_POWER_LOSS', approvedBy: 'owner', reason: 'specific reviewed release scope', approvedAt: at, expiresAt: new Date(now + 20 * 24 * 3600_000).toISOString(), sourceFingerprint: exclusionContext.fingerprint, git_commit: exclusionContext.commit, profile: 'ga', policyVersion: RELEASE_POLICY_VERSION, nonce: 'unique-nonce' };
+  const rejects = (value: unknown, trusted = exclusionContext, key = ownerPublicKey) => assert.equal(validateExclusions(value, PRODUCTION_EVIDENCE.map(e => e.id), key, trusted, now).valid.length, 0);
+
+  for (const field of Object.keys(fields)) {
+    const missing = { ...fields } as Record<string, unknown>;
+    delete missing[field];
+    rejects([signRecord(missing)]);
+  }
+  for (const [field, value] of Object.entries({ sourceFingerprint: 'f'.repeat(64), git_commit: 'c'.repeat(40), profile: 'core-beta', policyVersion: 'engram-release-policy/1', reason: '', approvedBy: ' ' })) {
+    rejects([signRecord({ ...fields, [field]: value })]);
+  }
+  rejects([signRecord({ ...fields, approvedAt: new Date(now + 1).toISOString() })]);
+  rejects([signRecord({ ...fields, expiresAt: new Date(now - 1).toISOString() })]);
+  rejects([signRecord({ ...fields, approvedAt: new Date(now - 91 * 24 * 3600_000).toISOString(), expiresAt: new Date(now + 1).toISOString() })]);
+
+  for (const field of Object.keys(fields)) {
+    const changed = { ...good, [field]: field === 'reason' ? 'changed after signing' : `${String(good[field as keyof typeof good])}-changed` };
+    rejects([changed]);
+  }
+  rejects([good], exclusionContext, generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString());
+  rejects([{ ...good, id: 'TRANSPORT_TLS' }]);
+  const duplicateId = [good, approved('PHYSICAL_POWER_LOSS')];
+  const duplicateNonce = [approved('PHYSICAL_POWER_LOSS', { nonce: 'same' }), approved('TRANSPORT_TLS', { nonce: 'same' })];
+  assert.equal(validateExclusions(duplicateId, PRODUCTION_EVIDENCE.map(e => e.id), ownerPublicKey, exclusionContext, now).valid.length, 0);
+  assert.equal(validateExclusions(duplicateNonce, PRODUCTION_EVIDENCE.map(e => e.id), ownerPublicKey, exclusionContext, now).valid.length, 0);
+
+  for (const trusted of [
+    { ...exclusionContext, fingerprint: 'f'.repeat(64) },
+    { ...exclusionContext, commit: 'c'.repeat(40) },
+    { ...exclusionContext, profile: 'full-intelligence-beta' as const },
+    { ...exclusionContext, policyVersion: 'engram-release-policy/1' },
+  ]) rejects([good], trusted);
+  const replayed = classifyRelease({ ...green, sourceFingerprint: 'f'.repeat(64), sourceCommit: exclusionContext.commit, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN' }), exclusions: [good] }, ownerPublicKey);
+  assert.equal(replayed.level, 'NOT_RELEASABLE', 'a replayed signed exclusion cannot make GA eligible');
 });
 
 test('release authorization signature binds the exact source, tag, commit, profile, level and freshness', () => {
@@ -277,11 +327,11 @@ test('release authorization signature binds the exact source, tag, commit, profi
 
 test('GA eligibility needs every evidence item PASS or validly excluded, and is eligibility only', () => {
   assert.equal(classifyRelease({ ...green, evidence: evidence(), exclusions: [] }).level, 'GA_ELIGIBLE');
-  const excluded = classifyRelease({ ...green, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: { exclusions: [approved('PHYSICAL_POWER_LOSS'), approved('TRANSPORT_TLS')] } }, ownerPublicKey);
+  const excluded = classifyRelease({ ...green, ...{ sourceFingerprint: exclusionContext.fingerprint, sourceCommit: exclusionContext.commit }, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: { exclusions: [approved('PHYSICAL_POWER_LOSS'), approved('TRANSPORT_TLS')] } }, ownerPublicKey);
   assert.equal(excluded.level, 'GA_ELIGIBLE'); assert.deepEqual(excluded.excludedEvidence.sort(), ['PHYSICAL_POWER_LOSS', 'TRANSPORT_TLS']);
   assert.match(excluded.summary, /owner/); assert.doesNotMatch(excluded.summary, /^GA-ready/);
-  const partial = classifyRelease({ ...green, profile: 'full-intelligence-beta', evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: [approved('PHYSICAL_POWER_LOSS')] }, ownerPublicKey);
-  assert.equal(partial.level, 'BETA'); assert.deepEqual(partial.incompleteEvidence.map(e => e.id), ['TRANSPORT_TLS']);
+  const partial = classifyRelease({ ...green, profile: 'full-intelligence-beta', sourceFingerprint: exclusionContext.fingerprint, sourceCommit: exclusionContext.commit, evidence: evidence({ PHYSICAL_POWER_LOSS: 'NOT_RUN', TRANSPORT_TLS: 'INCOMPLETE' }), exclusions: [approved('PHYSICAL_POWER_LOSS')] }, ownerPublicKey);
+  assert.equal(partial.level, 'BETA'); assert.deepEqual(partial.incompleteEvidence.map(e => e.id), ['PHYSICAL_POWER_LOSS', 'TRANSPORT_TLS']); assert.equal(partial.validExclusions.length, 0, 'Core and Full ignore exclusion files entirely');
 });
 
 test('production evidence is read from recorded PASS statuses only; a private-network transport is not TLS evidence', () => {

@@ -72,3 +72,15 @@ test('model test sends no vault content and reports ok / failure', async t => {
   assert.ok(seen.length >= 1 && seen.every(body => !body.includes('PRIVATE-')), 'vault content reached the provider');
   assert.equal((await testModel(undefined, config, {}).catch(e => ({ ok: false, error: String(e) }))).ok, false);
 });
+
+test('model test forwards its AbortSignal to the provider call', async t => {
+  const client = await fresh(t), config = await client.vault.config(), controller = new AbortController();
+  let received: AbortSignal | undefined;
+  const provider = { id: 'signal-test', generate: async (_input: unknown, options?: { signal?: AbortSignal }) => {
+    received = options?.signal;
+    return { kind: 'note', title: 'ok', body: 'ok', evidence: [] } as never;
+  } };
+  const result = await testModel(provider, config, {}, controller.signal);
+  assert.equal(result.ok, true);
+  assert.equal(received, controller.signal);
+});

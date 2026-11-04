@@ -2,7 +2,7 @@
 # Not required for local operation or OpenAI Secure MCP Tunnel.
 memory.example.com {
 	encode zstd gzip
-	@memory path /mcp /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp
+	@memory path /mcp /version /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp
 	handle @memory {
 		request_body {
 			max_size 1MB

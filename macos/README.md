@@ -19,7 +19,7 @@ Move the app to a stable location such as `/Applications` before first opening i
 
 Both load the existing `~/.config/engram/engram.env` first, if present, then the role-specific file. These are local shell environment files and must have mode 600 or 400. Never copy them into a release artifact.
 
-For the client, set `ENGRAM_MCP_URL` to the authorized server endpoint and `ENGRAM_MCP_TOKEN` to a scoped credential. Optional settings are `ENGRAM_WORKSPACE`, `ENGRAM_PROJECT_DIR`, and `ENGRAM_OUTBOX`. Project reconciliation requires its existing trusted binding. Without endpoint/credential configuration the worker reports an error in its log; it does not claim a connection.
+For the client, set `ENGRAM_MCP_URL` to the authorized server endpoint and `ENGRAM_TOKEN_FILE` to a separate mode-0600 file containing the scoped bearer token. Optional settings are `ENGRAM_WORKSPACE`, `ENGRAM_PROJECT_DIR`, `ENGRAM_OUTBOX`, and `ENGRAM_DASHBOARD_URL`. The Client app shows the connected server version from `/version`, or `Engram (offline)` when unreachable. Its menu controls the daemon with `mdb service start|stop`, opens the dashboard and daemon log, and quits independently of the daemon. See `docs/client-daemon.md` for setup and CLI details.
 
 For the server, configure its existing `ENGRAM_DATA_DIR`, HTTP credential or OAuth validation settings, and ingress options. HTTP defaults to loopback on port 3333 with the remote-web toolset. Public access still requires authenticated HTTPS ingress.
 

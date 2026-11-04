@@ -1,6 +1,34 @@
 # Changelog
 
+## Unreleased - client dashboard and remote admin
+
+### Added
+- Added opt-in dashboard admin/view credentials with hash-only storage, expiry, optional source-IP filters, GET-only view access, TLS listener support, and remote request audit records.
+- Added local dashboard Connections and Client settings screens with a credential-isolated API proxy. Remote process lifecycle remains host-local. See `docs/dashboard-client.md`.
+
+## Unreleased - client daemon and server version menu bar
+
+### Added
+- `mdb service install|uninstall|status|start|stop|logs` manages the outbox watcher as a user LaunchAgent on macOS or a systemd user service on Linux. Credentials are read from a private token file; see `docs/client-daemon.md`.
+- HTTP `GET /version` returns the server package name and version only. The macOS Client menu bar shows the connected server version or an offline state and controls the client daemon.
+### Added (dashboard identity and remote connectors)
+- Added embedded Engram logo/favicons to the dashboard, login, and setup screens. Settings now documents OpenAI Secure MCP Tunnel and Claude remote connector configuration, stores write-only connector secrets with restrictive permissions, supports hash-backed scoped credential create/list/rotate/revoke, and offers an explicit guarded HTTPS version probe. The dashboard does not start tunnels or change network exposure. See `docs/dashboard.md`.
+
 ## Unreleased - memory & dream update (M0-M5)
+
+### Added (dashboard URL notes)
+- Chat offers explicit URL reading through the installed Claude or Codex CLI. URL reading is disabled until typed confirmation in Settings, uses bounded read-only CLI profiles, validates URLs and draft schemas, and keeps drafts ephemeral until owner approval. Approval ingests provenance through Vault and creates a note or owner-review proposal; audits retain only host and path hash. See `docs/dashboard.md` and `docs/dashboard-url-notes-smoke.md`.
+
+### Added (dashboard chat and sources)
+- Added ephemeral, ACL-filtered wiki chat with revision citations, optional provider synthesis and citation validation; imported pasted text and allowlisted uploads through immutable Vault ingestion; source-backed wiki proposals require owner review. Uploads use an 8 MiB default cap (`MDB_DASHBOARD_UPLOAD_LIMIT_BYTES`), private temporary files in `.mdb/scratch/dashboard-uploads`, and never fetch URLs. See `docs/dashboard.md`.
+
+### Added (dashboard knowledge)
+- Owner dashboard now lists/searches and filters authorized knowledge with cursor paging, reads details/history/diffs/links, and supports create, optimistic edit, tombstone, and restore through actor-bound Engram APIs. Added owner workspace creation and reviewed wiki lifecycle proposals; mutations are audited with redacted summaries, document JSON requests are bounded at 256 KiB, and Markdown is rendered as inert text. See `docs/dashboard.md`.
+
+### Added (local dashboard)
+- Dashboard bind host and port are configurable with `--host`/`--port` or `MDB_DASHBOARD_HOST`/`MDB_DASHBOARD_PORT`; local interface IPs (including Tailscale) enable remote mode, and Settings reports the active listener. See `docs/dashboard.md`.
+- Complete single-page `mdb dashboard` UI for vault status, storage/index, jobs/scheduler, Dream/wiki, capture, settings, and audit. Includes per-change previews, etag-guarded updates, a durable attempt/outcome audit trail, accessible responsive navigation, and local-only browser protections. See `docs/dashboard.md`.
+- Dashboard settings fail closed when an attempt cannot be audited; CLI lifecycle, model abort-signal forwarding, dashboard view models, and packaged dashboard assets have regression coverage.
 
 ### Added (adaptive background intelligence)
 - **Adaptive daily cycle** (`packages/adaptive`, `docs/adaptive-intelligence.md`): sealed committed-journal snapshots, workspace-first DAG (workspace daily summaries + scoped insights -> global profile roots -> Dream over the full authorized corpus), 03:00-local scheduler with conservative idle-window learning, cooperative pause/resume, purge propagation, crash-safe per-workspace cursors. CLI `mdb intelligence schedule|cycles|run --snapshot now`, `mdb workspace daily|changes`; SDK `engram.adaptive`; lane `verify:adaptive`; gates `ADAPTIVE_SCHEDULER`, `WORKSPACE_DAILY_SUMMARY`, `WORKSPACE_SCOPED_INSIGHT`, `GLOBAL_PROFILE_CONSOLIDATION`.

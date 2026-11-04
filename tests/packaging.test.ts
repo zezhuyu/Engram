@@ -71,6 +71,8 @@ test('standalone packaging excludes source maps and upstream reference corpora w
   assert.ok(pkg.dependencies && !('@aws-sdk/client-s3' in pkg.dependencies) && !('pg' in pkg.dependencies));
   const client = readFileSync(path.join(root, 'scripts/package-client.mjs'), 'utf8');
   assert.match(client, /\['dist\/packages', 'dist\/integrations', 'skills'\]/, 'client package carries the runtime skill directory');
+  assert.ok(statSync(path.join(root, 'dist/packages/dashboard/server.js')).isFile(), 'dashboard server is compiled into the packaged runtime tree');
+  assert.ok(statSync(path.join(root, 'dist/packages/dashboard/ui/view-model.js')).isFile(), 'embedded dashboard UI module is compiled into the packaged runtime tree');
   assert.match(client, /files: \['bin\/', 'dist\/', 'skills\/', 'README\.md'\]/, 'npm tarball allowlist carries skills without tests or verification artifacts');
   assert.match(client, /skills\/upstream-kb/);
   assert.match(client, /optionalDependencies:/);

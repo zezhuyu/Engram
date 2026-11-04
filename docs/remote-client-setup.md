@@ -1,5 +1,7 @@
 # Remote MCP clients
 
+For a persistent macOS or Linux outbox watcher on a client machine, use the per-user service commands in [client-daemon.md](client-daemon.md). The daemon consumes the same `outbox watch` operation described below and keeps the credential in a 0600 token file.
+
 Engram uses the existing HTTP MCP server. Start it with `MDB_MCP_TOOLSET=remote-web`, a vault root, and either a scoped credential created through the owner CLI or a configured OAuth resource-server verifier. The stable endpoint is `/mcp`; `/.well-known/oauth-protected-resource` publishes RFC 9728 metadata when OAuth validation is enabled.
 
 ## OAuth resource validation
@@ -55,7 +57,7 @@ Engram is an HTTP service bound to `127.0.0.1:3333` by default. Local authentica
 
 [Claude's connector transport documentation](https://claude.com/docs/connectors/building) recommends Streamable HTTP and also supports legacy HTTP+SSE. [Claude's network requirements](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) specify connections from Anthropic's cloud. [Its local-server testing guide](https://claude.com/docs/connectors/building/testing) recommends an external tunnel/public URL. For this deployment, use a verified HTTPS URL from an independently approved external adapter. Caddy is one optional adapter; Cloudflare Tunnel/ngrok are alternatives, not Engram dependencies. Existing Agent Slack Claude Console tunneling is not evidence of Claude.ai connector compatibility.
 
-Do not expose plain HTTP publicly, disable token validation, trust forwarded identity headers, widen ACLs, or remove Host/origin checks to make a connector connect. An adapter may forward only `/mcp` and OAuth protected-resource metadata. Keep `/capture`, vault paths, health/admin UI and debug endpoints private. Limit unauthenticated traffic at any approved public ingress in addition to Engram's authenticated per-actor limits.
+Do not expose plain HTTP publicly, disable token validation, trust forwarded identity headers, widen ACLs, or remove Host/origin checks to make a connector connect. An adapter may forward `/mcp`, the read-only `/version` response used by the dashboard's explicit connection test, and OAuth protected-resource metadata. Keep `/capture`, vault paths, health/admin UI and debug endpoints private. Limit unauthenticated traffic at any approved public ingress in addition to Engram's authenticated per-actor limits.
 
 ## Separate verification layers
 

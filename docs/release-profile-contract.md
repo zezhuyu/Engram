@@ -23,6 +23,24 @@ Supported profiles:
   item to PASS or carry a valid trusted exclusion. Missing evidence exits
   nonzero; GA eligibility is still not owner authorization to publish.
 
+GA exclusions are Ed25519-signed records in `fixtures/inputs/release-exclusions.json`.
+Each signature covers `id`, `approvedBy`, `reason`, `approvedAt`, `expiresAt`,
+`sourceFingerprint`, `git_commit`, `profile`, `policyVersion`, and a unique
+`nonce`. The record is accepted only for the exact current fingerprint and
+commit, `profile: "ga"`, and the current `engram-release-policy/2` version.
+Approvals cannot be future-dated, expired, or valid for more than 90 days.
+Duplicate IDs and nonces in one file invalidate the duplicates. Core and Full
+profiles ignore this file; an exclusion never converts an automated gate.
+
+Mandatory skipped tests are described in the tracked
+`scripts/lib/skip-classifications.json` registry. Inventory entries point to a
+classification ID and SHA-256 hash; the verifier checks its suite, platform,
+prerequisite, reason, profile scope and review status. A skip remains `SKIPPED`
+and keeps the mandatory suite gate non-PASS. `pending-owner-review` is not an
+approval. `MDB_ALLOW_PENDING_SKIP_CLASSIFICATIONS=1` permits local inventory
+development diagnostics only; release verification remains fail-closed by
+default.
+
 Any failed, incomplete, stale, missing, malformed, or source-mismatched
 required automated gate makes the selected profile `NOT_RELEASABLE` and causes
 `verify:release` to exit nonzero. `verify:all` therefore also exits nonzero

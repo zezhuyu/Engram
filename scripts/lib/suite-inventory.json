@@ -665,10 +665,14 @@
           "isolation/stale-lock-recovery",
           "isolation/symlink-swap-race"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "security": {
-      "minimumTests": 129,
+      "minimumTests": 130,
       "requiredTests": [
         "CI failure diagnostics show the assertion but never credentials, secret environment values or the home directory",
         "CRITICAL: a binding that arrived with a cloned repository is never obeyed; nothing is sent, no credential leaves the machine",
@@ -776,6 +780,7 @@
         "security gate includes replay ACL coverage and rejects its removal from emitted evidence",
         "security inventory executes and requires the HTTP admission and prompt-redaction regressions",
         "sensitive insights never reach a file or the injected context; --no-profile-in-files keeps all profile text out of the repository; tracked files are flagged",
+        "skipped mandatory tests require an explained platform allow-list and remain skipped evidence",
         "source fingerprint covers extensionless deployment inputs and detects deletion",
         "source identity excludes only the tool-generated AGENTS memory block",
         "spawned CLI supports Markdown CRUD, conflicts, history, restore and sessions",
@@ -861,6 +866,10 @@
           "security/tls-verification-no-insecure-fallback",
           "security/user-level-allowlist-exclusion-redaction"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "search": {
@@ -1061,6 +1070,10 @@
           "semantic/semantic-basic",
           "semantic/sqlite-vec"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "intelligence": {
@@ -1120,6 +1133,28 @@
       "casesByPlatform": {
         "darwin": [],
         "linux": []
+      },
+      "allowedSkippedTests": {
+        "darwin": [
+          {
+            "name": "real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
+        ],
+        "linux": [
+          {
+            "name": "real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
+        ]
       }
     },
     "recovery": {
@@ -1163,6 +1198,10 @@
           "recovery/purge-and-backup-retention",
           "recovery/restore-kill-retry-atomic-publication"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "platforms": {
@@ -1200,6 +1239,10 @@
           "platform/read-only-locks-dir",
           "platform/unicode-and-space-paths"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "memory": {
@@ -1638,6 +1681,44 @@
           "security/profile-privacy-in-files-and-context",
           "security/user-level-allowlist-exclusion-redaction"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [
+          {
+            "name": "real Claude Code and Codex remote capture recover after HTTP outage and server restart",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
+        ],
+        "linux": [
+          {
+            "name": "a project Codex does not trust has its hooks ignored entirely, and init says so instead of reporting success",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "Codex itself reports the project hooks as untrusted; trust is recorded only on explicit request, only for Engram's own commands, and a changed hook loses it",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real Claude Code and Codex remote capture recover after HTTP outage and server restart",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
+        ]
       }
     },
     "profile": {
@@ -1901,6 +1982,10 @@
           "profile/synonym-and-negation-correction-family-match",
           "profile/wiki-is-exposure-only"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "wiki": {
@@ -2075,6 +2160,20 @@
           "wiki/wiki-skill-invalid-output-rejected",
           "wiki/wiki-skill-preflight-and-spoof-protection",
           "wiki/wiki-skill-routing-distinct-directives"
+        ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [
+          {
+            "name": "real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
+        ],
+        "linux": [
+          {
+            "name": "real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
         ]
       }
     },
@@ -2273,6 +2372,10 @@
           "dream/strategic-untagged-body-recall",
           "dream/unrelated-sources-negative-control"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "adaptive": {
@@ -2492,6 +2595,15 @@
           "adaptive/workspace-opt-out",
           "adaptive/workspace-summaries-and-isolation",
           "adaptive/workspace-summary-acl"
+        ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": [
+          {
+            "name": "launchd plist is well-formed (plutil -lint on macOS), runs only the explicit worker command, and escapes special characters",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
         ]
       }
     },
@@ -2814,6 +2926,10 @@
           "query-vault/sources-and-scope",
           "query-vault/sqlite-bm25-deterministic-ties"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [],
+        "linux": []
       }
     },
     "unix": {
@@ -3264,6 +3380,19 @@
           "unix-sandbox/no-shell",
           "unix-sandbox/tools-required"
         ]
+      },
+      "allowedSkippedTests": {
+        "darwin": [
+          {
+            "name": "awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files",
+            "reason": "Observed skipped test in current-source reviewed report."
+          },
+          {
+            "name": "sed: GNU sed --sandbox runs scripts but cannot execute, read or write files",
+            "reason": "Observed skipped test in current-source reviewed report."
+          }
+        ],
+        "linux": []
       }
     }
   }

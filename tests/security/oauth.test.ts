@@ -132,6 +132,8 @@ test('OAuth-only HTTP server starts without legacy credentials and challenges un
   const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
   assert.equal(response.status, 401);
   assert.match(response.headers.get('www-authenticate') ?? '', /resource_metadata="https:\/\/memory.example\/\.well-known\/oauth-protected-resource\/mcp"/);
+  const version = await fetch(new URL('/version', endpoint));
+  assert.deepEqual(await version.json(), { name: 'engram', version: '0.1.0' }, 'the unauthenticated connection probe exposes only the server version');
   const tokenFor = (client: string) => {
     const now = Math.floor(Date.now() / 1000); const head = b64({ alg: 'RS256', kid: 'beta' });
     const body = b64({ iss: env.MDB_MCP_OAUTH_ISSUER, aud: env.MDB_MCP_OAUTH_AUDIENCE, sub: 'user', client_id: client, scope: 'memory.read memory.write', iat: now, exp: now + 300 });

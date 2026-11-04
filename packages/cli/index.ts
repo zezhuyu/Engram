@@ -16,6 +16,7 @@ import { captureForUser, insideProject, setUserPaused, setupUser, uninstallUser,
 import { touchActivity } from '../adaptive/activity.js';
 import { mapCommand, remoteTarget, runRemote, usesServer } from './remote.js';
 import { findTrustedBinding } from '../core/project-trust.js';
+import { manageClientService, runClientDaemon } from './service.js';
 import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
 import { createRegistration, revokeRegistration } from '../memory/capture.js';
 import { drainRemoteCaptureSpool, queueRemoteCapture } from '../memory/remote-spool.js';
@@ -35,6 +36,7 @@ Usage: mdb COMMAND [arguments] [--root PATH] [--json]
 
 mcp-proxy --url URL --token-env VAR [--workspace ID] [--outbox DIR] [--transport-trust tailscale]   stdio proxy for an agent host; keeps task/note/handoff writes locally while the server is unreachable and sends them when it returns
 remote mode: any client runs these against the server instead of a local vault when --server URL [--token-env VAR] [--workspace ID] is given, ENGRAM_URL is set, or the current project is bound to a server (--root or --local forces a local vault)
+service install|uninstall|status|start|stop|logs [--platform macos|linux] [--url URL --token-file F] [--workspace ID] [--project-dir D] [--dry-run]   manage the per-user outbox delivery daemon
     search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | chat account|project|import|list|get|search | insight search | capabilities
 chat account register|revoke|list --provider chatgpt|claude|gemini|generic --account ID [--label LABEL]
 chat client register --provider P --account A --principal ACTOR --consent   owner-consented Engram-controlled two-way chat capture
@@ -44,6 +46,7 @@ chat import status --batch ID | list [filters] | get --conversation ID [filters]
     task upsert --id ID --title T --status S [--body B] [--expected-revision R | --as-of TIME]    note upsert --id ID --title T (--body B | --file F)    handoff write --session ID --state ended|interrupted [--completed a,b --next ... --blockers ... --files ... --open-tasks ...]
     remote tools | remote call TOOL --input JSON      (every server tool; task/note/handoff writes made while the server is unreachable are kept in the local outbox and merged in later)
 outbox [drain --url URL --token-env VAR [--workspace ID] | watch --url URL (--token-env VAR | --token-file F) [--workspace ID] [--project-dir D] [--interval-sec N] [--exit-when-empty-sec N] | watch-unit --url URL --token-file F [--platform macos|linux] | log [--limit N]]   what is waiting on this machine (queued, conflicts, rejected); drain sends it now; log is the timestamped record
+dashboard [--host ADDR] [--port N] [--open] [--allow-remote] [--client] [--reset-password] | credential create|list|revoke  password dashboard; remote admin is opt-in with MDB_DASHBOARD_REMOTE_ADMIN=true
 storage status | breakdown | cleanup --dry-run   report logical storage paths/usage and preview only positively marked orphan scratch (nothing is deleted)
 wiki lint [--scope S ...] [--check CODE ...] [--min-severity error|warning|info] [--limit N] [--propose [--dry-run]]   deterministic ACL-safe wiki lint and pending proposal generation
 wiki propose retire --page ID --revision REV --reason TEXT | restore --page ID --to-revision REV --revision CURRENT --reason TEXT | rename --page ID --revision REV --title NEW | merge --target ID --revision REV --source ID:REV ... --title T (--body T | --file F) --evidence URI:REV[:SPAN] ... --reason TEXT
@@ -108,7 +111,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all']);
+  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -296,13 +299,17 @@ function summarizeRun(r: { cycle?: { id: string; state: string; watermark: numbe
   const c = r.cycle; return { ran: r.ran, ...(r.reason ? { reason: r.reason } : {}), ...(c ? { cycle: c.id, state: c.state, watermark: c.watermark, workspaces: Object.fromEntries(Object.entries(c.workspaces).map(([k, w]) => [k, w.outcome ?? w.status])), global: c.global.status, dream: c.dream.status, dreams: c.dream.proposals.length, ...(c.error ? { error: `${c.error.category}: ${c.error.message}` } : {}) } : {}) };
 }
 /** Commands that never change the vault: they must not record activity either (a read leaves the vault byte-identical). */
-const READ_ONLY_COMMANDS = new Set(['doctor', 'verify', 'get', 'history', 'diff', 'grep', 'search', 'context', 'links', 'backlinks', 'related', 'query', 'capabilities', 'insight', 'storage']);
+const READ_ONLY_COMMANDS = new Set(['doctor', 'verify', 'get', 'history', 'diff', 'grep', 'search', 'context', 'links', 'backlinks', 'related', 'query', 'capabilities', 'insight', 'storage', 'dashboard']);
 const READ_ONLY_SUBCOMMANDS: Record<string, string[]> = { model: ['show', 'test'], wiki: ['lint', 'proposals'], intelligence: ['proposals'], workspace: ['list', 'info', 'daily', 'changes'], collection: ['list', 'info'], credential: ['audit'], profile: ['show', 'proposals'], jobs: ['status'], index: ['status', 'verify'], memory: ['recent', 'timeline', 'range', 'search', 'grep', 'get', 'status', 'capabilities', 'adapter'], embed: ['status'], skills: ['list', 'show'] };
 export function isReadOnlyCommand(command: string | undefined, sub: string | undefined, third?: string): boolean { if (!command) return true; if (command === 'query') return sub !== 'save'; if (command === 'memory' && sub === 'adapter') return true; if (command === 'chat') return ['list', 'get', 'search'].includes(sub ?? '') || (sub === 'project' && ['list', 'resolve'].includes(third ?? '')) || (sub === 'account' && third === 'list') || (sub === 'import' && ['preview', 'status'].includes(third ?? '')); return READ_ONLY_COMMANDS.has(command) || (READ_ONLY_SUBCOMMANDS[command]?.includes(sub ?? '') ?? false); }
 export async function execute(argv: string[]): Promise<unknown> {
   const { args, flags } = parse(argv);
   const [command, sub, third, fourth] = args;
   if (!command || command === 'help' || flags.help) return HELP;
+  if (command === 'service') {
+    if (sub === 'daemon') return runClientDaemon({ url: required(text(flags, 'url'), '--url'), tokenFile: resolve(required(text(flags, 'token-file'), '--token-file')), allowRoot: !!flags['allow-root'], ...(text(flags, 'log-file') ? { logFile: resolve(text(flags, 'log-file')!) } : {}), ...(text(flags, 'workspace') ? { workspace: text(flags, 'workspace') } : {}), ...(text(flags, 'outbox') ? { outbox: resolve(text(flags, 'outbox')!) } : {}), ...(text(flags, 'project-dir') ? { projectDir: resolve(text(flags, 'project-dir')!) } : {}) });
+    return manageClientService({ action: sub ?? '', ...(text(flags, 'platform') ? { platform: text(flags, 'platform') as 'macos' | 'linux' } : {}), ...(text(flags, 'home') ? { home: text(flags, 'home') } : {}), ...(text(flags, 'url') ? { url: text(flags, 'url') } : {}), ...(text(flags, 'token-file') ? { tokenFile: text(flags, 'token-file') } : {}), ...(text(flags, 'workspace') ? { workspace: text(flags, 'workspace') } : {}), ...(text(flags, 'outbox') ? { outbox: text(flags, 'outbox') } : {}), ...(text(flags, 'project-dir') ? { projectDir: text(flags, 'project-dir') } : {}), dryRun: !!flags['dry-run'], allowRoot: !!flags['allow-root'] });
+  }
   if (command === 'mcp-proxy') {
     if (text(flags, 'transport-trust')) process.env.MDB_TRANSPORT_TRUST = text(flags, 'transport-trust')!; // stdio proxy for an agent host: forwards to the server and keeps task/note/handoff writes in a local outbox while it is unreachable
     const tokenEnv = required(text(flags, 'token-env'), '--token-env'), token = process.env[tokenEnv];
@@ -315,6 +322,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     const { outboxStatus, defaultOutboxDirectory, readLog } = await import('../memory/outbox.js'); const directory = text(flags, 'outbox') ? resolve(text(flags, 'outbox')!) : defaultOutboxDirectory();
     if (sub === 'log') return readLog(directory, number(flags, 'limit') ?? 50);
     if (sub === 'watch' || sub === 'watch-unit') { // keeps retrying by itself so delivery does not wait for the next agent session; `watch-unit` only PRINTS a launchd/systemd definition (nothing is installed)
+      if (process.env.ENGRAM_AUTO_RECONNECT === '0') throw new MDBError('CAPABILITY_UNAVAILABLE', 'Outbox watch is disabled by ENGRAM_AUTO_RECONNECT=0');
       const url = required(text(flags, 'url'), '--url'); const tokenFile = text(flags, 'token-file') ? resolve(text(flags, 'token-file')!) : undefined;
       if (sub === 'watch-unit') { const { watcherServiceText } = await import('../memory/outbox-watch.js'); return watcherServiceText(text(flags, 'platform') === 'linux' ? 'linux' : 'macos', { node: process.execPath, mdb: process.argv[1] ?? 'mdb', url, tokenFile: required(tokenFile ? text(flags, 'token-file') : undefined, '--token-file'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'outbox') ? { outbox: directory } : {}), ...(text(flags, 'project-dir') ? { projectDir: resolve(text(flags, 'project-dir')!) } : {}) }); }
       let token: string | undefined;
@@ -346,6 +354,60 @@ export async function execute(argv: string[]): Promise<unknown> {
   const revision = () => required(text(flags, 'revision'), '--revision');
   const search = () => ({ query: required(command === 'context' ? text(flags, 'task', sub) : sub, 'query'), mode: text(flags, 'mode', command === 'grep' ? 'grep' : 'auto') as 'grep' | 'keyword' | 'semantic' | 'hybrid' | 'auto', ...(flags.scope || flags.workspace ? { scopes: [parseScope(flags)] } : {}), regex: !!flags.regex, caseSensitive: !!flags['case-sensitive'], allowFallback: !!flags['allow-fallback'], includeHistory: !!flags['include-history'], limit: number(flags, 'limit'), cursor: text(flags, 'cursor'), kinds: text(flags, 'kinds')?.split(','), tags: text(flags, 'tags')?.split(',') });
   switch (command) {
+    case 'dashboard': {
+      const { dashboardEnabled } = await import('../dashboard/server.js');
+      if (sub === 'credential') {
+        const { createDashboardCredential, listDashboardCredentials, revokeDashboardCredential } = await import('../dashboard/credentials.js');
+        if (third === 'list') return listDashboardCredentials(root);
+        if (third === 'create') {
+          const label = required(text(flags, 'label'), '--label'), mode = text(flags, 'mode', 'admin');
+          if (mode !== 'admin' && mode !== 'view') throw new MDBError('INVALID_ARGUMENT', '--mode must be admin or view');
+          const expires = text(flags, 'expires-days'); const days = expires === undefined ? 90 : Number(expires);
+          if (!Number.isInteger(days) || days < 1 || days > 366) throw new MDBError('INVALID_ARGUMENT', '--expires-days must be between 1 and 366');
+          return createDashboardCredential(root, { label, mode, expiresAt: new Date(Date.now() + days * 86_400_000).toISOString(), ...(text(flags, 'source-ips') ? { sourceIps: text(flags, 'source-ips')!.split(',').map(item => item.trim()).filter(Boolean) } : {}) });
+        }
+        if (third === 'revoke') return { revoked: await revokeDashboardCredential(root, required(text(flags, 'id'), '--id')) };
+        throw new MDBError('INVALID_ARGUMENT', 'usage: mdb dashboard credential create --label NAME [--mode admin|view] | list | revoke --id ID');
+      }
+      if (flags['reset-password']) {
+        const { resetPassword } = await import('../dashboard/password.js');
+        const removed = await resetPassword(root);
+        return removed ? 'Dashboard password removed. The next dashboard start requires the one-time token URL to set a new password.\n' : 'No dashboard password was set.\n';
+      }
+      let enabled: boolean;
+      try { enabled = dashboardEnabled(); } catch (error) { throw new MDBError('INVALID_ARGUMENT', (error as Error).message); }
+      if (!enabled) throw new MDBError('INVALID_ARGUMENT', 'Dashboard disabled by MDB_DASHBOARD_ENABLED=false');
+      const portValue = text(flags, 'port') ?? process.env.MDB_DASHBOARD_PORT ?? '0';
+      const port = Number(portValue);
+      if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new MDBError('INVALID_ARGUMENT', '--port must be between 0 and 65535');
+      const { createDashboardServer } = await import('../dashboard/server.js');
+      const idleMinutes = Number(process.env.MDB_DASHBOARD_IDLE_MINUTES ?? '0');
+      if (!Number.isFinite(idleMinutes) || idleMinutes < 0) throw new MDBError('INVALID_ARGUMENT', 'MDB_DASHBOARD_IDLE_MINUTES must be a positive number of minutes when set.');
+      const testIdleMs = process.env.NODE_ENV === 'test' && /^\d+$/.test(process.env.MDB_DASHBOARD_TEST_IDLE_MS ?? '')
+        ? Number(process.env.MDB_DASHBOARD_TEST_IDLE_MS) : undefined;
+      const requestedHost = text(flags, 'host') ?? (flags['allow-remote'] ? '0.0.0.0' : process.env.MDB_DASHBOARD_HOST ?? '127.0.0.1');
+      let dashboard;
+      const idleMs = idleMinutes > 0 ? idleMinutes * 60_000 : testIdleMs && testIdleMs >= 1 && testIdleMs <= 60_000 ? testIdleMs : undefined;
+      try { dashboard = await createDashboardServer({ engram: client, host: requestedHost, port, clientMode: !!flags.client, ...(idleMs ? { idleMs } : {}) }); }
+      catch (error) { throw new MDBError('INVALID_ARGUMENT', (error as Error).message); }
+      const { passwordFilePath, passwordIsSet } = await import('../dashboard/password.js');
+      process.stderr.write(`Dashboard password file: ${await passwordFilePath(root)}\n`);
+      process.stderr.write(`Dashboard password: ${await passwordIsSet(root) ? 'set' : 'not set; use the printed one-time URL for first setup'}\n`);
+      const remote = dashboard.host !== '127.0.0.1' && dashboard.host !== '::1';
+      const scheme = process.env.MDB_DASHBOARD_TLS_CERT && process.env.MDB_DASHBOARD_TLS_KEY ? 'https' : 'http';
+      const urlFor = (ip: string) => `${scheme}://${ip.includes(':') ? `[${ip}]` : ip}:${dashboard.port}/#t=${dashboard.token}`;
+      const urls = dashboard.host === '0.0.0.0' || dashboard.host === '::'
+        ? [...(await import('../dashboard/server.js')).dashboardIPv4Addresses().map(urlFor), urlFor('127.0.0.1')]
+        : [urlFor(dashboard.host)];
+      const url = urls[0]!;
+      if (remote && scheme === 'http') process.stderr.write('WARNING: Remote dashboard uses plain HTTP on the network. Anyone who can reach this port and has the token gets owner-level settings access. Prefer a trusted LAN or VPN. Keep the token private.\n');
+      if (flags.open) {
+        const { spawn } = await import('node:child_process');
+        const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
+        spawn(opener, process.platform === 'win32' ? ['/c', 'start', '', url] : [url], { detached: true, stdio: 'ignore' }).on('error', () => undefined).unref();
+      }
+      return `${urls.join('\n')}\n`;
+    }
     case 'init': {
       const mcpUrl = text(flags, 'mcp-url');
       const initialized = flags.project && mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });

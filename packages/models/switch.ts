@@ -82,11 +82,11 @@ const TEST_DOCUMENT: Document = { id: 'obj_model_test', revisionId: 'rev_model_t
 const TEST_INSTRUCTION = 'Connectivity check. Reply with exactly one proposal of kind "note" titled "ok" whose body is the single word ok, citing the provided document as evidence. Use no outside information.';
 
 /** Explicit, owner-invoked only. Sends one synthetic prompt containing no vault content. */
-export async function testModel(provider: ModelProvider | undefined, config: VaultConfig, env: Record<string, string | undefined> = process.env): Promise<Record<string, unknown>> {
+export async function testModel(provider: ModelProvider | undefined, config: VaultConfig, env: Record<string, string | undefined> = process.env, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (!provider) throw new MDBError('CAPABILITY_UNAVAILABLE', `No usable model provider (${describeModel(config.model, env).reason ?? 'unconfigured'})`);
   const started = Date.now();
   try {
-    const result = await provider.generate({ job: 'model-test', documents: [TEST_DOCUMENT], goals: 'connectivity check', instruction: TEST_INSTRUCTION }, { maxOutputTokens: 200 });
+    const result = await provider.generate({ job: 'model-test', documents: [TEST_DOCUMENT], goals: 'connectivity check', instruction: TEST_INSTRUCTION }, { maxOutputTokens: 200, ...(signal ? { signal } : {}) });
     return { ok: true, provider: provider.id, locality: provider.locality ?? 'local', latencyMs: Date.now() - started, replyKind: result.kind, sentVaultContent: false, warnings: outputBudgetWarning(config.model) };
   } catch (error) { return { ok: false, provider: provider.id, locality: provider.locality ?? 'local', latencyMs: Date.now() - started, error: (error as Error).message, sentVaultContent: false }; }
 }
