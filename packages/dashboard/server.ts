@@ -264,7 +264,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
     if ((path === '/api/connectors' || path === '/api/connectors/credentials' || path === '/api/connectors/test' || path === '/api/connectors/config' || connectorCredential) && !sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'Sign in with the dashboard password to manage connectors');
     if (req.method === 'GET' && path === '/api/connectors') {
       const credentials = await listHttpCredentials(options.engram.vault), activeCredentials = credentials.some(item => !item.expiresAt || Date.parse(item.expiresAt) > Date.now()), configuredAuth = [process.env.MDB_MCP_OAUTH_ISSUER && 'OAuth resource validation', process.env.MDB_MCP_HTTP_TOKEN && 'legacy shared token', activeCredentials && 'scoped MCP credentials'].filter(Boolean);
-      return send(res, 200, { connectors: await connectorConfig(root), credentials, authMode: configuredAuth.join(' + ') || 'No MCP HTTP authentication configured in this process' });
+      return send(res, 200, { connectors: await connectorConfig(root), credentials, remoteAdminEnabled, authMode: configuredAuth.join(' + ') || 'No MCP HTTP authentication configured in this process' });
     }
     if (req.method === 'GET' && path === '/api/connectors/credentials') return send(res, 200, await listHttpCredentials(options.engram.vault));
     if (req.method === 'POST' && (path === '/api/connectors/config' || path === '/api/connectors/test' || path === '/api/connectors/credentials' || connectorCredential)) {
@@ -311,7 +311,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       const section = (statusCache.value as Record<string, unknown>)[key];
       return section === undefined ? fail(res, 404, 'NOT_FOUND', 'Unknown status section') : send(res, 200, section);
     }
-    if (req.method === 'GET' && path === '/api/settings') return send(res, 200, { ...await readSettings(options.engram), security: { passwordSet }, server: { host, port: addressPort(server), restartRequired: true, dashboardEnabled: true, dashboardEnvOverride: !!process.env.MDB_DASHBOARD_ENABLED?.trim() } });
+    if (req.method === 'GET' && path === '/api/settings') return send(res, 200, { ...await readSettings(options.engram), security: { passwordSet }, server: { host, port: addressPort(server), restartRequired: true, dashboardEnabled: true, remoteAdminEnabled, dashboardEnvOverride: !!process.env.MDB_DASHBOARD_ENABLED?.trim() } });
     if (req.method === 'GET' && path === '/api/url-notes/settings') {
       const enabled = await readUrlNotesEnabled(root);
       const readiness = await Promise.all((['claude', 'codex'] as const).map(async agent => {

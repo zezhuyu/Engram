@@ -28,7 +28,12 @@ test('chat view model preserves message roles, text, order, citations, and empty
   assert.match(script, /textContent=String\(text\)/, 'message text is inserted through textContent');
   assert.match(script, /node\('p','chat-text',turn\.text\)/);
   assert.match(script, /item\.append\(chip\)/, 'citations are nested under the assistant message');
-  assert.match(script, /chat-empty','Ask a question to search authorized knowledge/);
+  assert.match(script, /Ask a question to search authorized knowledge/);
+  assert.match(script, /What do my notes say about/);
+  assert.match(script, /sourceOptions\.append\(option\)/);
+  assert.match(script, /composer\.append\(urlOffers,drop,toolbar,input,reason\)/);
+  assert.doesNotMatch(script, /composer\.append\(urlOffers,drop,fileChip/);
+  assert.doesNotMatch(script, /const composer=panel\('Message'\)/);
   assert.match(script, /newestChatScrollTop\(feed\.clientHeight,feed\.scrollHeight/);
   const css = assets['/assets/app.css']!.body;
   assert.match(css, /\.chat-conversation\{min-height:0;overflow:hidden\}/);

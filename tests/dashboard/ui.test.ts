@@ -55,6 +55,16 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /claude mcp add --transport http engram/);
   assert.match(assets['/assets/app.js']!.body, /Allow private address \(unsafe\)/);
   assert.match(assets['/assets/app.js']!.body, /Remote dashboard credentials/);
+  assert.match(assets['/assets/app.js']!.body, /No credentials yet/);
+  assert.match(assets['/assets/app.js']!.body, /Access level/);
+  assert.ok(assets['/assets/app.js']!.body.includes('Remote administration: '));
+  assert.ok(assets['/assets/app.js']!.body.includes('aria-haspopup'));
+  assert.doesNotMatch(assets['/assets/app.js']!.body, /const composer=panel\('Message'\)/);
+  assert.ok(assets['/assets/app.css']!.body.includes('.file-chip[hidden]{display:none!important}'));
+  assert.ok(assets['/assets/app.css']!.body.includes('.chat-composer.is-dragging .chat-drop-hint{display:block}'));
+  assert.ok(assets['/assets/app.css']!.body.includes('input[type=date],select{appearance:none'));
+  assert.ok(assets['/assets/app.css']!.body.includes('.credentials-form,.proposal-fields{display:grid;grid-template-columns:repeat(2'));
+  assert.ok(assets['/assets/app.css']!.body.includes('.chat-model input[type=checkbox]::before'));
   assert.match(assets['/assets/app.js']!.body, /Client settings/);
   assert.match(assets['/assets/app.js']!.body, /X-Engram-Reauth-Password/);
   assert.match(assets['/']!.body!, /ONE-TIME CREDENTIAL/);
@@ -118,7 +128,9 @@ test('served dashboard assets parse and browser helpers preserve URL and line be
   const css = await fetch(`http://127.0.0.1:${dashboard.port}/assets/app.css`);
   assert.equal(css.status, 200);
   assert.match(css.headers.get('content-type') || '', /text\/css/);
-  assert.match(await css.text(), /prefers-color-scheme/);
+  const styles = await css.text();
+  assert.match(styles, /prefers-color-scheme/);
+  assert.equal((styles.match(/{/g) || []).length, (styles.match(/}/g) || []).length, 'served CSS rules are balanced');
   assert.equal(extractHttpUrl('Look https://example.com/a). and javascript:alert(1)'), 'https://example.com/a');
   assert.equal(extractHttpUrl('javascript://example.com is not a web URL'), '');
   const points = ['first point', 'second point'];
