@@ -9,15 +9,23 @@ export function equalToken(expected: string, received: string | undefined): bool
   return a.length === b.length && timingSafeEqual(a, b);
 }
 export function allowedHost(host: string | undefined, port: number): boolean {
-  return host === `127.0.0.1:${port}` || host === `localhost:${port}`;
+  const parsed = parseHostPort(host);
+  return !!parsed && parsed.port === port && ['127.0.0.1', 'localhost', '::1'].includes(parsed.name);
 }
-function hostName(value: string): string {
-  const candidate = value.startsWith('[') ? value.slice(1, value.indexOf(']')) : value.replace(/:\d+$/, '');
-  return candidate.toLowerCase();
+function parseHostPort(value: string | undefined): { name: string; port: number } | undefined {
+  if (!value || /[\s\u0000-\u001f\u007f,]/.test(value)) return undefined;
+  const ipv6 = /^\[([0-9a-f:.]+)\]:(\d{1,5})$/i.exec(value);
+  const ordinary = /^([^:[\]]+):(\d{1,5})$/.exec(value);
+  const match = ipv6 ?? ordinary;
+  if (!match) return undefined;
+  const port = Number(match[2]);
+  if (port < 1 || port > 65535) return undefined;
+  return { name: match[1]!.toLowerCase(), port };
 }
 export function allowedRemoteHost(host: string | undefined, port: number, bindHost: string, machineName = hostname()): boolean {
-  if (!host) return false;
-  const name = hostName(host);
+  const parsed = parseHostPort(host);
+  if (!parsed || parsed.port !== port) return false;
+  const name = parsed.name;
   if (bindHost === '0.0.0.0' || bindHost === '::') {
     if (name === 'localhost' || name === '127.0.0.1' || name === '::1' || name === machineName.toLowerCase()) return true;
     return isIP(name) !== 0;

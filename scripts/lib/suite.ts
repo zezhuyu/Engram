@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parseStrictJson } from './strict-json.js';
 import { currentSourceEvidence, type SourceEvidence } from './source-evidence.js';
 
 /** Verification INPUT fixtures (not generated reports) live in the tracked fixtures/inputs/ tree; verification/ itself is generated output and is not tracked. */
@@ -56,7 +57,7 @@ export interface Gap { item: string; status: 'NOT_RUN' | 'UNSUPPORTED' | 'FAIL';
 export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; allowedSkips?: string[]; env?: Record<string, string>; concurrency?: number }
 export interface TestResult { name: string; status: Status; /** for a failed test: the TAP diagnostic block (assertion message, expected/actual, stack head), so a CI log shows why it failed */ detail?: string }
 export interface SuiteReport {
-  suite: string; git_commit: string; status: Status; exitCode: number | null; run_at: string; command: string; durationMs: number;
+  suite: string; git_commit: string; treeState: string; status: Status; exitCode: number | null; run_at: string; command: string; durationMs: number;
   evidenceSource: SourceEvidence;
   environment: Record<string, unknown>; counts: { pass: number; fail: number; skipped: number; total: number };
   tests: TestResult[]; cases: number; caseFailures: unknown[]; seeds: number[]; invariantAssertions: number | null;
@@ -69,7 +70,7 @@ const sh = (cmd: string, args: string[] = []): string => { const r = spawnSync(c
 /** Read a suite report and hydrate its source evidence only from a hash-bound sibling manifest. Old reports with inline file hashes remain readable. */
 export async function loadSuiteReport(reportPath: string): Promise<SuiteReport | undefined> {
   let parsed: SerializedSuiteReport;
-  try { parsed = JSON.parse(await fs.readFile(reportPath, 'utf8')) as SerializedSuiteReport; } catch { return undefined; }
+  try { parsed = parseStrictJson(await fs.readFile(reportPath, 'utf8'), reportPath) as SerializedSuiteReport; } catch { return undefined; }
   const source = parsed.evidenceSource;
   if ('files' in source && source.files && typeof source.files === 'object') return parsed as SuiteReport;
   if (!('manifestPath' in source)) return undefined;
@@ -77,7 +78,7 @@ export async function loadSuiteReport(reportPath: string): Promise<SuiteReport |
   try {
     const bytes = await fs.readFile(path.join(path.dirname(reportPath), source.manifestPath));
     if (createHash('sha256').update(bytes).digest('hex') !== source.manifestSha256) return undefined;
-    const manifest = JSON.parse(bytes.toString('utf8')) as SourceEvidence;
+    const manifest = parseStrictJson(bytes.toString('utf8'), `${reportPath} source manifest`) as SourceEvidence;
     if (manifest.algorithm !== source.algorithm || manifest.fingerprint !== source.fingerprint || !manifest.files || Object.keys(manifest.files).length !== source.fileCount) return undefined;
     return { ...parsed, evidenceSource: manifest } as SuiteReport;
   } catch { return undefined; }
@@ -176,7 +177,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = process.env.MDB_VERIFI
     if (m[1] && !skipped && detailed++ < MAX_DETAILS) { const block: string[] = []; for (let j = i + 1; j < outLines.length && /^\s/.test(outLines[j]!) && block.length < 60; j++) { if (outLines[j]!.trim() === '...') break; block.push(outLines[j]!.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')); } detail = scrubDiagnostics(block.join('\n'), { ...process.env, ...spec.env }).slice(0, 6000); }
     tests.push({ name: m[2]!, status: skipped ? 'SKIPPED' : m[1] ? 'FAIL' : 'PASS', ...(detail ? { detail } : {}) });
   }
-  const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
+  const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => parseStrictJson(l, `${casesFile} line`) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
   const counts = { pass: tests.filter(t => t.status === 'PASS').length, fail: tests.filter(t => t.status === 'FAIL').length, skipped: tests.filter(t => t.status === 'SKIPPED').length, total: tests.length };
   const unapprovedSkips = tests.filter(t => t.status === 'SKIPPED' && !spec.allowedSkips?.some(s => t.name.includes(s)));
   let status: Status = counts.total === 0 ? 'NOT_RUN' : counts.fail > 0 || run.status !== 0 ? 'FAIL' : unapprovedSkips.length ? 'SKIPPED' : 'PASS';
@@ -184,7 +185,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = process.env.MDB_VERIFI
   const command = `node ${args.join(' ')}`;
   const evidenceSource = await currentSourceEvidence();
   const report: SuiteReport = {
-    suite: spec.name, git_commit: gitCommit(), status, exitCode: run.status, run_at: new Date().toISOString(), command, durationMs, evidenceSource, environment: { ...environment(), testTimeoutMs: perTestTimeoutMs, suiteTimeoutMs, timedOut: run.timedOut, terminatingSignal: run.signal }, counts, tests,
+    suite: spec.name, git_commit: gitCommit(), treeState: evidenceSource.treeState.state, status, exitCode: run.status, run_at: new Date().toISOString(), command, durationMs, evidenceSource, environment: { ...environment(), testTimeoutMs: perTestTimeoutMs, suiteTimeoutMs, timedOut: run.timedOut, terminatingSignal: run.signal }, counts, tests,
     cases: caseLines.length, caseFailures, seeds: [...new Set(caseLines.map(c => c.seed).filter((s): s is number => typeof s === 'number'))], invariantAssertions: null,
     gaps: spec.gaps, limitations: spec.limitations, repro: `npm run build && ${command}`, caseDetails: caseLines.map(c => ({ name: `${c.suite}/${c.name}`, status: c.status, ...(c.detail ? { detail: c.detail } : {}) }))
   };

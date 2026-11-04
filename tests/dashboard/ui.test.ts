@@ -101,6 +101,115 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.css']!.body, /\.nav-list::after\{content:"";position:sticky/);
 });
 
+class MockElement {
+  children: MockElement[] = [];
+  attributes: Record<string, string> = {};
+  style: Record<string, string> = {};
+  className = '';
+  textContent = '';
+  value = '';
+  type = '';
+  hidden = false;
+  rows = 0;
+  onclick?: () => unknown;
+  classList = { add: (...names: string[]) => { this.className += ` ${names.join(' ')}`; } };
+  append(...items: MockElement[]) { this.children.push(...items); }
+  replaceChildren(...items: MockElement[]) { this.children = [...items]; }
+  setAttribute(name: string, value: string) { this.attributes[name] = value; }
+  addEventListener() {}
+  remove() {}
+  querySelector(selector: string): MockElement | null { return this.walk().find(item => selector === '.edit-conflict' ? item.className.split(' ').includes('edit-conflict') : false) ?? null; }
+  walk(): MockElement[] { return [this, ...this.children.flatMap(child => child.walk())]; }
+}
+
+function editorHarness(apiHandler: (path: string, init?: any) => Promise<any>) {
+  const content = new MockElement(), calls: Array<{ path: string; init?: any }> = [], notices: string[] = [], routes: string[] = [];
+  const context = {
+    document: { createElement: () => new MockElement() },
+    crypto: { randomUUID: (() => { let next = 0; return () => `key-${++next}`; })() },
+    node: (tag: string, className: string, text?: string) => { const element = new MockElement(); element.className = className; element.textContent = text ?? ''; return element; },
+    panel: (title: string) => { const element = new MockElement(); element.textContent = title; return element; },
+    pageHeader: (title: string) => { const element = new MockElement(); element.textContent = title; return element; },
+    api: async (path: string, init?: any) => { calls.push({ path, init }); return apiHandler(path, init); },
+    notify: (message: string) => notices.push(message), go: (route: string) => routes.push(route), showDocument: () => {}, content,
+    encodeURIComponent, JSON,
+  };
+  const app = assets['/assets/app.js']!.body;
+  const start = app.indexOf('function editDocument(current){'), end = app.indexOf('\nasync function workspacesPage()', start);
+  assert.ok(start >= 0 && end > start, 'editor function is available in served app');
+  const editDocument = vm.runInNewContext(`${app.slice(start, end)}; editDocument`, context) as (current?: any) => void;
+  return { editDocument, content, calls, notices, routes };
+}
+function field(root: MockElement, label: string): MockElement {
+  const result = root.walk().find(item => item.attributes['aria-label'] === label);
+  assert.ok(result, `field ${label} exists`);
+  return result;
+}
+function button(root: MockElement, text: string): MockElement {
+  const result = root.walk().find(item => item.textContent === text && item.onclick);
+  assert.ok(result, `button ${text} exists`);
+  return result;
+}
+
+ test('dashboard editor preserves revision preconditions across create, conflict, reapply, reload, delete, and restore', async () => {
+  const current = { id: 'doc-1', revisionId: 'rev-current', revisionNumber: 1, kind: 'note', title: 'Current title', body: 'Current body', tags: [], evidence: [], scope: { type: 'global', area: 'wiki' } };
+  let latest = { document: { ...current, revisionId: 'rev-latest', revisionNumber: 2, title: 'Latest title', body: 'Latest body' } };
+  const harness = editorHarness(async (path, init) => {
+    if (init?.method === 'PATCH' && init.body.includes('rev-current')) throw Object.assign(new Error('conflict'), { status: 409 });
+    if (init?.method === 'PATCH') return { document: {} };
+    if (path.endsWith('/doc-1')) return latest;
+    return { document: {} };
+  });
+  harness.editDocument(current);
+  const revision = field(harness.content, 'Expected revision');
+  assert.equal(revision.type, 'hidden'); assert.equal(revision.value, current.revisionId);
+  field(harness.content, 'Markdown body').value = 'My draft';
+  await button(harness.content, 'Save').onclick?.();
+  const conflict = harness.content.querySelector('.edit-conflict');
+  assert.ok(conflict); assert.match(conflict.walk().map(item => item.textContent).join(' '), /Latest body/);
+  assert.equal(field(harness.content, 'Markdown body').value, 'My draft', 'conflict retains the unsaved draft');
+  assert.equal(button(conflict, 'Reload current').textContent, 'Reload current');
+  assert.equal(button(conflict, 'Back').textContent, 'Back');
+  await button(conflict, 'Reapply my draft on current version').onclick?.();
+  const reapply = harness.calls.find(call => call.init?.method === 'PATCH' && call.init.body.includes('rev-latest'));
+  assert.ok(reapply, 'reapply sends the latest expected revision');
+  assert.equal(JSON.parse(reapply.init!.body).body, 'My draft');
+  assert.deepEqual(harness.routes, ['knowledge']); assert.equal(harness.notices.at(-1), 'Draft reapplied as a new revision');
+
+  const reloadHarness = editorHarness(async (path, init) => { if (init?.method === 'PATCH') throw Object.assign(new Error('conflict'), { status: 409 }); return path.endsWith('/doc-1') ? latest : { document: {} }; });
+  reloadHarness.editDocument(current); field(reloadHarness.content, 'Markdown body').value = 'discard by reload';
+  await button(reloadHarness.content, 'Save').onclick?.();
+  await button(reloadHarness.content.querySelector('.edit-conflict')!, 'Reload current').onclick?.();
+  assert.equal(field(reloadHarness.content, 'Expected revision').value, 'rev-latest');
+  assert.equal(field(reloadHarness.content, 'Markdown body').value, 'Latest body');
+
+  const createHarness = editorHarness(async (_path, init) => ({ document: JSON.parse(init?.body ?? '{}') }));
+  createHarness.editDocument(); await button(createHarness.content, 'Save').onclick?.();
+  const createCall = createHarness.calls[0]!;
+  assert.equal(createCall.init?.method, 'POST'); assert.equal('expectedRevisionId' in JSON.parse(createCall.init!.body), false);
+
+  const app = assets['/assets/app.js']!.body;
+  const calls: Array<{ path: string; init?: any }> = [];
+  const viewerContext = {
+    document: { createElement: () => new MockElement() }, crypto: { randomUUID: () => 'viewer-key' },
+    node: (tag: string, className: string, text?: string) => { const element = new MockElement(); element.className = className; element.textContent = text ?? ''; return element; },
+    pageHeader: (title: string) => { const element = new MockElement(); element.textContent = title; return element; },
+    dataTable: () => new MockElement(), encodeURIComponent, window: { confirm: () => true }, content: new MockElement(),
+    notify: () => {}, api: async (path: string, init?: any) => { calls.push({ path, init }); if (init) return {}; if (path.endsWith('/history')) return [{ revisionId: 'rev-old-revision', updatedAt: '', status: 'active' }]; if (path.endsWith('/links')) return { links: [], backlinks: [] }; return { document: current }; },
+  };
+  const showStart = app.indexOf('async function showDocument(id){'), showEnd = app.indexOf('\nfunction editDocument(current){', showStart);
+  assert.ok(showStart >= 0 && showEnd > showStart, 'document view function is available in served app');
+  const showDocument = vm.runInNewContext(`${app.slice(showStart, showEnd)}; showDocument`, viewerContext) as (id: string) => Promise<void>;
+  await showDocument(current.id);
+  await button(viewerContext.content as MockElement, 'Delete').onclick?.();
+  const deletion = calls.find(call => call.init?.method === 'DELETE');
+  assert.equal(JSON.parse(deletion!.init!.body).expectedRevisionId, current.revisionId);
+  await button(viewerContext.content as MockElement, 'Restore rev-old-revi').onclick?.();
+  const restoration = calls.find(call => call.init?.method === 'POST' && call.path.endsWith('/restore'));
+  assert.equal(JSON.parse(restoration!.init!.body).expectedRevisionId, current.revisionId);
+  assert.equal(JSON.parse(restoration!.init!.body).revisionId, 'rev-old-revision');
+});
+
 test('dashboard semantic status colors keep readable contrast in light and dark themes', () => {
   const ratio = (foreground: string, background: string) => {
     const luminance = (hex: string) => {

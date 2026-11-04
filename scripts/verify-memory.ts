@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
+import { parseStrictJson } from './lib/strict-json.js';
 import { runSuite, summarize } from './lib/suite.js';
-const remote = await fs.readFile('verification/memory/remote-real-host-evaluation.json', 'utf8').then(JSON.parse).catch(() => undefined) as { status?: string; testResult?: { passed?: number; failed?: number; durationMs?: number }; limitations?: string[] } | undefined;
+const remote = await fs.readFile('verification/memory/remote-real-host-evaluation.json', 'utf8').then(text => parseStrictJson(text, 'remote host evaluation')).catch(() => undefined) as { status?: string; testResult?: { passed?: number; failed?: number; durationMs?: number }; limitations?: string[] } | undefined;
 const remoteEvidence = remote ? ` Recent opt-in live run: ${remote.status}, ${remote.testResult?.passed} passed/${remote.testResult?.failed} failed in ${remote.testResult?.durationMs} ms. It used two actual CLIs and credentials through a stopped/restarted HTTP MCP server, including buffered replay, idempotency, SessionEnd and model handoff; limitation: clients/server were on one physical machine, so cross-machine transport remains NOT_RUN.` : ' The opt-in two-host outage/restart test has not been run.';
 summarize(await runSuite({
   name: 'memory', title: 'Passive memory integration and secondary recall (M1)',

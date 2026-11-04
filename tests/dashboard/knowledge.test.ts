@@ -35,6 +35,35 @@ test('dashboard knowledge CRUD preserves revisions, conflicts, tombstones, resto
   assert.equal(audit.includes('original inert text'), false); assert.match(audit, /knowledge\.create/);
 });
 
+test('dashboard revision preconditions reject missing, empty, and stale values without writing revisions', async t => {
+  const v = await disposableVault(), dashboard = await createDashboardServer({ engram: v.engram, idleMs: 60_000 });
+  t.after(async () => { await dashboard.close(); await v.cleanup(); });
+  const created = await call(dashboard.port, dashboard.token, '/api/documents', 'POST', { scope: { type: 'global', area: 'wiki' }, kind: 'note', title: 'Precondition test', body: 'original' });
+  const doc = created.body.document;
+  const cases = [
+    { label: 'missing', expected: undefined, status: 400 },
+    { label: 'empty', expected: '', status: 400 },
+    { label: 'stale', expected: 'rev_stale_precondition', status: 409 },
+  ];
+  for (const operation of ['PATCH', 'DELETE', 'RESTORE'] as const) {
+    for (const scenario of cases) {
+      const historyLength = (await v.engram.history(doc.id)).length;
+      const expected = scenario.expected === undefined ? {} : { expectedRevisionId: scenario.expected };
+      const body = operation === 'PATCH' ? { ...expected, title: 'must not replace', body: 'must not replace' }
+        : operation === 'RESTORE' ? { ...expected, revisionId: doc.revisionId }
+          : expected;
+      const path = operation === 'RESTORE' ? `/api/documents/${doc.id}/restore` : `/api/documents/${doc.id}`;
+      const response = await call(dashboard.port, dashboard.token, path, operation === 'RESTORE' ? 'POST' : operation, body);
+      assert.equal(response.status, scenario.status, `${operation} ${scenario.label}: ${JSON.stringify(response.body)}`);
+      if (scenario.status === 400) assert.equal(response.body.error.code, 'INVALID_INPUT');
+      assert.equal((await v.engram.history(doc.id)).length, historyLength, `${operation} ${scenario.label} must not add a revision`);
+      const current = await v.engram.get(doc.id);
+      assert.equal(current.body, 'original', `${operation} ${scenario.label} must preserve body`);
+      assert.equal(current.status, 'active', `${operation} ${scenario.label} must preserve lifecycle`);
+    }
+  }
+});
+
 test('dashboard knowledge hides unauthorized documents and applies the document body limit', async t => {
   const owner = await disposableVault();
   t.after(async () => { await owner.cleanup(); });

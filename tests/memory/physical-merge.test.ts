@@ -28,6 +28,17 @@ test('the physical-host acceptance rule passes only genuine multi-machine eviden
   recordCase({ suite: 'memory', name: 'physical-host-acceptance-rule', status: 'PASS' });
 });
 
+test('physical evidence merge rejects duplicate JSON keys in host reports', async t => {
+  const dir = await tempDir(t, 'physical-merge-duplicate');
+  const clientFile = path.join(dir, 'client.json');
+  const serverFile = path.join(dir, 'server.json');
+  await fs.writeFile(clientFile, '{"role":"client","role":"server"}');
+  await fs.writeFile(serverFile, JSON.stringify(server('bbb', ['marker'])));
+  const run = spawnSync(process.execPath, ['scripts/xhost/physical.mjs', 'merge', clientFile, serverFile, '--out', path.join(dir, 'out.json')], { encoding: 'utf8' });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /duplicate JSON key|client\.json/);
+});
+
 test('tailnet mode: TLS is accepted as NOT_APPLICABLE only with the tailscale label and a tailnet client address, and the report says TLS was not tested', async t => {
   const m = ['PHYS-r1-online-1'];
   const tailnet = (id: string, detail: Record<string, unknown>) => { const c = client(id, m); c.steps = c.steps.map(s => s.id === 'tls-certificate-verified' ? { ...s, status: 'NOT_APPLICABLE', detail } : s); return c; };

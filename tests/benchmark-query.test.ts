@@ -14,7 +14,9 @@ test('query benchmark evidence binds the exact source set consumed by release po
   assert.equal(run.status, 0, run.stderr || run.stdout);
   const report = JSON.parse(await readFile(path.join(output, '10.json'), 'utf8')) as {
     sourceBinding?: { fingerprint?: string; workingTreeSourceFingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string> };
+    treeState?: string;
   };
+  assert.ok(['clean', 'dirty', 'no-git'].includes(report.treeState ?? ''), 'release-read benchmark reports must declare source tree state');
   assert.ok(report.sourceBinding);
   assert.equal(report.sourceBinding.fingerprint, report.sourceBinding.workingTreeSourceFingerprint);
   assert.ok((report.sourceBinding.fullSourceFileCount ?? 0) > 100);

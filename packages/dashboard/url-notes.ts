@@ -7,8 +7,10 @@ import path from 'node:path';
 import { isIP } from 'node:net';
 import { findExecutable } from '../models/cli.js';
 import { safePath } from '../storage-local/index.js';
+import { parseStrictJson } from '../../scripts/lib/strict-json.js';
 
 export type UrlNoteAgent = 'claude' | 'codex';
+export type UrlNoteResolver = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 export interface UrlNoteDraft { title: string; summary: string; keyPoints: string[]; quotes: string[] }
 export interface UrlNoteJob { id: string; state: 'running' | 'complete' | 'failed' | 'cancelled'; agent: UrlNoteAgent; url: string; draft?: UrlNoteDraft; error?: string; retrievedAt: string }
 const MAX_URL = 2048, MAX_OUTPUT = 64 * 1024, MAX_TEXT = 16_000, TIMEOUT = 120_000;
@@ -18,14 +20,14 @@ function privateIp(address: string): boolean {
   if (isIP(address) === 6) { const s = address.toLowerCase(); return s === '::' || s === '::1' || s.startsWith('fc') || s.startsWith('fd') || s.startsWith('fe8') || s.startsWith('fe9') || s.startsWith('fea') || s.startsWith('feb') || s.startsWith('ff') || s.startsWith('::ffff:') || !/^[23]/.test(s) || s.startsWith('2001:db8:'); }
   return true;
 }
-export async function validateUrlNoteUrl(input: unknown): Promise<URL> {
+export async function validateUrlNoteUrl(input: unknown, resolveHost: UrlNoteResolver = (hostname) => lookup(hostname, { all: true, verbatim: true })): Promise<URL> {
   if (typeof input !== 'string' || input.length > MAX_URL || !input.trim()) throw new Error('URL must be a non-empty http(s) URL under 2048 characters');
   let url: URL; try { url = new URL(input); } catch { throw new Error('Invalid URL'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !url.hostname || url.hostname.endsWith('.localhost') || url.hostname === 'localhost') throw new Error('Only public http(s) URLs without credentials are allowed');
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
   if (isIP(hostname)) { if (privateIp(hostname) || hostname.toLowerCase().startsWith('::ffff:')) throw new Error('Private, loopback, link-local and metadata addresses are not allowed'); return url; }
   let dnsTimer: NodeJS.Timeout | undefined;
-  try { const records = await Promise.race([lookup(hostname, { all: true, verbatim: true }), new Promise<never>((_, reject) => { dnsTimer = setTimeout(() => reject(new Error('URL host lookup timed out')), 3000); })]); if (!records.length || records.some(record => privateIp(record.address))) throw new Error('URL host resolves to a private or non-routable address'); }
+  try { const records = await Promise.race([resolveHost(hostname), new Promise<never>((_, reject) => { dnsTimer = setTimeout(() => reject(new Error('URL host lookup timed out')), 3000); })]); if (!records.length || records.some(record => privateIp(record.address))) throw new Error('URL host resolves to a private or non-routable address'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code) throw new Error('URL host could not be resolved'); throw error; }
   finally { clearTimeout(dnsTimer); }
   return url;
@@ -77,5 +79,5 @@ export async function runUrlNoteAgent(agent: UrlNoteAgent, url: string, env: Nod
 export const urlAuditHost = (url: URL) => ({ host: url.hostname, pathHash: createHash('sha256').update(url.pathname).digest('hex') });
 export const newUrlNoteJobId = () => randomBytes(16).toString('hex');
 export function validUrlNoteAgent(value: unknown): value is UrlNoteAgent { return value === 'claude' || value === 'codex'; }
-export async function readUrlNotesEnabled(root: string): Promise<boolean> { try { return JSON.parse(await readFile(await safePath(root,'.mdb/dashboard/url-notes.json'),'utf8')).enabled === true; } catch { return false; } }
+export async function readUrlNotesEnabled(root: string): Promise<boolean> { try { return (parseStrictJson(await readFile(await safePath(root,'.mdb/dashboard/url-notes.json'),'utf8'), 'URL note settings') as { enabled?: boolean }).enabled === true; } catch { return false; } }
 export async function setUrlNotesEnabled(root: string, enabled: boolean): Promise<void> { const file = await safePath(root,'.mdb/dashboard/url-notes.json'); await mkdir(path.dirname(file), {recursive:true,mode:0o700}); const metadata=path.join(root,'.mdb'), directory=path.dirname(file), metadataStat=await lstat(metadata), directoryStat=await lstat(directory); if(!metadataStat.isDirectory()||metadataStat.isSymbolicLink()||!directoryStat.isDirectory()||directoryStat.isSymbolicLink()) throw new Error('Unsafe URL notes settings path'); await chmod(directory,0o700); await writeFile(file, JSON.stringify({enabled})+'\n', {mode:0o600}); }

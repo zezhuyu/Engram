@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
+import { createServer as createHttpsServer } from 'node:https';
+import path from 'node:path';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
-import { validateConnectorTestUrl, validateConnectorRedirect, saveConnectorConfig, connectorConfig, testConnectorConnection } from '../../packages/dashboard/connectors.js';
+import { validateConnectorTestUrl, validateConnectorRedirect, saveConnectorConfig, connectorConfig, testConnectorConnection, resolveConnectorAddress } from '../../packages/dashboard/connectors.js';
 import { assets } from '../../packages/dashboard/ui/view-model.js';
 import { resolveHttpActor } from '../../packages/mcp/credentials.js';
 import { logoAssets } from '../../packages/dashboard/ui/logo-assets.js';
@@ -63,6 +65,28 @@ test('connection URL policy rejects HTTP/private and cross-host redirects', asyn
   assert.throws(() => validateConnectorTestUrl('https://memory.example.com?token=secret'), /HTTPS URL/);
   assert.throws(() => validateConnectorRedirect(new URL('https://memory.example.com/version'), 'https://attacker.example/collect'), /another host/);
   await assert.rejects(() => testConnectorConnection('https://localhost/version'), /Private and loopback/);
+});
+
+test('connector DNS rebinding uses one validated answer and pins that address', async () => {
+  let calls = 0;
+  const resolveHost = async () => { calls++; return calls === 1 ? [{ address: '8.8.8.8', family: 4 }] : [{ address: '127.0.0.1', family: 4 }]; };
+  const pinned = await resolveConnectorAddress(new URL('https://memory.example.com/version'), false, resolveHost);
+  assert.deepEqual(pinned, { address: '8.8.8.8', family: 4 });
+  assert.equal(calls, 1, 'the connector must not perform a second DNS lookup after validation');
+  await assert.rejects(() => resolveConnectorAddress(new URL('https://memory.example.com/version'), false, async () => [{ address: '8.8.8.8', family: 4 }, { address: '127.0.0.1', family: 4 }]), /Private and loopback/);
+});
+
+test('connector connection pins the resolver address and refuses a local redirect to a private host', async t => {
+  const cert = await fs.readFile(path.join(process.cwd(), 'tests/dashboard/test-cert.pem'));
+  const key = await fs.readFile(path.join(process.cwd(), 'tests/dashboard/test-key.pem'));
+  const server = createHttpsServer({ cert, key }, (_request, response) => { response.writeHead(302, { Location: 'https://127.0.0.1/private' }); response.end(); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  let resolutions = 0;
+  const resolveHost = async () => { resolutions++; return [{ address: '127.0.0.1', family: 4 }]; };
+  await assert.rejects(() => testConnectorConnection(`https://memory.example.com:${address.port}/version`, true, resolveHost, {}, { ca: cert, allowNonstandardPort: true }), /redirect to another host/);
+  assert.equal(resolutions, 1, 'the TLS request uses the validated address without a second DNS lookup');
 });
 
 test('dashboard serves only fixed logo bytes with image types and immutable cache headers', async t => {

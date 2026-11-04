@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { parseStrictJson } from './lib/strict-json.js';
 import { currentSourceEvidence } from './lib/source-evidence.js';
 import { gitCommit, loadSuiteReport } from './lib/suite.js';
 import { MANDATORY_SUITE_NAMES, inventoryDrift, type InventoryReport } from './lib/suite-inventory.js';
@@ -6,7 +7,7 @@ import { sourceEvidenceMatches, suiteReportConsistent, type SuiteInventory } fro
 
 type InventoryFile = { version: number; suites: Record<string, SuiteInventory> };
 process.env.GIT_OPTIONAL_LOCKS = '0';
-const inventory = JSON.parse(await fs.readFile('scripts/lib/suite-inventory.json', 'utf8')) as InventoryFile;
+const inventory = parseStrictJson(await fs.readFile('scripts/lib/suite-inventory.json', 'utf8'), 'suite inventory') as InventoryFile;
 const source = await currentSourceEvidence();
 const provenance = { fingerprint: source.fingerprint, commit: gitCommit() };
 const errors: string[] = [];

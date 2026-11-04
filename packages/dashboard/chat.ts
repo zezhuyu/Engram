@@ -76,10 +76,21 @@ export function validScope(value: unknown): Scope {
   throw new MDBError('INVALID_INPUT', 'Invalid source scope');
 }
 
+const CHAT_STOPWORDS = new Set('a an and are as at be by can do for from has how i in is it me my of on or our say tell that the their them these this to use was we what when where which who why with you your'.split(' '));
+export function chatTerms(text: string): string[] { return [...new Set(text.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [])].filter(term => !CHAT_STOPWORDS.has(term)); }
+export function isSmallTalk(question: string): boolean { const normalized = question.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').replace(/\s+/g, ' ').trim(); return /^(hi|hello|hey|sup|thanks|thank you|help|help please|who are you|what can you do|what can i do|what do you do|what are you|good morning|good afternoon|good evening)$/.test(normalized); }
+export function smallTalkAnswer(question: string, docs: Document[]) {
+  const pages = docs.filter(doc => doc.kind === 'wiki_page'), examples = pages.slice(0, 3).map(doc => `What does “${doc.title}” say about …?`);
+  const answer = `Engram assistant, not from your wiki. I can answer questions from your wiki with citations, add sources by attaching or pasting a file or submitting a URL, and optionally synthesize answers with a configured model. Your vault has ${docs.length} document${docs.length === 1 ? '' : 's'} across ${pages.length} wiki page${pages.length === 1 ? '' : 's'}.${examples.length ? ` Try: ${examples.join(' · ')}` : ''}`;
+  return { kind: 'small_talk' as const, answer, citations: [], examples };
+}
+function matchedPassage(body: string, terms: string[], max = 700): string { const lower = body.toLocaleLowerCase(); const at = terms.map(term => lower.indexOf(term)).filter(index => index >= 0).sort((a,b) => a-b)[0] ?? 0; let start = Math.max(0, at - Math.floor(max / 3)); if (start > 0) { const boundary = body.indexOf(' ', start); if (boundary >= 0 && boundary - start < 80) start = boundary + 1; } const end = Math.min(body.length, start + max); return `${start ? '…' : ''}${body.slice(start,end).trim()}${end < body.length ? '…' : ''}`; }
 export function retrievalAnswer(question: string, docs: Document[]) {
-  const citations = docs.map(doc => ({ uri: doc.uri, revisionId: doc.revisionId }));
-  const answer = docs.length ? docs.map((doc, index) => `${doc.title}: ${doc.body.slice(0, 700)} [${index + 1}]`).join('\n\n') : 'No authorized knowledge matched this question.';
-  return { answer, citations };
+  const terms = chatTerms(question), ranked = docs.map(doc => { const haystack = `${doc.title} ${doc.body}`.normalize('NFKC').toLocaleLowerCase(); const score = terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0); return { doc, score }; }).sort((a,b) => b.score-a.score);
+  const top = ranked[0]?.score ?? 0, relevant = terms.length ? ranked.filter(item => item.score > 0 && item.score >= Math.max(1, Math.ceil(top * .5))).slice(0,3) : [];
+  const citations = relevant.map(({doc}) => ({ uri: doc.uri, revisionId: doc.revisionId }));
+  const answer = relevant.length ? relevant.map(({doc}, index) => `${doc.title}: ${matchedPassage(doc.body, terms)} [${index + 1}]`).join('\n\n') : `I searched authorized page titles and content for “${question.trim()}” but found no matching passage. Try rephrasing your question or choose a recently updated page below.`;
+  return { kind: relevant.length ? 'answer' as const : 'no_match' as const, answer, citations };
 }
 
 export function validateChatModelOutput(value: unknown, docs: Document[]): { answer: string; citations: Array<{ uri: string; revisionId: string }> } {

@@ -11,6 +11,7 @@ import { promises as fs, existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
+import { parseStrictJson } from '../../dist/scripts/lib/strict-json.js';
 const [, , role, ...rest] = process.argv; const argv = rest.filter((a, i) => !a.startsWith('--') && !(i > 0 && rest[i - 1].startsWith('--'))); /* positional arguments only: a flag's value is not one */ const flag = n => { const i = rest.indexOf(`--${n}`); return i >= 0 ? rest[i + 1] : undefined; };
 const root = new URL('../../', import.meta.url).pathname; const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sha = s => createHash('sha256').update(s).digest('hex');
@@ -66,7 +67,7 @@ if (role === 'client') {
   const verify = await vault.verify(); const actors = [...new Set(mine.map(d => d.createdBy))]; const closed = docs.filter(d => d.kind === 'session' && d.metadata.lifecycle === 'closed' && String(d.title).length).length;
   await out(`verification/memory/physical-server-${hostIdentity().hostname}.json`, { role: 'server', runId, at: new Date().toISOString(), host: hostIdentity(), committed: markers.length, unique: counts.size, duplicates: [...counts].filter(([, n]) => n > 1).map(([m]) => m), markers: [...counts.keys()].sort(), actors, closedSessions: closed, journalVerifyOk: verify.ok, status: verify.ok ? 'OK' : 'JOURNAL_INVALID' });
 } else if (role === 'merge') {
-  const files = argv; const reports = await Promise.all(files.map(async f => JSON.parse(await fs.readFile(f, 'utf8')))); const clients = reports.filter(r => r.role === 'client'), servers = reports.filter(r => r.role === 'server');
+  const files = argv; const reports = await Promise.all(files.map(async f => parseStrictJson(await fs.readFile(f, 'utf8'), f))); const clients = reports.filter(r => r.role === 'client'), servers = reports.filter(r => r.role === 'server');
   const problems = []; if (!clients.length || servers.length !== 1) problems.push('need at least one client report and exactly one server report'); const server = servers[0];
   const hostIds = new Set([...clients, ...servers].map(r => r.host?.hostId)); if (hostIds.has('unknown') || hostIds.size < clients.length + servers.length) problems.push('every report must come from a distinct machine with a readable machine id'); if (clients.length + servers.length < 2) problems.push('at least two machines are required');
   for (const r of [...clients, ...servers]) if (r.host?.containerDetected) problems.push(`${r.host.hostname} looks like a container, which does not count as a physical host`);

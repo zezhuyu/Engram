@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { connect } from 'node:net';
 import { hostname } from 'node:os';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 import { execute, isReadOnlyCommand } from '../../packages/cli/index.js';
@@ -12,6 +13,49 @@ async function call(port: number, path: string, opts: { method?: string; token?:
     req.on('error', reject); if (opts.body) req.write(opts.body); req.end();
   });
 }
+async function rawCall(port: number, requestText: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1'); let response = '';
+    socket.setTimeout(3000, () => { socket.destroy(); reject(new Error('raw dashboard request timed out')); });
+    socket.on('data', chunk => { response += chunk.toString('latin1'); });
+    socket.on('error', reject);
+    socket.on('close', () => {
+      const match = /^HTTP\/1\.[01] (\d+)/.exec(response);
+      if (!match) return resolve({ status: 0, body: response.slice(0, 200) });
+      const split = response.indexOf('\r\n\r\n');
+      resolve({ status: Number(match[1]), body: split < 0 ? '' : response.slice(split + 4) });
+    });
+    socket.on('connect', () => socket.end(requestText));
+  });
+}
+
+test('dashboard validates Host once at the request boundary for every route', async t => {
+  const v = await disposableVault();
+  const dashboard = await createDashboardServer({ engram: v.engram, token: 'h'.repeat(64), idleMs: 60_000 });
+  t.after(async () => { await dashboard.close(); await v.cleanup(); });
+  const port = dashboard.port;
+  const cases = [
+    [`GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nhOsT: evil.example\r\nAuthorization: Bearer ${dashboard.token}\r\nConnection: close\r\n\r\n`, 400, 'duplicate Host before API auth'],
+    [`GET /assets/app.js HTTP/1.1\r\nHost: 127.0.0.1:${port},evil.example\r\nConnection: close\r\n\r\n`, 400, 'comma-joined duplicate Host'],
+    [`GET / HTTP/1.1\r\nHost: evil\u0000.example\r\nConnection: close\r\n\r\n`, 400, 'control character in Host'],
+    [`GET / HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n`, 403, 'hostile static route'],
+    [`GET /assets/app.css HTTP/1.1\r\nHost:    \r\nConnection: close\r\n\r\n`, 400, 'blank static Host'],
+    [`GET /api/status HTTP/1.0\r\nAuthorization: Bearer ${dashboard.token}\r\nConnection: close\r\n\r\n`, 400, 'HTTP/1.0 missing Host'],
+  ] as const;
+  for (const [wire, expected, label] of cases) {
+    const response = await rawCall(port, wire);
+    assert.equal(response.status, expected, `${label}: ${response.body}`);
+    if (expected === 400) assert.match(response.body, /INVALID_HOST/);
+  }
+  const hostileStatic = await Promise.all(['/','/assets/app.css','/assets/app.js'].map(route => call(port, route, { host: `evil.example:${port}` })));
+  assert.ok(hostileStatic.every(reply => reply.status === 403 && reply.body === hostileStatic[0]!.body && reply.body.includes('HOST_NOT_ALLOWED')));
+  assert.ok(hostileStatic.every(reply => !reply.body.includes('<html') && !reply.body.includes('body{')));
+  assert.equal((await call(port, '/api/status', { token: dashboard.token, host: `LOCALHOST:${port}` })).status, 200);
+  assert.equal((await call(port, '/api/status', { token: dashboard.token, host: `[::1]:${port}` })).status, 200);
+  assert.equal((await call(port, '/api/status', { token: dashboard.token, host: `localhost.:${port}` })).status, 403);
+  assert.equal((await call(port, '/api/status', { token: dashboard.token, host: `localhost:${port + 1}` })).status, 403);
+});
+
 test('dashboard security gates API requests and serves only fixed assets', async t => {
   assert.equal(isReadOnlyCommand('dashboard', undefined), true);
   await assert.rejects(() => execute(['dashboard', '--host', 'example.com']), /local interface IP address/);

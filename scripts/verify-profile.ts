@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
+import { parseStrictJson } from './lib/strict-json.js';
 import { runSuite, summarize } from './lib/suite.js';
-const evaluation = await fs.readFile('verification/profile/real-model-evaluation.json', 'utf8').then(JSON.parse).catch(() => undefined) as { status?: string; metrics?: Record<string, number> } | undefined;
+const evaluation = await fs.readFile('verification/profile/real-model-evaluation.json', 'utf8').then(text => parseStrictJson(text, 'profile evaluation')).catch(() => undefined) as { status?: string; metrics?: Record<string, number> } | undefined;
 const evalSummary = evaluation ? `Real-model labeled evaluation status ${evaluation.status}: precision=${evaluation.metrics?.precision}, recall=${evaluation.metrics?.recall}, falsePositiveRate=${evaluation.metrics?.falsePositiveRate}, jobSuccessRate=${evaluation.metrics?.jobSuccessRate}, scopeAccuracy=${evaluation.metrics?.scopeAccuracy}, evidenceGrounding=${evaluation.metrics?.evidenceGrounding}. See verification/profile/real-model-evaluation.json.` : 'Real-model labeled evaluation has not been run.';
 const evaluationGaps = evaluation?.status === 'PASS' ? [] : [{ item: 'Labeled real-model extraction quality (precision, recall, false-positive rate, schema reliability, scope, provenance)', status: evaluation?.status === 'FAIL' ? 'FAIL' as const : 'NOT_RUN' as const, reason: evalSummary }];
 summarize(await runSuite({

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { withVaultLock } from '../storage-local/index.js';
+import { parseStrictJson } from '../../scripts/lib/strict-json.js';
 
 const LEGACY_FILE = '.mdb/dashboard/auth.json';
 const N = 1 << 15, R = 8, P = 1, KEY_LENGTH = 64;
@@ -46,7 +47,7 @@ async function atomicPrivateWrite(file: string, contents: string): Promise<void>
 }
 async function validateRecord(file: string, repairPermissions = true): Promise<PasswordRecord> {
   let record: PasswordRecord;
-  try { record = JSON.parse(await fs.readFile(file, 'utf8')) as PasswordRecord; }
+  try { record = parseStrictJson(await fs.readFile(file, 'utf8'), 'Dashboard password file') as PasswordRecord; }
   catch (error) { throw new Error(`Dashboard password file is corrupt or unreadable (${file}): ${(error as Error).message}`); }
   if (record.version !== 1 || !record.params || !Number.isSafeInteger(record.params.N) || record.params.N < N || record.params.N > (1 << 18) || (record.params.N & (record.params.N - 1)) !== 0 || !Number.isSafeInteger(record.params.r) || record.params.r < 1 || record.params.r > 16 || !Number.isSafeInteger(record.params.p) || record.params.p < 1 || record.params.p > 4 || record.params.keyLength !== KEY_LENGTH || !/^[a-f0-9]{32}$/.test(record.salt) || !/^[a-f0-9]{128}$/.test(record.hash) || typeof record.createdAt !== 'string' || typeof record.changedAt !== 'string') {
     throw new Error(`Dashboard password file is corrupt or unreadable (${file}): invalid scrypt record.`);
@@ -79,6 +80,7 @@ async function read(root: string, options: DashboardAuthLocationOptions = {}): P
 export async function passwordIsSet(root: string, options: DashboardAuthLocationOptions = {}): Promise<boolean> { return !!await read(root, options); }
 export function validatePassword(password: unknown, token?: string): string | undefined {
   if (typeof password !== 'string' || password.length < 12 || password.length > 256) return 'Password must be between 12 and 256 characters.';
+  if (!password.trim() || /[\u0000-\u001f\u007f-\u009f]/u.test(password)) return 'Password must not be blank or contain control characters.';
   if (token && password === token) return 'Choose a password different from the sign-in token.';
   if (/^(?:password|password123|password123456|123456789012|qwerty123456|letmein123456|admin123456)$/i.test(password)) return 'Choose a less common password.';
   return undefined;
@@ -128,7 +130,7 @@ export async function loadDashboardSessions(authFile: string, idleMs: number, ma
   let raw: string;
   try { raw = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Map(); throw new Error(`Dashboard sessions file is unreadable (${file}): ${(error as Error).message}`); }
   let decoded: Record<string, DashboardSession>;
-  try { decoded = JSON.parse(raw) as Record<string, DashboardSession>; } catch { throw new Error(`Dashboard sessions file is corrupt (${file}).`); }
+  try { decoded = parseStrictJson(raw, 'Dashboard sessions file') as Record<string, DashboardSession>; } catch { throw new Error(`Dashboard sessions file is corrupt (${file}).`); }
   if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) throw new Error(`Dashboard sessions file is corrupt (${file}).`);
   const sessions = new Map<string, DashboardSession>();
   for (const [key, value] of Object.entries(decoded)) {

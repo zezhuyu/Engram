@@ -70,7 +70,7 @@ test('suite provenance binds fingerprint and commit; mandatory skipped tests req
   const inventory = { minimumTests: 1, requiredTests: [name], requiredCases: [], casesByPlatform: { linux: [] }, allowedSkippedTests: { linux: [{ name, classificationId, classificationHash: skipClassificationHash(classification) }] } };
   const report = { suite: 'intelligence', status: 'PASS', exitCode: 0, counts: { pass: 0, fail: 0, skipped: 1, total: 1 }, tests: [{ name, status: 'SKIPPED' }], cases: 0, caseDetails: [], caseFailures: [], environment: { platform: 'linux' } };
   assert.equal(suiteReportConsistent(report, inventory), false, 'pending-owner-review is rejected by default');
-  assert.equal(suiteReportConsistent(report, inventory, true), true, 'explicit local allowance checks registry and hash but never changes SKIPPED');
+  assert.equal(suiteReportConsistent(report, inventory, true), false, 'a mandatory skipped test is never PASS evidence, even with a local pending-classification allowance');
   assert.equal(suiteEvidenceStatus(report), 'SKIPPED');
   assert.equal(suiteReportConsistent(report, { ...inventory, allowedSkippedTests: {} }), false);
   assert.deepEqual(allowedSkippedTestsForReport({ suite: 'intelligence', environment: { platform: 'linux' }, tests: [{ name, status: 'SKIPPED', detail: 'set MDB_REAL_MODEL_TEST=1 to run' }] }), [{ name, classificationId, classificationHash: skipClassificationHash(classification) }]);
@@ -123,17 +123,17 @@ test('synthetic evidence is accepted only from an opted-in temp fixture; real ve
     try {
       await Promise.all([mkdir(fakeTemp), mkdir(outside)]);
       await writeFile(path.join(outside, 'record.json'), '{"synthetic":true}');
-      await assert.rejects(assertSyntheticEvidenceAllowed(outside, undefined, fakeTemp), /synthetic evidence rejected/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(outside), /synthetic evidence rejected/);
       await writeFile(path.join(outside, 'nested.json'), JSON.stringify({ wrapper: { evidence: [{ synthetic: true }] } }));
-      await assert.rejects(assertSyntheticEvidenceAllowed(outside, undefined, fakeTemp), /synthetic evidence rejected/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(outside), /synthetic evidence rejected/);
       await writeFile(path.join(fakeTemp, 'record.json'), '{"synthetic":true}');
       process.chdir(fakeTemp);
-      await assert.doesNotReject(assertSyntheticEvidenceAllowed(fakeTemp, undefined, fakeTemp));
+      await assert.doesNotReject(assertSyntheticEvidenceAllowed(fakeTemp, realpath, [fakeTemp]));
       process.chdir(cwd);
       await assert.rejects(async () => { try { await writeFile(path.join(outside, 'aborted.json'), 'temporary'); throw new Error('injected abort'); } finally { await rm(path.join(outside, 'aborted.json'), { force: true }); } }, /injected abort/);
       assert.deepEqual((await readdir(outside)).sort(), ['nested.json', 'record.json']);
       process.chdir(outside);
-      await assert.rejects(evaluateReleaseEvidence(outside, 'core-beta', fixture.provenance, undefined, fakeTemp), /synthetic evidence rejected/);
+      await assert.rejects(evaluateReleaseEvidence(outside, 'core-beta', fixture.provenance, undefined, [fakeTemp]), /synthetic evidence rejected/);
       process.chdir(cwd);
     } finally { await rm(tempParent, { recursive: true, force: true }); await assert.rejects(access(tempParent), { code: 'ENOENT' }); }
     process.chdir(cwd);
@@ -190,19 +190,21 @@ test('synthetic fixture paths are canonicalized across temp aliases and fail clo
       process.chdir(fakeTmp);
       await writeFile(path.join(fakeTmp, 'record.json'), '{"synthetic":true}');
       await writeFile(path.join(sibling, 'record.json'), '{"synthetic":true}');
+      await assert.doesNotReject(assertSyntheticEvidenceAllowed(fakeTmp));
       await symlink(fakeTmp, path.join(parent, 'tmp-alias'), 'dir');
       await symlink(outside, path.join(fakeTmp, 'escape'), 'dir');
-
-      await assert.doesNotReject(assertSyntheticEvidenceAllowed(fakeTmp));
-      await assert.rejects(assertSyntheticEvidenceAllowed(sibling), /synthetic evidence rejected/);
-      await assert.doesNotReject(assertSyntheticEvidenceAllowed(path.join(parent, 'tmp-alias')));
-      await assert.rejects(assertSyntheticEvidenceAllowed(path.join(fakeTmp, 'escape')), /synthetic evidence rejected/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(sibling, realpath, [fakeTmp]), /synthetic evidence rejected/,
+        'a sibling directory with the trusted base as a string prefix is outside the trusted base');
+      await assert.rejects(assertSyntheticEvidenceAllowed(path.join(fakeTmp, '..', 'outside'), realpath, [fakeTmp]), /synthetic evidence rejected/,
+        'parent traversal cannot escape a trusted base');
+      await assert.rejects(assertSyntheticEvidenceAllowed(path.join(parent, 'tmp-alias')), /symlink evidence root/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(path.join(fakeTmp, 'escape')), /symlink (?:evidence root|in evidence tree)/);
 
       const resolveWithCanonicalizationFailure = (async (candidate: Parameters<typeof realpath>[0]) => {
         if (path.resolve(candidate.toString()) === path.resolve(fakeTmp)) throw new Error('canonical path unavailable');
         return realpath(candidate);
       }) as typeof realpath;
-      await assert.rejects(assertSyntheticEvidenceAllowed(fakeTmp, resolveWithCanonicalizationFailure), /synthetic evidence rejected/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(fakeTmp, resolveWithCanonicalizationFailure), /synthetic evidence rejected|symlink/);
     } finally {
       os.tmpdir = previousTmpdir;
       process.chdir(canonicalRoot);

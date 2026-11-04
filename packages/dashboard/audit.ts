@@ -3,6 +3,7 @@ import path from 'node:path';
 import { safePath, withVaultLock } from '../storage-local/index.js';
 import { assertDurableWriteCapacity } from '../core/storage-lifecycle.js';
 import { looksSecret, redactText } from '../memory/redact.js';
+import { parseStrictJson } from '../../scripts/lib/strict-json.js';
 
 export interface AuditRecord { at: string; key: string; oldValue: unknown; newValue: unknown; result: 'attempt' | 'applied' | 'failed' | 'rejected' }
 const SECRET = /(sk-[A-Za-z0-9_-]{8,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*\S+)/iu;
@@ -22,6 +23,7 @@ export async function appendAudit(root: string, record: AuditRecord): Promise<vo
   });
 }
 export async function readAudit(root: string): Promise<AuditRecord[]> {
-  try { return (await fs.readFile(await safePath(root, '.mdb/dashboard/audit.jsonl'), 'utf8')).split('\n').filter(Boolean).slice(-200).flatMap(line => { try { return [JSON.parse(line) as AuditRecord]; } catch { return []; } }); }
-  catch { return []; }
+  const marker: AuditRecord = { at: new Date().toISOString(), key: 'dashboard.audit.corruption', oldValue: null, newValue: { corrupt: true }, result: 'failed' };
+  try { return (await fs.readFile(await safePath(root, '.mdb/dashboard/audit.jsonl'), 'utf8')).split('\n').filter(Boolean).slice(-200).map(line => parseStrictJson(line, 'Dashboard audit record') as AuditRecord); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; return [marker]; }
 }

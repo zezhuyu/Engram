@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { parseStrictJson } from './strict-json.js';
 
 export const GENERIC_SKIP_REASON = 'Observed skipped test in current-source reviewed report.';
 export type SkipClass = 'real-model' | 'real-host' | 'gnu-tools' | 'platform-specific';
@@ -21,7 +22,7 @@ const registryUrl = new URL('./skip-classifications.json', import.meta.url);
 let registryText: string;
 try { registryText = readFileSync(registryUrl, 'utf8'); }
 catch { registryText = readFileSync(path.resolve('scripts/lib/skip-classifications.json'), 'utf8'); }
-const data = JSON.parse(registryText) as { version?: number; entries?: SkipClassification[] };
+const data = parseStrictJson(registryText, 'skip classification registry') as { version?: number; entries?: SkipClassification[] };
 if (data.version !== 1 || !Array.isArray(data.entries)) throw new Error('invalid skip classification registry');
 const byId = new Map<string, SkipClassification>();
 for (const entry of data.entries) {

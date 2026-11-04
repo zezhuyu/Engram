@@ -47,6 +47,10 @@ test('dashboard password setup requires bootstrap token, enforces policy, stores
   assert.match(validatePassword('x'.repeat(257)) ?? '', /12 and 256/);
   assert.match(validatePassword('password123456') ?? '', /common/);
   assert.match(validatePassword(token, token) ?? '', /different/);
+  assert.match(validatePassword('            ') ?? '', /whitespace|blank/);
+  assert.match(validatePassword('valid\0password') ?? '', /control/);
+  assert.match(validatePassword(`valid${String.fromCharCode(0x85)}password`) ?? '', /control/);
+  assert.match(validatePassword(' 1234567890') ?? '', /12 and 256/, 'leading whitespace is counted, not trimmed');
   assert.equal(validatePassword('p'.repeat(256)), undefined);
   assert.equal((await call(server.port, '/api/auth/setup', { method: 'POST', csrf: true, body: { token, password: 'correct horse battery staple', confirm: 'not the same password' } })).status, 400);
   assert.equal((await setup(server.port, token)).status, 200);

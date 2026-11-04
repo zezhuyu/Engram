@@ -28,9 +28,10 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   const finalized = JSON.parse(run('build', '--size', '10', '--seed', '17', '--root', interruptedFinalization, '--resume')) as { corpusId: string };
   assert.equal(finalized.corpusId, completedBuild.corpusId, 'a full committed deterministic journal can safely recover an interrupted manifest finalization');
   const manifestPath = path.join(first, '.engram-benchmark-manifest.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { documents: number; files: Array<{ path: string; sha256: string }>; workloads: unknown[]; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> } };
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { documents: number; files: Array<{ path: string; sha256: string }>; workloads: unknown[]; treeState: string; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number; files: Record<string, string> } };
   assert.ok(manifest.files.length > 10);
   assert.equal(manifest.workloads.length, 12);
+  assert.ok(['clean', 'dirty', 'no-git'].includes(manifest.treeState));
   assert.equal(manifest.sourceBinding.fingerprint, manifest.sourceBinding.workingTreeSourceFingerprint);
   assert.ok(manifest.sourceBinding.fullSourceFileCount > 100);
   assert.ok(manifest.sourceBinding.files['deploy/Caddyfile']);
@@ -38,7 +39,8 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   const replayOutput = JSON.parse(run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir)) as { parityAll: boolean; parityComplete: boolean; corpusId: string };
   assert.equal(replayOutput.parityAll, true); assert.equal(replayOutput.parityComplete, true);
   assert.equal(replayOutput.corpusId, a.corpusId);
-  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number | null; startAllocatedBytes: number | null; endAllocatedBytes: number | null; allocationCounter: string }; parity: Record<string, boolean | null>; parityComplete: boolean; filesystem: Record<string, { hits: number; expectedHits: number | null; correct: boolean | null }>; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number }; corpusProvenance: { generatorMatchesCurrent: boolean; verifiedFiles: number; verifiedJournalEvents: number; manifestSha256: string } };
+  const report = JSON.parse(await readFile(path.join(outputDir, (await readdir(outputDir))[0]! ), 'utf8')) as { treeState: string; instrumentation: Record<string, unknown>; queryPlans: unknown[]; memory: { allocatedBytes: number | null; startAllocatedBytes: number | null; endAllocatedBytes: number | null; allocationCounter: string }; parity: Record<string, boolean | null>; parityComplete: boolean; filesystem: Record<string, { hits: number; expectedHits: number | null; correct: boolean | null }>; sourceBinding: { fingerprint: string; workingTreeSourceFingerprint: string; fullSourceFileCount: number }; corpusProvenance: { generatorMatchesCurrent: boolean; verifiedFiles: number; verifiedJournalEvents: number; manifestSha256: string } };
+  assert.ok(['clean', 'dirty', 'no-git'].includes(report.treeState));
   assert.ok(Object.keys(report.instrumentation).some(key => key.includes('candidate.discovery')));
   assert.ok(report.queryPlans.length > 0);
   // V8's allocation counter does not exist on every Node line (it is absent on Node 22): the report must then say so and carry no allocation numbers at all.

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { isIP } from 'node:net';
 import { appendAudit } from './audit.js';
 import { withVaultLock } from '../storage-local/index.js';
+import { parseStrictJson } from '../../scripts/lib/strict-json.js';
 
 export type DashboardCredentialMode = 'admin' | 'view';
 type Entry = { id: string; label: string; mode: DashboardCredentialMode; tokenHash: string; createdAt: string; expiresAt: string; lastUsedAt?: string; lastUsedIp?: string; sourceIps?: string[] };
@@ -14,7 +15,7 @@ const fileFor = (root: string) => path.join(root, '.mdb', 'dashboard', 'credenti
 
 async function read(root: string): Promise<Store> {
   try {
-    const store = JSON.parse(await fs.readFile(fileFor(root), 'utf8')) as Store;
+    const store = parseStrictJson(await fs.readFile(fileFor(root), 'utf8'), 'Dashboard credential registry') as Store;
     if (store.version !== 1 || !Array.isArray(store.credentials) || store.credentials.length > CAP || store.credentials.some(item => !item || typeof item.id !== 'string' || typeof item.label !== 'string' || !['admin', 'view'].includes(item.mode) || !/^[a-f0-9]{64}$/.test(item.tokenHash) || !Number.isFinite(Date.parse(item.createdAt)) || !Number.isFinite(Date.parse(item.expiresAt)) || item.lastUsedAt !== undefined && !Number.isFinite(Date.parse(item.lastUsedAt)) || item.sourceIps !== undefined && (!Array.isArray(item.sourceIps) || item.sourceIps.some(ip => typeof ip !== 'string' || isIP(ip) === 0)))) throw new Error('shape');
     return store;
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, credentials: [] }; throw new Error('Dashboard credential registry is invalid'); }

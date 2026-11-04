@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { performance } from 'node:perf_hooks';
+import { currentSourceEvidence } from './lib/source-evidence.js';
 process.env.MDB_BENCH_PROFILE = '1';
 const { Vault } = await import('../packages/core/vault.js');
 const { profileReport } = await import('../packages/bench/instrumentation.js');
@@ -28,7 +29,8 @@ try {
   }
   const profile = profileReport(); const stages = Object.fromEntries(Object.entries((profile as { metrics?: Record<string, { count: number; p50Ms: number; p95Ms: number; p99Ms: number }> }).metrics ?? profile).map(([k, m]) => [k, { count: m.count, p50Ms: m.p50Ms, p95Ms: m.p95Ms, p99Ms: m.p99Ms }]));
   const id = new Date().toISOString().replace(/[:.]/g, '-');
-  const report = { id, corpusId: manifest.corpusId, corpusDocuments: manifest.documents, commits: samples.length, warmupDiscarded: warmup, copyMs: Math.round(copyMs), durableWrite: { p50Ms: +pct(samples, .5).toFixed(2), p95Ms: +pct(samples, .95).toFixed(2), p99Ms: +pct(samples, .99).toFixed(2), maxMs: +Math.max(...samples).toFixed(2) }, budget: { p95Ms: 50, pass: pct(samples, .95) < 50 },
+  const source = await currentSourceEvidence();
+  const report = { id, corpusId: manifest.corpusId, corpusDocuments: manifest.documents, commits: samples.length, warmupDiscarded: warmup, copyMs: Math.round(copyMs), treeState: source.treeState.state, sourceBinding: { fingerprint: source.fingerprint, workingTreeSourceFingerprint: source.fingerprint, fullSourceFileCount: Object.keys(source.files).length, files: source.files }, durableWrite: { p50Ms: +pct(samples, .5).toFixed(2), p95Ms: +pct(samples, .95).toFixed(2), p99Ms: +pct(samples, .99).toFixed(2), maxMs: +Math.max(...samples).toFixed(2) }, budget: { p95Ms: 50, pass: pct(samples, .95) < 50 },
     stages, acknowledgment: 'unchanged: ack only after revision fsync + journal append fsync (commit point) + head/view writes; no fsync was removed or deferred', node: process.version, platform: `${os.platform()} ${os.arch()}`, cpu: os.cpus()[0]?.model, filesystem: 'see environment', run_at: new Date().toISOString() };
   await fs.mkdir('verification/performance', { recursive: true });
   await fs.writeFile(`verification/performance/durable-write-${id}.json`, JSON.stringify(report, null, 2) + '\n'); await fs.writeFile('verification/performance/durable-write-latest.json', JSON.stringify(report, null, 2) + '\n');

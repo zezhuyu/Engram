@@ -1,6 +1,7 @@
 // Renders verification/memory/cross-machine-report.md from verification/memory/xhost/results.json (written by run.mjs). No results are invented here.
 import { promises as fs } from 'node:fs';
-const r = JSON.parse(await fs.readFile('verification/memory/xhost/results.json', 'utf8'));
+import { parseStrictJson } from '../../dist/scripts/lib/strict-json.js';
+const r = parseStrictJson(await fs.readFile('verification/memory/xhost/results.json', 'utf8'), 'xhost results');
 const find = (id, re) => r.scenarios.filter(s => s.id === id).flatMap(s => s.checks.filter(c => !re || re.test(c.what)));
 const rows = [
   ['1', 'Each client initializes remote capture using supported lifecycle hooks', 'X1', null, 'Install adapter on B/C; hooks for SessionStart, UserPromptSubmit, PostToolUse, SessionEnd use https and carry no token'],

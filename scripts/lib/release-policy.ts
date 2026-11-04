@@ -54,6 +54,8 @@ export function currentQualityDetail(file: string, base: string, status: string,
 
 /** Evidence is current only when it binds every source required by the consumer to the exact current bytes. */
 export interface TrustedProvenance { fingerprint: string; commit: string; files: Record<string, string> }
+/** Report provenance is admissible only for a clean checkout or an attested archive tree. */
+export function releaseTreeStateValid(state: unknown): boolean { return state === 'clean' || state === 'no-git'; }
 export function sourceEvidenceMatches(record: { evidenceSource?: { files?: Record<string, string>; fingerprint?: string }; fingerprint?: string; source?: { fingerprint?: string }; git_commit?: string; commit?: string } | undefined, current: Record<string, string>, trusted?: Pick<TrustedProvenance, 'fingerprint' | 'commit'>): boolean {
   const files = record?.evidenceSource?.files;
   const fingerprints = [record?.fingerprint, record?.source?.fingerprint, record?.evidenceSource?.fingerprint].filter((value): value is string => value !== undefined);
@@ -150,7 +152,7 @@ export function verifyReleaseAuthorization(
     && trustedSignature(record, publicKey, 'signature');
 }
 
-export interface SuiteEvidenceLike { suite?: string; status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string; message?: string; detail?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[]; environment?: Record<string, unknown> }
+export interface SuiteEvidenceLike { suite?: string; treeState?: string; status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string; message?: string; detail?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[]; environment?: Record<string, unknown> }
 export interface SuiteInventory { minimumTests: number; requiredTests: string[]; requiredCases: string[]; casesByPlatform?: Record<string, string[]>; allowedSkippedTests?: Record<string, Array<{ name: string; classificationId: string; classificationHash: string }>> }
 /** A suite-level PASS cannot erase an individual skipped mandatory test. */
 export function suiteEvidenceStatus(report: SuiteEvidenceLike | undefined): string {
@@ -158,13 +160,13 @@ export function suiteEvidenceStatus(report: SuiteEvidenceLike | undefined): stri
   if (report.status === 'PASS' && report.tests?.some(test => test.status === 'SKIPPED')) return 'SKIPPED';
   return report.status ?? 'NOT_RUN';
 }
-export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined, allowPending = process.env.MDB_ALLOW_PENDING_SKIP_CLASSIFICATIONS === '1'): boolean {
+export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined, allowPending = process.env.MDB_ALLOW_PENDING_SKIP_CLASSIFICATIONS === '1', profile?: ReleaseProfileName, requireTrustedTree = false): boolean {
   // Arithmetic consistency alone cannot establish suite completeness: an
   // attacker (or accidental partial run) can shrink tests and totals together.
   if (!inventory || !Number.isInteger(inventory.minimumTests) || inventory.minimumTests < 1
     || !Array.isArray(inventory.requiredTests) || !Array.isArray(inventory.requiredCases)
     || inventory.requiredTests.length === 0) return false;
-  if (!report || !Array.isArray(report.tests) || !Array.isArray(report.caseDetails) || !Array.isArray(report.caseFailures) || !report.counts) return false;
+  if (!report || requireTrustedTree && !['clean', 'no-git'].includes(String(report.treeState)) || report.treeState === 'dirty' || !Array.isArray(report.tests) || !Array.isArray(report.caseDetails) || !Array.isArray(report.caseFailures) || !report.counts) return false;
   const counts = report.counts;
   const actual = { pass: report.tests.filter(t => t.status === 'PASS').length, fail: report.tests.filter(t => t.status === 'FAIL').length, skipped: report.tests.filter(t => t.status === 'SKIPPED').length, total: report.tests.length };
   if (Object.keys(actual).some(k => counts[k as keyof typeof actual] !== actual[k as keyof typeof actual]) || report.cases !== report.caseDetails.length) return false;
@@ -186,6 +188,7 @@ export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inv
     const classification = getSkipClassification(item.classificationId);
     if (!classification || !classification.platforms.includes(platform ?? '') || skipClassificationHash(classification) !== item.classificationHash || classification.test !== item.name || ('suite' in report && report.suite !== classification.suite) || !classification.reason.trim() || classification.reason === GENERIC_SKIP_REASON || classification.reason.length < 40) return false;
     if (classification.policyVersion !== RELEASE_POLICY_VERSION || classification.reviewedBy === 'pending-owner-review' && !allowPending) return false;
+    if (profile && !classification.requiredByProfiles.includes(profile)) return false;
     allowedSkippedNames.add(item.name);
   }
   if (report.tests.some(t => t.status === 'SKIPPED' && !allowedSkippedNames.has(String(t.name)))) return false;
@@ -193,7 +196,7 @@ export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inv
   const expectedCases = platform && inventory.casesByPlatform?.[platform];
   if (inventory.casesByPlatform && (!platform || !expectedCases || !sameStrings(validCaseNames, expectedCases))) return false;
   if (!inventory.casesByPlatform && (inventory.requiredCases.some(n => !validCaseNames.includes(n)) || validCaseNames.some(n => !inventory.requiredCases.includes(n)))) return false;
-  if (report.status === 'PASS') return report.exitCode === 0 && actual.fail === 0 && report.caseFailures.length === 0 && actual.total > 0;
+  if (report.status === 'PASS') return report.exitCode === 0 && actual.fail === 0 && actual.skipped === 0 && report.caseFailures.length === 0 && actual.total > 0;
   if (report.status === 'FAIL') return report.exitCode !== 0 || actual.fail > 0 || report.caseFailures.length > 0;
   if (report.status === 'SKIPPED') return report.exitCode === 0 && actual.total > 0;
   return report.status === 'NOT_RUN' && actual.total === 0;

@@ -1,4 +1,5 @@
 import { verifyReleaseAuthorization, type ReleaseProfileName } from './lib/release-policy.js';
+import { parseStrictJson } from './lib/strict-json.js';
 import { currentSourceEvidence } from './lib/source-evidence.js';
 import { gitCommit } from './lib/suite.js';
 
@@ -7,8 +8,8 @@ const authorizationText = process.env.ENGRAM_RELEASE_AUTHORIZATION_JSON;
 const publicKey = process.env.ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY;
 if (!authorizationText || !publicKey) fail('owner-signed authorization and trusted public key are required');
 let authorization: unknown;
-try { authorization = JSON.parse(authorizationText as string); } catch { fail('authorization is not valid JSON'); }
-const report = await import('node:fs/promises').then(fs => fs.readFile('verification/release-report.json', 'utf8')).then(JSON.parse).catch(() => undefined) as { releaseProfile?: string; releaseLevel?: string } | undefined;
+try { authorization = parseStrictJson(authorizationText as string, 'release authorization'); } catch { fail('authorization is not valid strict JSON'); }
+const report = await import('node:fs/promises').then(fs => fs.readFile('verification/release-report.json', 'utf8')).then(text => parseStrictJson(text, 'release report')).catch(() => undefined) as { releaseProfile?: string; releaseLevel?: string } | undefined;
 const profile = process.env.MDB_RELEASE_PROFILE;
 if (!report || report.releaseProfile !== profile || !['core-beta', 'full-intelligence-beta', 'ga'].includes(String(profile))) fail('release report is missing or profile does not match');
 const releaseReport = report as { releaseProfile: string; releaseLevel: string };

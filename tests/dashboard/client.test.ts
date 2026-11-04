@@ -116,7 +116,7 @@ test('two-process client dashboard proxies status, settings, document lifecycle,
   const login = await fetch(local+'/api/auth/login',{method:'POST',headers:{Origin:local,'Content-Type':'application/json'},body:JSON.stringify({password})}); assert.equal(login.status,200); const cookie=login.headers.get('set-cookie')!.split(';')[0]!;
   const add = await fetch(local+'/api/client/connections',{method:'POST',headers:{Cookie:cookie,Origin:local,'X-Engram-Dashboard':'1','Content-Type':'application/json'},body:JSON.stringify({name:'Loopback server',url:new URL(server.url).origin,credentialFile,mode:'admin'})}); assert.equal(add.status,201); const connection=(await add.json() as {id:string}).id;
   const headers={Cookie:cookie,Origin:local,'X-Engram-Dashboard':'1','X-Engram-Connection':connection};
-  const status=await fetch(local+'/api/status',{headers}); assert.equal(status.status,200);
+  const status=await fetch(local+'/api/status',{headers}); assert.equal(status.status,200,await status.clone().text());
   const settings=await (await fetch(local+'/api/settings',{headers})).json() as any;
   const apply=await fetch(local+'/api/settings/apply',{method:'POST',headers:{...headers,'X-Engram-Reauth-Password':password,'Content-Type':'application/json'},body:JSON.stringify({key:'scheduler.enabled',value:!settings.settings['scheduler.enabled'],etag:settings.etag})}); assert.equal(apply.status,200);
   const created=await fetch(local+'/api/documents',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({scope:{type:'global',area:'wiki'},kind:'wiki_page',title:'two process proxy',body:'server side content'})}); assert.equal(created.status,201); const doc=(await created.json() as any).document;

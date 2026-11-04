@@ -1,13 +1,14 @@
 import { promises as fs, readFileSync } from 'node:fs';
+import { parseStrictJson } from './lib/strict-json.js';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { environment, gitCommit, loadSuiteReport, type SuiteReport } from './lib/suite.js';
 import { inputPath } from './lib/suite.js';
-import { classifyRelease, collectProductionEvidence, currentQualityDetail, currentQualityStatus, durabilityEvidenceStatus, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, releaseCapabilitiesValid, sourceEvidenceMatches, suiteEvidenceStatus, suiteReportConsistent, validateExclusions, PROFILE_REQUIREMENTS, RELEASE_POLICY_VERSION, type CurrentQualityRecord, type DurabilityEvidence, type PhysicalHostsReport, type ReleaseProfileName, type SuiteInventory, type TrustedProvenance } from './lib/release-policy.js';
+import { classifyRelease, collectProductionEvidence, currentQualityDetail, currentQualityStatus, durabilityEvidenceStatus, modelEvidenceMatches, performanceMeasurementValid, performanceSourceMatches, releaseCapabilitiesValid, releaseTreeStateValid, sourceEvidenceMatches, suiteEvidenceStatus, suiteReportConsistent, validateExclusions, PROFILE_REQUIREMENTS, RELEASE_POLICY_VERSION, type CurrentQualityRecord, type DurabilityEvidence, type PhysicalHostsReport, type ReleaseProfileName, type SuiteInventory, type TrustedProvenance } from './lib/release-policy.js';
 import { getSkipClassification } from './lib/skip-classifications.js';
-import { assertSyntheticEvidenceAllowed, evaluateReleaseEvidence } from './lib/release-evaluation.js';
-import { currentSourceEvidence } from './lib/source-evidence.js';
+import { assertSyntheticEvidenceAllowed, evaluateReleaseEvidence, evaluateProfileGateStatuses } from './lib/release-evaluation.js';
+import { archiveAttestationMatches, currentSourceEvidence } from './lib/source-evidence.js';
 import { inventoryDrift, MANDATORY_SUITE_NAMES } from './lib/suite-inventory.js';
 
 process.env.GIT_OPTIONAL_LOCKS = '0';
@@ -20,7 +21,7 @@ type Status = 'PASS' | 'FAIL' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
 type Area = 'STORAGE' | 'MEMORY' | 'USER_INTELLIGENCE' | 'WIKI' | 'DREAM' | 'QUERY' | 'UNIX' | 'INTELLIGENCE' | 'PERFORMANCE' | 'PLATFORM';
 const AREAS: Area[] = ['STORAGE', 'MEMORY', 'USER_INTELLIGENCE', 'WIKI', 'DREAM', 'QUERY', 'UNIX', 'INTELLIGENCE', 'PERFORMANCE', 'PLATFORM'];
 interface Gate { id: string; title: string; severity: 'P0' | 'P1'; area: Area; status: Status; cases: number; evidence: string; limitation: string }
-const read = async <T>(file: string): Promise<T | undefined> => { try { return JSON.parse(await fs.readFile(file, 'utf8')) as T; } catch { return undefined; } };
+const read = async <T>(file: string): Promise<T | undefined> => { try { return parseStrictJson(await fs.readFile(file, 'utf8'), file) as T; } catch { return undefined; } };
 const maxAgeMs = 24 * 3600 * 1000;
 const recent = (at: unknown): boolean => { const time = typeof at === 'string' ? Date.parse(at) : NaN; const age = Date.now() - time; return Number.isFinite(age) && age >= 0 && age < 30 * 24 * 3600_000; };
 const profileArgument = process.argv.slice(2).find(value => value.startsWith('--profile='))?.slice('--profile='.length);
@@ -32,7 +33,16 @@ if (!['core-beta', 'full-intelligence-beta', 'ga'].includes(profileText)) {
 const releaseProfile = profileText as ReleaseProfileName;
 const sourceEvidence = await currentSourceEvidence();
 const provenance: TrustedProvenance = { fingerprint: sourceEvidence.fingerprint, commit: gitCommit(), files: sourceEvidence.files };
-await assertSyntheticEvidenceAllowed('verification');
+let archiveTrusted = false;
+if (sourceEvidence.treeState.state === 'no-git' && process.env.MDB_RELEASE_ARCHIVE_ATTESTATION) {
+  try {
+    archiveTrusted = archiveAttestationMatches(await fs.readFile(process.env.MDB_RELEASE_ARCHIVE_ATTESTATION, 'utf8'), sourceEvidence.fingerprint);
+  } catch { archiveTrusted = false; }
+}
+const provenanceTrusted = sourceEvidence.treeState.state === 'clean' || sourceEvidence.treeState.state === 'no-git' && archiveTrusted;
+let evidenceGuardError: string | undefined;
+try { await assertSyntheticEvidenceAllowed('verification'); }
+catch (error) { evidenceGuardError = `Evidence validation incomplete: ${(error as Error).message}`; }
 const suiteInventory = await read<{ version: number; suites: Record<string, SuiteInventory> }>('scripts/lib/suite-inventory.json');
 const releaseTrustKey = process.env.MDB_RELEASE_TRUSTED_PUBLIC_KEY ?? (process.env.MDB_RELEASE_TRUSTED_PUBLIC_KEY_FILE ? readFileSync(process.env.MDB_RELEASE_TRUSTED_PUBLIC_KEY_FILE, 'utf8') : undefined);
 const suites: Record<string, SuiteReport | undefined> = {};
@@ -43,7 +53,7 @@ for (const name of MANDATORY_SUITE_NAMES) {
   const inventory = suiteInventory?.version === 1 ? suiteInventory.suites[name] : undefined;
   const drift = inventoryDrift(r, inventory);
   if (drift.length) inventoryDriftFailures.push(`${name}: ${drift.join('; ')}`);
-  suites[name] = r && inventory && !drift.length && suiteReportConsistent(r, inventory) && Number.isFinite(age) && age >= 0 && age < maxAgeMs && sourceEvidenceMatches(r, sourceEvidence.files, provenance) ? r : undefined;
+  suites[name] = r && inventory && !drift.length && suiteReportConsistent(r, inventory, undefined, releaseProfile, true) && Number.isFinite(age) && age >= 0 && age < maxAgeMs && sourceEvidenceMatches(r, sourceEvidence.files, provenance) ? r : undefined;
 }
 if (inventoryDriftFailures.length) {
   console.error('Mandatory suite inventory drift:');
@@ -127,20 +137,20 @@ const gates: Gate[] = [
   { id: 'D1', title: 'Dream modes, association retrieval, critic, feedback lifecycle and budgets (M4)', severity: 'P0', area: 'DREAM', ...fromSuite('dream'), evidence: 'verification/dream/report.json', limitation: 'Real-model structural, evidence, status and critic flags were recorded; independent novelty/usefulness/hallucination scoring and longitudinal feedback impact remain unmeasured.' }
 ];
 const PERF_SOURCE_FILES = ['packages/core/vault.ts', 'packages/storage-local/index.ts', 'packages/search-files/manifest.ts', 'packages/search-files/postings.ts', 'packages/search-files/retrieve.ts', 'packages/search-sqlite/index.ts', 'scripts/benchmark.ts'];
-const perf = await Promise.all(['1k', '10k', '100k'].map(async label => ({ label, report: await read<{ timestamp?: string; corpus?: { documents?: number; documentCount?: number }; runs?: number; build: { durableCommit: { p95Ms: number } }; filesystem: Record<string, { p50Ms: number; p95Ms: number; p99Ms: number; samples: number; correct: boolean | null }>; sqlite: Record<string, { p50Ms: number; p95Ms: number; p99Ms: number; samples: number }>; parityAll: boolean; parityComplete?: boolean; watchdog?: { queryTimeoutMs: number; timedOutSamples: Record<string, Record<string, number>> }; sourceBinding?: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } }>(`verification/benchmarks/${label}.json`) })));
+const perf = await Promise.all(['1k', '10k', '100k'].map(async label => ({ label, report: await read<{ timestamp?: string; treeState?: string; corpus?: { documents?: number; documentCount?: number }; runs?: number; build: { durableCommit: { p95Ms: number } }; filesystem: Record<string, { p50Ms: number; p95Ms: number; p99Ms: number; samples: number; correct: boolean | null }>; sqlite: Record<string, { p50Ms: number; p95Ms: number; p99Ms: number; samples: number }>; parityAll: boolean; parityComplete?: boolean; watchdog?: { queryTimeoutMs: number; timedOutSamples: Record<string, Record<string, number>> }; sourceBinding?: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } }>(`verification/benchmarks/${label}.json`) })));
 for (const { label, report } of perf) {
-  const bound = !!report && recent(report.timestamp) && performanceSourceMatches(report.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance)
+  const bound = !!report && releaseTreeStateValid(report.treeState) && recent(report.timestamp) && performanceSourceMatches(report.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance)
     && report.corpus?.documents === Number(label.replace('k', '000')) && Number.isInteger(report.runs) && report.runs! > 0
     && Object.values(report.filesystem).length > 0 && Object.values(report.sqlite).length > 0
     && [...Object.values(report.filesystem), ...Object.values(report.sqlite)].every(m => performanceMeasurementValid({ timestamp: report.timestamp, corpusDocuments: report.corpus!.documents!, measurementCount: report.runs!, measured: m, thresholdMs: m.p95Ms }, report.corpus!.documents!));
   const status = !report || !bound ? 'NOT_RUN' : !report.parityAll ? 'FAIL' : report.parityComplete === false || Object.values(report.watchdog?.timedOutSamples ?? {}).some(w => Object.keys(w).length) ? 'NOT_RUN' : Object.values(report.filesystem).every(w => w.correct === true) ? 'PASS' : 'FAIL';
   gates.push({ id: `P-${label}`, title: `Benchmark ${label}: correct results, filesystem/SQLite parity`, severity: 'P1', area: 'PERFORMANCE', status, cases: bound ? Object.keys(report!.filesystem).length : 0, evidence: `verification/benchmarks/${label}.json`, limitation: !report ? 'No measurement exists' : !bound ? 'Performance evidence is stale or not bound to the exact current full-source identity.' : Object.values(report.watchdog?.timedOutSamples ?? {}).some(w => Object.keys(w).length) ? `At least one query hit the ${report.watchdog?.queryTimeoutMs} ms watchdog; its latency is censored.` : report.parityComplete === false ? 'At least one result set was limit-truncated, so full set parity is unverified.' : 'Warm cache only' });
 }
-for (const label of ['1k', '10k', '100k']) { const q = await read<{ failures: string[]; run_at?: string; sourceBinding?: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } }>(`verification/query/benchmarks/${label}.json`); const bound = !!q && recent(q.run_at) && performanceSourceMatches(q.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance); gates.push({ id: `QB-${label}`, title: `Query benchmark ${label}: results match known counts`, severity: 'P1', area: 'PERFORMANCE', status: !q || !bound ? 'NOT_RUN' : q.failures.length ? 'FAIL' : 'PASS', cases: bound ? 1 : 0, evidence: `verification/query/benchmarks/${label}.json`, limitation: !q ? 'No measurement exists' : !bound ? 'Missing, stale or non-current source binding.' : 'Warm cache only' }); }
-const big = perf.find(p => p.label === '100k' && !!p.report && recent(p.report.timestamp) && performanceSourceMatches(p.report.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance) && p.report.corpus?.documents === 100_000)?.report;
+for (const label of ['1k', '10k', '100k']) { const q = await read<{ failures: string[]; run_at?: string; treeState?: string; sourceBinding?: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } }>(`verification/query/benchmarks/${label}.json`); const bound = !!q && releaseTreeStateValid(q.treeState) && recent(q.run_at) && performanceSourceMatches(q.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance); gates.push({ id: `QB-${label}`, title: `Query benchmark ${label}: results match known counts`, severity: 'P1', area: 'PERFORMANCE', status: !q || !bound ? 'NOT_RUN' : q.failures.length ? 'FAIL' : 'PASS', cases: bound ? 1 : 0, evidence: `verification/query/benchmarks/${label}.json`, limitation: !q ? 'No measurement exists' : !bound ? 'Missing, stale or non-current source binding.' : 'Warm cache only' }); }
+const big = perf.find(p => p.label === '100k' && !!p.report && releaseTreeStateValid(p.report.treeState) && recent(p.report.timestamp) && performanceSourceMatches(p.report.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance) && p.report.corpus?.documents === 100_000)?.report;
 const budget = (name: string, ok: boolean | undefined, got: string, target: string): Gate => ({ id: `PB-${name}`, title: `100k budget: ${name} (${target})`, severity: 'P1', area: 'PERFORMANCE', status: ok === undefined ? 'NOT_RUN' : ok ? 'PASS' : 'FAIL', cases: ok === undefined ? 0 : 1, evidence: 'verification/benchmarks/100k.json', limitation: ok === undefined ? 'No 100k measurement' : got });
-const durableProbe = await read<{ id: string; corpusDocuments: number; commits: number; run_at: string; durableWrite: { p50Ms: number; p95Ms: number; p99Ms: number }; budget: { p95Ms?: number; pass?: boolean }; sourceBinding?: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } }>('verification/performance/durable-write-latest.json');
-const durableProbeBound = !!durableProbe && recent(durableProbe.run_at) && performanceSourceMatches(durableProbe.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance)
+const durableProbe = await read<{ id: string; corpusDocuments: number; commits: number; run_at: string; treeState?: string; durableWrite: { p50Ms: number; p95Ms: number; p99Ms: number }; budget: { p95Ms?: number; pass?: boolean }; sourceBinding?: { fingerprint?: string; fullSourceFileCount?: number; files?: Record<string, string>; workingTreeSourceFingerprint?: string } }>('verification/performance/durable-write-latest.json');
+const durableProbeBound = !!durableProbe && releaseTreeStateValid(durableProbe.treeState) && recent(durableProbe.run_at) && performanceSourceMatches(durableProbe.sourceBinding, sourceEvidence, PERF_SOURCE_FILES, provenance)
   && durableProbe.corpusDocuments === 100_000 && Number.isInteger(durableProbe.commits) && durableProbe.commits > 0
   && performanceMeasurementValid({ timestamp: durableProbe.run_at, corpusDocuments: durableProbe.corpusDocuments, measurementCount: durableProbe.commits, measured: { ...durableProbe.durableWrite, samples: durableProbe.commits }, thresholdMs: durableProbe.budget.p95Ms }, 100_000);
 const slow = big ? Object.entries(big.filesystem).filter(([, w]) => w.p95Ms >= 1000).map(([name, w]) => `${name} ${Math.round(w.p95Ms)} ms`) : [];
@@ -155,7 +165,7 @@ gates.push({ id: 'PLATFORM', title: 'Platform qualification (alias of S8)', seve
 
 const verdictFor = (area: Gate['area']) => { const g = gates.filter(x => x.area === area); const p0 = g.filter(x => x.severity === 'P0'); if (p0.some(x => x.status === 'FAIL')) return 'FAIL'; if (p0.some(x => x.status !== 'PASS')) return 'INCOMPLETE'; if (g.some(x => x.status === 'FAIL')) return 'FAIL'; if (g.some(x => x.status !== 'PASS' && x.severity === 'P1')) return area === 'PERFORMANCE' ? 'INCOMPLETE' : 'PASS'; return 'PASS'; };
 const verdicts = Object.fromEntries(AREAS.map(a => [a, verdictFor(a)])) as Record<Area, string>; const storage = verdicts.STORAGE;
-const readSync = (file: string): unknown => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return undefined; } };
+const readSync = (file: string): unknown => { try { return parseStrictJson(readFileSync(file, 'utf8'), file); } catch { return undefined; } };
 const productionEvidence = collectProductionEvidence(readSync, physical as PhysicalHostsReport | undefined, process.cwd(), sourceEvidence.files, releaseTrustKey, provenance);
 /** A mandatory v1 gate that is not PASS (INCOMPLETE, NOT_RUN or FAIL) keeps the release below GO, whatever the area verdicts say. */
 const selectedAreas = PROFILE_REQUIREMENTS[releaseProfile].areas as Area[];
@@ -167,7 +177,9 @@ const validProductionExclusions = new Set((releaseProfile === 'ga' ? validateExc
 const productionStatuses = Object.fromEntries(productionEvidence.map(item => [`PRODUCTION:${item.id}`, item.status === 'PASS' || releaseProfile === 'ga' && validProductionExclusions.has(item.id) ? 'PASS' : item.status]));
 const capabilityStatus = releaseCapabilitiesValid(readSync('verification/release-capabilities.json'), releaseProfile, sourceEvidence.fingerprint, currentCommit, releaseTrustKey) ? 'PASS' : 'NOT_RUN';
 const allStatusMap: Record<string, string | undefined> = { ...Object.fromEntries(gates.map(g => [g.id, g.status])), ...Object.fromEntries(allMandatory.map(g => [g.id, g.status])), ...productionStatuses, RELEASE_CAPABILITIES: capabilityStatus };
-const profileEvaluation = await evaluateReleaseEvidence('verification', releaseProfile, provenance, allStatusMap);
+const profileEvaluation = evidenceGuardError
+  ? evaluateProfileGateStatuses(releaseProfile, {})
+  : await evaluateReleaseEvidence('verification', releaseProfile, provenance, allStatusMap);
 const selectedMandatory = profileEvaluation.requiredGates.filter(g => selectedMandatoryIds.includes(g.id)).map(g => ({ id: g.id, status: g.status, evidence: [], detail: 'Required by explicit release profile matrix.' }));
 const selectedGateStatuses = profileEvaluation.requiredGates.filter(g => PROFILE_REQUIREMENTS[releaseProfile].requiredGateIds.includes(g.id));
 const profileOpenAreas = selectedAreaStatuses.filter(area => area.status !== 'PASS').map(area => area.id);
@@ -188,6 +200,17 @@ const policy = classifyRelease({
   evidence: productionEvidence,
   exclusions: exclusionsInput
 }, releaseTrustKey);
+if (!provenanceTrusted) {
+  policy.level = 'NOT_RELEASABLE';
+  const offending = [...sourceEvidence.treeState.modified, ...sourceEvidence.treeState.untracked, ...(sourceEvidence.treeState.symlinks ?? []), ...(sourceEvidence.treeState.hardlinks ?? [])].slice(0, 20);
+  policy.blockers.push(`PROVENANCE_DIRTY_TREE${sourceEvidence.treeState.reasonCode ? ` (${sourceEvidence.treeState.reasonCode})` : ''}: ${offending.join(', ') || sourceEvidence.treeState.state}`);
+  policy.summary = `Source provenance is not trusted (${sourceEvidence.treeState.state}); ${policy.summary}`;
+}
+if (evidenceGuardError) {
+  policy.level = 'NOT_RELEASABLE';
+  policy.blockers.push(evidenceGuardError);
+  policy.summary = `${evidenceGuardError}; ${policy.summary}`;
+}
 const decision = policy.level === 'NOT_RELEASABLE' ? 'NO-GO' : policy.level === 'GA_ELIGIBLE' ? 'GA-ELIGIBLE (owner decision required)' : `BETA (not GA: ${policy.blockers.join('; ')})`;
 const env = environment(); const commit = currentCommit;
 const result = { commit, run_at: new Date().toISOString(), environment: env, evidenceSource: sourceEvidence, releaseProfile, releaseProfileRequirements: { areas: selectedAreas, requiredGateIds: PROFILE_REQUIREMENTS[releaseProfile].requiredGateIds, mandatoryGates: selectedMandatoryIds, excludedAreas: AREAS.filter(a => !selectedAreas.includes(a)), excludedMandatoryGates: allMandatory.map(g => g.id).filter(id => !selectedMandatoryIds.includes(id)) }, profileRequiredGateStatuses: profileEvaluation.requiredGates, verdict: verdicts, mandatoryV1Gates: allMandatory, decision, releaseLevel: policy.level, releasePolicy: { automatedGatesPass: policy.automatedGatesPass, productionEvidence, validExclusions: policy.validExclusions, ignoredExclusions: policy.ignoredExclusions, blockers: policy.blockers, summary: policy.summary }, gates, decisionNotes: matrix.decisionNotes };

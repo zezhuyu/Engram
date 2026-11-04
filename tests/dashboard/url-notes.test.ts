@@ -17,6 +17,17 @@ test('URL preflight rejects credentials, schemes, private, loopback and metadata
   for (const url of ['file:///etc/passwd','ftp://example.com/a','https://user:pass@example.com','http://127.0.0.1','http://10.1.2.3','http://169.254.169.254/latest/meta-data','http://[::1]/','https://example.com/'+ 'x'.repeat(2050)]) await assert.rejects(() => validateUrlNoteUrl(url));
 });
 
+test('URL-note preflight accepts an injectable DNS resolver and rejects private rebinding answers', async () => {
+  let calls = 0;
+  const validated = await validateUrlNoteUrl('https://example.com/', async () => {
+    calls++;
+    return calls === 1 ? [{ address: '8.8.8.8', family: 4 }] : [{ address: '127.0.0.1', family: 4 }];
+  });
+  assert.equal(validated.hostname, 'example.com');
+  assert.equal(calls, 1, 'preflight consults one DNS answer set; URL-note fetching remains delegated to its CLI');
+  await assert.rejects(() => validateUrlNoteUrl('https://example.com/', async () => [{ address: '8.8.8.8', family: 4 }, { address: '127.0.0.1', family: 4 }]), /private or non-routable/);
+});
+
 test('draft validation rejects oversized, malformed and executable-shaped schemas', () => {
   assert.deepEqual(parseUrlNoteDraft(JSON.stringify(draft)), draft);
   assert.throws(() => parseUrlNoteDraft('<script>alert(1)</script>'), /JSON/);
