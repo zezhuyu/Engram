@@ -18,7 +18,7 @@ const doc: Document = { id: 'obj_1', revisionId: 'rev_1', revisionNumber: 1, sco
 const request: ModelRequest = { job: 'wiki', documents: [doc], goals: 'goal', instruction: 'be careful' };
 
 const FAKE = (name: string) => `#!/usr/bin/env node
-const fs=require('fs');let input='';const launches=process.env.FAKE_AGENT_LAUNCHES;if(launches)fs.appendFileSync(launches,process.pid+'\\n');process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
+const fs=require('fs');let input='';const launches=process.env.FAKE_AGENT_LAUNCHES;if(launches)fs.appendFileSync(launches,process.pid+'\\n');process.on('uncaughtException',e=>{if(process.env.FAKE_AGENT_DIAGNOSTICS)fs.appendFileSync(process.env.FAKE_AGENT_DIAGNOSTICS,String(e.stack||e)+'\\n');process.exit(1)});process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
  const log=process.env.FAKE_AGENT_LOG;
  if(log)fs.appendFileSync(log,JSON.stringify({name:${JSON.stringify(name)},pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),cwdReal:fs.realpathSync(process.cwd()),tmpdir:process.env.TMPDIR??null,tmpdirReal:fs.realpathSync(process.env.TMPDIR),tmp:process.env.TMP??null,temp:process.env.TEMP??null,stdin:input,dataDir:process.env.ENGRAM_DATA_DIR??null,mdbRoot:process.env.MDB_ROOT??null})+'\\n');
  const mode=process.env.FAKE_MODE||'ok';
@@ -160,14 +160,104 @@ test('agent CLI failures are sanitized, bounded and cancellable', async t => {
   await assert.rejects(make('hang', { timeoutMs: 300 }).generate(request), /timed out/);
   const controller = new AbortController(); const before = await agents.launchCount();
   const pending = make('hang', { timeoutMs: 20000 }).generate(request, { signal: controller.signal });
-  setTimeout(() => controller.abort(), 300);
-  const started = Date.now(); await assert.rejects(pending, { code: 'CANCELLED' }); assert.ok(Date.now() - started < 5000, 'child is killed promptly');
+  const launchDeadline = Date.now() + 10_000;
+  while (await agents.launchCount() === before && Date.now() < launchDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const launched = await agents.launchCount();
+  controller.abort();
+  assert.equal(launched, before + 1, 'abort is issued after the fake child starts');
+  await assert.rejects(pending, { code: 'CANCELLED' });
   assert.equal(await agents.launchCount(), before + 1);
   await assert.rejects(make('ok').generate(request, { signal: AbortSignal.abort() }), { code: 'CANCELLED' });
   const retrying = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 1, timeoutMs: 1200 }), agents.env({ FAKE_MODE: 'hang' }));
   const count = await agents.launchCount(); await assert.rejects(retrying.generate(request), /retries exhausted/); assert.equal((await agents.launchCount()) - count, 2, 'one retry after a timeout');
   const tiny = createProviderFromConfig(base({ provider: 'claude-cli', maxInputTokens: 500 }), agents.env());
   const calls = await agents.launchCount(); await assert.rejects(tiny.generate({ ...request, documents: [{ ...doc, body: 'x'.repeat(5000) }] }), { code: 'CAPABILITY_UNAVAILABLE' }); assert.equal(await agents.launchCount(), calls, 'over-budget input never reaches the CLI');
+});
+
+test('CLI cancellation cannot be lost during setup, immediately after launch, or after settlement', async t => {
+  const agents = await fakeAgents(t);
+  const diagnostics = path.join(agents.dir, 'diagnostics.log');
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, timeoutMs: 15_000 }), agents.env({ FAKE_MODE: 'hang', FAKE_AGENT_DIAGNOSTICS: diagnostics }));
+  const waitForLaunch = async (previous: number, controller: AbortController, pending: Promise<unknown>) => {
+    const until = Date.now() + 5_000;
+    while (!(await agents.calls()).length && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    const calls = await agents.calls();
+    if (!calls.length) { controller.abort(); await assert.rejects(pending); assert.fail('fake CLI launch was not recorded before deadline'); }
+    assert.equal(await agents.launchCount(), previous + 1, 'exactly one fake CLI launched');
+    return calls.at(-1)!.pid;
+  };
+  const waitDead = async (pid: number) => {
+    const until = Date.now() + 3_000;
+    while (processIsAlive(pid) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(processIsAlive(pid), false, `fake CLI ${pid} exited promptly`);
+  };
+  const already = await agents.launchCount();
+  await assert.rejects(provider.generate(request, { signal: AbortSignal.abort() }), { code: 'CANCELLED' });
+  assert.equal(await agents.launchCount(), already, 'already-aborted signal prevents launch');
+
+  // Abort synchronously after entering generate(): createOwnedOperation is still
+  // asynchronous, so this exercises the listener-registration race directly.
+  for (let i = 0; i < 3; i++) {
+    const controller = new AbortController(), before = await agents.launchCount(), started = Date.now();
+    const pending = provider.generate(request, { signal: controller.signal });
+    controller.abort();
+    await assert.rejects(pending, { code: 'CANCELLED' });
+    assert.ok(Date.now() - started < 5_000, 'setup abort does not wait for timeoutMs');
+    if (await agents.launchCount() > before) await waitDead((await agents.calls()).at(-1)!.pid);
+  }
+
+  const controller = new AbortController(), before = await agents.launchCount(), started = Date.now();
+  const pending = provider.generate(request, { signal: controller.signal });
+  const pid = await waitForLaunch(before, controller, pending);
+  controller.abort(); controller.abort();
+  await assert.rejects(pending, { code: 'CANCELLED' });
+  controller.abort(); // after settle must be harmless
+  await waitDead(pid);
+  assert.ok(Date.now() - started < 5_000, 'launched process terminates far below timeoutMs');
+  assert.equal(await agents.launchCount(), before + 1, 'repeated abort does not launch a retry');
+});
+
+test('CLI cancellation remains prompt under CPU contention and preserves unrelated processes', async t => {
+  const agents = await fakeAgents(t);
+  const diagnostics = path.join(agents.dir, 'diagnostics.log');
+  const burners = Array.from({ length: 3 }, () => spawn('yes', [], { stdio: 'ignore' }));
+  t.after(() => { for (const burner of burners) if (burner.exitCode === null) burner.kill('SIGKILL'); });
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, timeoutMs: 15_000 }), agents.env({ FAKE_MODE: 'hang', FAKE_AGENT_DIAGNOSTICS: diagnostics }));
+  const sentinel = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+  t.after(() => { if (sentinel.exitCode === null) sentinel.kill('SIGKILL'); });
+  const before = await agents.launchCount(), controller = new AbortController(), started = Date.now();
+  const pending = provider.generate(request, { signal: controller.signal });
+  const until = Date.now() + 7_000;
+  while ((await agents.calls()).length === 0 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 15));
+  const pid = (await agents.calls()).at(-1)?.pid;
+  if (!pid) { controller.abort(); await assert.rejects(pending); assert.fail(`fake agent did not start under load; count=${await agents.launchCount()} diagnostics=${await fs.readFile(diagnostics, 'utf8').catch(() => '')}`); }
+  controller.abort(); controller.abort();
+  await assert.rejects(pending, { code: 'CANCELLED' });
+  const deadBy = Date.now() + 4_000;
+  while (processIsAlive(pid!) && Date.now() < deadBy) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(processIsAlive(pid!), false, `fake agent ${pid} exited under load`);
+  assert.equal(sentinel.exitCode, null, 'the unrelated sentinel remains alive');
+  assert.ok(Date.now() - started < 7_000, 'cancellation is far below timeoutMs under load');
+});
+
+test('CLI abort during retry delay does not launch another process or retain its listener', async t => {
+  const agents = await fakeAgents(t);
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 2, timeoutMs: 5_000 }), agents.env({ FAKE_MODE: 'fail' }));
+  const controller = new AbortController(), before = await agents.launchCount(), started = Date.now();
+  const pending = provider.generate(request, { signal: controller.signal });
+  const until = Date.now() + 5_000;
+  while ((await agents.calls()).length === 0 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+  const pid = (await agents.calls()).at(-1)?.pid;
+  if (!pid) { controller.abort(); await assert.rejects(pending); assert.fail('first retryable attempt was not recorded before deadline'); }
+  const deadBy = Date.now() + 2_000;
+  while (processIsAlive(pid!) && Date.now() < deadBy) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(processIsAlive(pid!), false, `failed first attempt ${pid} exited`);
+  controller.abort();
+  await assert.rejects(pending, { code: 'CANCELLED' });
+  assert.equal(await agents.launchCount(), before + 1, 'abort during backoff prevents retry launch');
+  assert.ok(Date.now() - started < 3_000, 'abort interrupts the one-second backoff promptly');
 });
 
 test('backend selection: auto prefers claude then codex; env and config swap it; missing CLIs are reported, never executed by doctor', async t => {

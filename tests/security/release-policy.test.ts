@@ -189,7 +189,7 @@ test('performance measurements need fresh corpus-bound finite distributions; pas
 
 test('source fingerprint covers extensionless deployment inputs and detects deletion', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'engram-source-evidence-'));
-  const samples: Array<[string, string]> = [['integrations/lifecycle.ts', 'one'], ['macos/App.swift', 'one'], ['linux/README.md', 'one'], ['macos/icon.png', 'one'], ['deploy/Caddyfile', 'one'], ['deploy/.env.example', 'one'], ['verification/profile/labeled-corpus.json', 'one'], ['verification/profile/correction-corpus.json', 'one'], ['verification/dream/labeled-scenarios.json', 'one'], ['verification/benchmarks/corpus-manifest.json', 'one']];
+  const samples: Array<[string, string]> = [['integrations/lifecycle.ts', 'one'], ['macos/App.swift', 'one'], ['linux/README.md', 'one'], ['macos/icon.png', 'one'], ['deploy/Caddyfile', 'one'], ['deploy/.env.example', 'one'], ['verification/profile/labeled-corpus.json', 'one'], ['verification/profile/correction-corpus.json', 'one'], ['fixtures/inputs/dream/labeled-scenarios.json', 'one'], ['verification/benchmarks/corpus-manifest.json', 'one']];
   for (const [name, body] of samples) { mkdirSync(path.dirname(path.join(root, name)), { recursive: true }); writeFileSync(path.join(root, name), body); }
   const before = await currentSourceEvidence(root);
   for (const name of samples.map(([name]) => name)) {

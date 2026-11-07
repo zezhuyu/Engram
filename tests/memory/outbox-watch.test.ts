@@ -68,10 +68,10 @@ test('an empty queue costs no network at all (a directory listing only)', async 
 
 test('CLI: watch refuses a token file other users can read, and the printed service definitions never contain the credential', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'engram-watch-cli-')); t.after(() => rm(dir, { recursive: true, force: true })); const file = path.join(dir, 'token'); await writeFile(file, 'super-secret-token-value-0123456789abcdef\n'); await chmod(file, 0o644);
-  const env = { ...process.env, ENGRAM_OUTBOX: path.join(dir, 'outbox') };
+  const env = { ...process.env, ENGRAM_OUTBOX: path.join(dir, 'outbox'), ENGRAM_AUTO_RECONNECT: '1' }; // the isolation helper sets 0; the explicit watch command honours the off switch
   const refused = spawnSync(process.execPath, [MDB, 'outbox', 'watch', '--url', 'http://127.0.0.1:9/mcp', '--token-file', file], { encoding: 'utf8', env, timeout: 20000 }); assert.notEqual(refused.status, 0); assert.match(refused.stderr + refused.stdout, /must not be readable by others/);
   for (const platform of ['macos', 'linux'] as const) { const unit = spawnSync(process.execPath, [MDB, 'outbox', 'watch-unit', '--platform', platform, '--url', 'http://100.1.2.3:9/mcp', '--token-file', file, '--workspace', 'proj'], { encoding: 'utf8', env, timeout: 20000 }); const text = unit.stdout; assert.equal(unit.status, 0, unit.stderr);
-    assert.ok(!text.includes('super-secret-token'), 'the credential is not in the service text'); assert.match(text, platform === 'macos' ? /KeepAlive/ : /Restart=always/); assert.match(text, /outbox/); }
+    assert.ok(!text.includes('super-secret-token'), 'the credential is not in the service text'); assert.match(text, platform === 'macos' ? /KeepAlive/ : /Restart=on-failure/); assert.match(text, /outbox/); }
   assert.ok(!watcherServiceText('linux', { node: '/n', mdb: '/m', url: 'http://h/mcp', tokenFile: '/t' }).includes('Bearer'));
   const isolated = watcherServiceText('macos', { node: '/n', mdb: '/m', url: 'http://h/mcp', tokenFile: '/t', env: { ENGRAM_DATA_DIR: path.join(dir, 'selected-root') } });
   assert.ok(!isolated.includes('StandardErrorPath'), 'launchd must not create an unbounded app-owned log file');
@@ -81,7 +81,7 @@ test('CLI: the real watcher process delivers through a 0600 token file and then 
   const w = await world(t); await w.start(); const dir = await mkdtemp(path.join(tmpdir(), 'engram-watch-proc-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'token'); await writeFile(file, w.token + '\n'); await chmod(file, 0o600);
   await enqueueWrite(w.outbox, { url: w.url, workspaceId: 'proj', tool: 'engram_task_upsert', arguments: { taskId: 'W-3', title: 'Delivered by the real process', status: 'open' } });
-  const child = spawn(process.execPath, [MDB, 'outbox', 'watch', '--url', w.url, '--token-file', file, '--workspace', 'proj', '--outbox', w.outbox, '--interval-sec', '1'], { env: process.env, stdio: ['ignore', 'ignore', 'pipe'] }); t.after(() => { child.kill('SIGKILL'); });
+  const child = spawn(process.execPath, [MDB, 'outbox', 'watch', '--url', w.url, '--token-file', file, '--workspace', 'proj', '--outbox', w.outbox, '--interval-sec', '1'], { env: { ...process.env, ENGRAM_AUTO_RECONNECT: '1' }, stdio: ['ignore', 'ignore', 'pipe'] }); t.after(() => { child.kill('SIGKILL'); });
   let log = ''; child.stderr!.setEncoding('utf8'); child.stderr!.on('data', (d: string) => { log += d; });
   await until(() => /"event":"delivered"/.test(log), 20000, 'the watcher process to deliver'); assert.ok((await w.tasks()).some(d => d.metadata.stableId === 'W-3')); assert.equal((await listOutbox(w.outbox, () => true)).length, 0);
   const stopped = new Promise<number | null>(res => child.once('exit', code => res(code))); const asked = Date.now(); child.kill('SIGTERM');

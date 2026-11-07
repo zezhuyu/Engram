@@ -73,9 +73,11 @@ function validateInput(input: PutInput): void {
   if (input.metadata && (Array.isArray(input.metadata) || typeof input.metadata !== 'object')) throw new MDBError('INVALID_INPUT', 'Invalid metadata');
   if (input.idempotencyKey !== undefined && (typeof input.idempotencyKey !== 'string' || input.idempotencyKey.length > 256)) throw new MDBError('INVALID_INPUT', 'Invalid idempotency key');
 }
-/** Head/view projections are flushed this long after the first un-flushed write, and at process exit. */
-const PROJECTION_FLUSH_MS=500;
-/** Journal events whose projections are re-checked on the first owner operation of a Vault instance. */
+/** Head/view projections are flushed after this much write-idle time (so the flush's fsyncs never compete with a burst of commits)... */
+const PROJECTION_IDLE_MS=300;
+/** ...but never later than this after the first un-flushed write, so a sustained write load still bounds the un-flushed window. */
+const PROJECTION_MAX_AGE_MS=3000;
+/** Journal events whose projections are re-checked on the first owner operation of a Vault instance (3 s of sustained commits is far below this). */
 const PROJECTION_TAIL_EVENTS=512;
 const exitFlush=new Set<{flushProjections():Promise<unknown>}>();
 let exitHooked=false;
@@ -281,7 +283,7 @@ export class Vault {
     const text=serializeDocument(doc);await this.assertMutationCapacity(Buffer.byteLength(text) + 4096);await this.store.putImmutable(`.mdb/objects/${objectId}/revs/${revisionId}.md`,Buffer.from(text));this.options.fault?.('after_revision');this.options.fault?.('after_revision_write');this.options.fault?.('revision.after_dirsync');
     const event:CommitEvent={sequence:events.length+1,transactionId:this.newId('tx'),objectId,revisionId,...(previous?{previousRevisionId:previous.revisionId}:{}),path:doc.path,scope:doc.scope,operation,timestamp:now,revisionSha256:createHash('sha256').update(text).digest('hex'),...(input.idempotencyKey?{idempotencyKey:input.idempotencyKey,idempotencyPayloadHash:replayHash,idempotencyActorId:this.actor.actorId}:{})};
     this.options.fault?.('journal.before_append');const committedEvent = await this.appendEvent(event);/* commit point: durable append or conditional S3 head publication */this.options.fault?.('after_journal');this.options.fault?.('after_journal_append');this.options.fault?.('before_view');this.options.fault?.('before_view_update');
-    /* The commit point has passed. Head and view are rebuildable projections of the journal and the immutable revision: written atomically but NOT fsynced here; flushProjections() and tail reconciliation make them durable or repair them (see verification/durability/commit-protocol-adr.md). */this.options.fault?.('head.before_replace');await atomicWriteVolatile(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.noteProjections([`.mdb/heads/${objectId}.json`,doc.path]);this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');return doc;
+    /* The commit point has passed. Head and view are rebuildable projections of the journal and the immutable revision: written atomically but NOT fsynced here; flushProjections() and tail reconciliation make them durable or repair them (see verification/durability/commit-protocol-adr.md). */this.options.fault?.('head.before_replace');await atomicWriteVolatile(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.noteProjections([doc.path]);/* only the view is flushed: nothing ever reads a head file, recover() and tail reconciliation rewrite it, so it never needs to be durable */this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');return doc;
   }
   private async assertMutationCapacity(estimatedGrowthBytes: number): Promise<void> {
     if (this.remoteJournal()) return; // remote backends have their own capacity and acknowledgement contract
@@ -302,7 +304,14 @@ export class Vault {
   private async isCommittedRevision(objectId:string,events:CommitEvent[],bytes:Uint8Array):Promise<boolean> {for(const e of events){if(e.objectId!==objectId||e.operation==='purge')continue;try{if(Buffer.from(await this.store.read(`.mdb/objects/${objectId}/revs/${e.revisionId}.md`)).equals(Buffer.from(bytes)))return true;}catch{/* missing revision is reported by verify */}}return false;}
   /** Projection files (heads, views) written since the last flush, with a version so a rewrite after the flush snapshot is not forgotten. */
   private readonly pendingProjections=new Map<string,number>();private flushTimer?:NodeJS.Timeout;private flushChain:Promise<unknown>=Promise.resolve();private projectionVersion=0;private tailReconciled=false;
-  private noteProjections(keys:string[]):void{for(const key of keys)this.pendingProjections.set(key,++this.projectionVersion);if(!this.flushTimer){this.flushTimer=setTimeout(()=>{this.flushTimer=undefined;void this.flushProjections().catch(()=>undefined);},PROJECTION_FLUSH_MS);this.flushTimer.unref();exitFlush.add(this);hookExit();}}
+  private projectionLastWrite=0;private projectionFirstWrite?:number;
+  private noteProjections(keys:string[]):void{const now=Date.now();for(const key of keys)this.pendingProjections.set(key,++this.projectionVersion);this.projectionLastWrite=now;this.projectionFirstWrite??=now;if(!this.flushTimer)this.scheduleProjectionFlush(PROJECTION_IDLE_MS);}
+  private scheduleProjectionFlush(delay:number):void{
+    this.flushTimer=setTimeout(()=>{this.flushTimer=undefined;const now=Date.now(),idle=now-this.projectionLastWrite,age=now-(this.projectionFirstWrite??now);
+      if(idle<PROJECTION_IDLE_MS&&age<PROJECTION_MAX_AGE_MS){this.scheduleProjectionFlush(Math.max(10,Math.min(PROJECTION_IDLE_MS-idle,PROJECTION_MAX_AGE_MS-age)));return;}/* writes are still arriving: wait for a quiet moment */
+      this.projectionFirstWrite=undefined;void this.flushProjections().catch(()=>undefined);},delay);
+    this.flushTimer.unref();exitFlush.add(this);hookExit();
+  }
   /** Makes pending head/view writes durable (fsync each file, then each directory once). Never fails or delays an acknowledged commit: errors leave the keys pending for the next flush. */
   flushProjections():Promise<{files:number;directories:number}>{
     const run=this.flushChain.then(async()=>{const snapshot=[...this.pendingProjections];if(!snapshot.length){exitFlush.delete(this);return{files:0,directories:0};}const result=await flushKeys(this.root,snapshot.map(([key])=>key),this.options.fault);for(const[key,version]of snapshot)if(this.pendingProjections.get(key)===version)this.pendingProjections.delete(key);if(!this.pendingProjections.size)exitFlush.delete(this);return result;});

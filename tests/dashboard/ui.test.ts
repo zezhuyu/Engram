@@ -32,7 +32,8 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.doesNotMatch(assets['/assets/app.js']!.body, /\beval\s*\(|\.innerHTML\b|\.outerHTML\b/);
   assert.match(assets['/assets/app.js']!.body, /location\.hash/);
   assert.match(assets['/assets/app.js']!.body, /history\.replaceState/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /sessionStorage|localStorage/);
+  assert.match(assets['/assets/app.js']!.body, /sessionStorage\.getItem\('engram-chat-use-model'\)/);
+  assert.doesNotMatch(assets['/assets/app.js']!.body, /localStorage/);
   assert.match(assets['/assets/app.js']!.body, /Welcome back/);
   assert.doesNotMatch(assets['/assets/app.js']!.body, /Sign-in link needed/);
   assert.match(assets['/assets/app.js']!.body, /Sign-in temporarily locked/);
@@ -48,12 +49,14 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /connector-steps/);
   assert.match(assets['/assets/app.js']!.body, /Set/);
   assert.match(assets['/assets/app.js']!.body, /clear-secret/);
+  assert.match(assets['/assets/app.js']!.body, /switchLabel\(clear,'Clear '\+label/);
+  assert.match(assets['/assets/app.js']!.body, /querySelector\('\.clear-secret input'\)\?\.checked/);
   assert.match(assets['/assets/app.js']!.body, /X-Engram-Dashboard/);
   assert.match(assets['/assets/app.js']!.body, /autocomplete='current-password'/);
   assert.match(assets['/assets/app.js']!.body, /autocomplete='new-password'/);
   assert.match(assets['/assets/app.js']!.body, /OpenAI \/ ChatGPT \(Secure MCP Tunnel\)/);
   assert.match(assets['/assets/app.js']!.body, /claude mcp add --transport http engram/);
-  assert.match(assets['/assets/app.js']!.body, /Allow private address \(unsafe\)/);
+  assert.match(assets['/assets/app.js']!.body, /Unsafe: permits a manually requested connection test/);
   assert.match(assets['/assets/app.js']!.body, /Remote dashboard credentials/);
   assert.match(assets['/assets/app.js']!.body, /No credentials yet/);
   assert.match(assets['/assets/app.js']!.body, /Access level/);
@@ -64,7 +67,9 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.ok(assets['/assets/app.css']!.body.includes('.chat-composer.is-dragging .chat-drop-hint{display:block}'));
   assert.ok(assets['/assets/app.css']!.body.includes('input[type=date],select{appearance:none'));
   assert.ok(assets['/assets/app.css']!.body.includes('.credentials-form,.proposal-fields{display:grid;grid-template-columns:repeat(2'));
-  assert.ok(assets['/assets/app.css']!.body.includes('.chat-model input[type=checkbox]::before'));
+  assert.ok(assets['/assets/app.css']!.body.includes('.switch input:checked+.track'));
+  assert.ok(assets['/assets/app.css']!.body.includes('.switch:hover .track'));
+  assert.ok(assets['/assets/app.css']!.body.includes('prefers-reduced-motion:reduce){.switch'));
   assert.match(assets['/assets/app.js']!.body, /Client settings/);
   assert.match(assets['/assets/app.js']!.body, /X-Engram-Reauth-Password/);
   assert.match(assets['/']!.body!, /ONE-TIME CREDENTIAL/);
@@ -310,4 +315,17 @@ test('served dashboard script completes its first refresh and renders every scre
     if (screen === 'settings-error') assert.match(rendered, /Effective settings could not be loaded/);
     assert.equal(document.querySelector('#updated').textContent.startsWith('Updated '), true, `${screen} should show refresh completion`);
   }
+});
+
+test('dashboard boolean settings use accessible switch markup and persistent hover fill rules', () => {
+  const js = assets['/assets/app.js']!.body, css = assets['/assets/app.css']!.body;
+  assert.match(js, /function switchLabel\(input,label,description='',className=''\)/);
+  assert.match(js, /input\.setAttribute\('role','switch'\)/);
+  assert.match(assets['/']!.body, /Allow the model to read your wiki excerpts/);
+  assert.match(js, /model\.allowNetwork/);
+  assert.match(js, /The whole vault, unrelated pages, other files, and the replies Engram wrote without the model are not sent/);
+  assert.match(js, /Answer mode: Deterministic retrieval/);
+  assert.match(css, /\.switch input:checked\+\.track\{[^}]*background-image:var\(--accent-grad\)/);
+  assert.match(css, /\.switch:hover \.track\{filter:brightness\(1\.08\)/);
+  assert.match(css, /\.switch input:focus-visible\+\.track/);
 });

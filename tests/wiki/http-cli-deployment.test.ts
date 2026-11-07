@@ -6,6 +6,7 @@ import { disposableVault } from '../helpers/disposable-vault.js';
 import { createHttpCredential } from '../../packages/mcp/credentials.js';
 import { recordCase } from '../helpers/report.js';
 import { ownChildProcess, stopOwnedChildProcess } from '../helpers/owned-process.js';
+import { assertOversizedBodyRejected } from '../helpers/oversized-body.js';
 import type { Vault } from '../../packages/core/vault.js';
 import type { Scope } from '../../packages/core/types.js';
 
@@ -146,7 +147,7 @@ test('HTTP MCP and built CLI exercise wiki CRUD, skills, ACLs, bounds, concurren
   assert.equal(JSON.stringify(forbiddenWrite.content), JSON.stringify(missingWrite.content), 'read-only and missing targets use the same generic error');
   const malformedResponse = await readOnly.raw('{');
   assert.equal(malformedResponse.status, 400, 'malformed JSON is bounded and rejected');
-  assert.equal((await readOnly.raw(JSON.stringify({ payload: 'x'.repeat(2_200_000) }))).status, 413, 'oversized JSON receives a bounded rejection');
+  const oversizedOutcome = await assertOversizedBodyRejected(async () => ({ status: (await readOnly.raw(JSON.stringify({ payload: 'x'.repeat(2_200_000) }))).status }));
   let afterOversized: Json;
   try { afterOversized = await client.call('mdb_wiki_lint', { scopes: [wiki], limit: 1 }); }
   catch (error) { throw new Error(`listener check after oversized rejection failed: ${String(error)}`); }
@@ -203,6 +204,6 @@ test('HTTP MCP and built CLI exercise wiki CRUD, skills, ACLs, bounds, concurren
   assert.equal((await vault.config()).model.provider, 'ollama');
   assert.notEqual(originalConfig.model.provider, 'ollama', 'the test switches from the vault default to the configured provider');
 
-  console.log(JSON.stringify({ http: { tools: tools.filter(name => name.startsWith('mdb_wiki') || name === 'mdb_diff'), actions: proposals.length, noProviderSkills: skills.length, providerSkills: skills.length, concurrentClients: concurrent.length, malformed: 400, oversized: 413, aclParity: true }, cli: { actions: cliProposals.length, optionForms: 2, json: true, invalidExitCode: invalid.status, remote: 'passed', reviewed: cliProposals.length, history: '2 revisions', searchHidesRetired: true } }));
+  console.log(JSON.stringify({ http: { tools: tools.filter(name => name.startsWith('mdb_wiki') || name === 'mdb_diff'), actions: proposals.length, noProviderSkills: skills.length, providerSkills: skills.length, concurrentClients: concurrent.length, malformed: 400, oversized: oversizedOutcome, aclParity: true }, cli: { actions: cliProposals.length, optionForms: 2, json: true, invalidExitCode: invalid.status, remote: 'passed', reviewed: cliProposals.length, history: '2 revisions', searchHidesRetired: true } }));
   recordCase({ suite: 'wiki', name: 'wiki-http-cli-deployment-e2e', status: 'PASS' });
 });

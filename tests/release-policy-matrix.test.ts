@@ -123,9 +123,9 @@ test('synthetic evidence is accepted only from an opted-in temp fixture; real ve
     try {
       await Promise.all([mkdir(fakeTemp), mkdir(outside)]);
       await writeFile(path.join(outside, 'record.json'), '{"synthetic":true}');
-      await assert.rejects(assertSyntheticEvidenceAllowed(outside), /synthetic evidence rejected/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(outside, realpath, [fakeTemp]), /synthetic evidence rejected/);
       await writeFile(path.join(outside, 'nested.json'), JSON.stringify({ wrapper: { evidence: [{ synthetic: true }] } }));
-      await assert.rejects(assertSyntheticEvidenceAllowed(outside), /synthetic evidence rejected/);
+      await assert.rejects(assertSyntheticEvidenceAllowed(outside, realpath, [fakeTemp]), /synthetic evidence rejected/);
       await writeFile(path.join(fakeTemp, 'record.json'), '{"synthetic":true}');
       process.chdir(fakeTemp);
       await assert.doesNotReject(assertSyntheticEvidenceAllowed(fakeTemp, realpath, [fakeTemp]));

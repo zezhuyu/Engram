@@ -84,16 +84,16 @@ test('profile: sensitive inferred items need explicit confirmation, rejection st
   const all = await engine.proposals();
   assert.equal(all.length, 3);
   const [health, declared, plain] = all;
-  assert.ok(health!.flags!.includes('sensitive') && health!.critic?.verdict === 'review_required');
+  // Policy (remediation): a sensitive trait inferred from indirect words is rejected outright instead of being offered for confirmation; only the user's own first-person statement can become a sensitive candidate.
+  assert.equal(health!.status, 'rejected'); assert.ok(health!.flags!.includes('sensitive_inference'));
   assert.ok(declared!.flags!.includes('sensitive'), 'metadata.sensitivity=sensitive is respected');
   assert.ok(!plain!.flags!.includes('sensitive'));
 
-  await assert.rejects(engine.review(health!.id, true), { code: 'INVALID_INPUT' });
+  assert.equal((await engine.review(health!.id, true)).status, 'rejected', 'a rejected inference cannot be approved');
   assert.equal((await kinds(vault, 'user_insight')).length, 0, 'nothing persisted without confirmation');
-  const rejected = await engine.review(declared!.id, false, 'Not appropriate to infer');
-  assert.equal(rejected.status, 'rejected');
+  await assert.rejects(engine.review(declared!.id, true), { code: 'INVALID_INPUT' }); // a model-declared sensitive item needs explicit confirmation
   assert.equal((await kinds(vault, 'user_insight')).length, 0);
-  const confirmed = await engine.review(health!.id, true, 'User confirmed this fact', { confirmSensitive: true });
+  const confirmed = await engine.review(declared!.id, true, 'User confirmed this fact', { confirmSensitive: true });
   assert.equal(confirmed.status, 'approved');
   assert.equal((await kinds(vault, 'user_insight')).length, 1);
   assert.equal((await vault.get(confirmed.objectId!)).metadata.reviewReason, 'User confirmed this fact');

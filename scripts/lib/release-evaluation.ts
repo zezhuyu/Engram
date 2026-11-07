@@ -17,7 +17,7 @@ async function canonicalPathUnder(candidate: string, parent: string, resolvePath
   }
 }
 
-async function trustedTempBases(resolvePath: typeof realpath, testBases?: readonly string[]): Promise<string[]> {
+export async function trustedTempBases(resolvePath: typeof realpath, testBases?: readonly string[]): Promise<string[]> {
   const candidates = testBases ? [...testBases] : ['/tmp', '/private/tmp', '/var/tmp'];
   if (!testBases && process.platform === 'darwin') {
     const result = spawnSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' });

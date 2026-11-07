@@ -4,14 +4,17 @@ import path from 'node:path';
 import { Vault } from '../packages/core/vault.js';
 import { createProviderFromConfig } from '../packages/models/factory.js';
 import { IntelligenceEngine } from '../packages/intelligence/index.js';
-import { inputPath } from './lib/suite.js';
+import { canonicalInput, inputPath } from './lib/suite.js';
+import { buildProvenance } from './lib/eval-provenance.js';
 import { currentSourceEvidence } from './lib/source-evidence.js';
 import { correctionSupersessionStatus, hasExactSourceEvidence, predictionCountsByCase, profileClaimMatches } from './lib/profile-metrics.js';
 
 type Case = { id: string; scope: 'global' | 'project:orion'; text: string; expected: null | { category: string; key: string; terms: string[]; relation?: { left: string; operator: string; right: string } }; supersedes?: string };
 const corpusPath = process.env.MDB_PROFILE_CORPUS ?? 'profile/labeled-corpus.json';
+const corpusFile = path.isAbsolute(corpusPath) ? corpusPath : process.env.MDB_PROFILE_CORPUS ? inputPath(corpusPath) : canonicalInput(corpusPath); // the default corpus has exactly one canonical location
+const PROFILE_EVALUATOR_FILES = ['scripts/evaluate-profile.ts', 'scripts/lib/profile-metrics.ts', 'scripts/lib/eval-provenance.ts', 'packages/intelligence/insights.ts'];
 const holdout = path.basename(corpusPath) === 'holdout-corpus.json';
-const corpus = JSON.parse(await fs.readFile(inputPath(corpusPath), 'utf8')) as { version: number; thresholds: { precision: number; recall: number; falsePositiveRate: number; jobSuccessRate: number; scopeAccuracy: number; evidenceGrounding: number }; cases: Case[] };
+const corpus = JSON.parse(await fs.readFile(corpusFile, 'utf8')) as { version: number; thresholds: { precision: number; recall: number; falsePositiveRate: number; jobSuccessRate: number; scopeAccuracy: number; evidenceGrounding: number }; cases: Case[] };
 const providerName = process.env.MDB_TEST_PROVIDER ?? 'claude-cli';
 const modelName = process.env.MDB_TEST_MODEL;
 if (!/-cli$|^auto$/.test(providerName) && !modelName) throw new Error('MDB_TEST_MODEL is required for API providers');
@@ -29,6 +32,14 @@ provider.generate = async request => {
   try { const response = await generate(request); rawCalls.push({ request, response }); return response; }
   catch (error) { const e = error as { code?: string; message?: string }; rawCalls.push({ request, error: { code: e.code, message: e.message } }); throw error; }
 };
+if (provider.critique) {
+  // Keep the critic's exact input and verdict too, so a rejection of a faithful statement can be explained from raw records.
+  const critique = provider.critique.bind(provider);
+  provider.critique = async request => {
+    try { const response = await critique(request); rawCalls.push({ kind: 'critique', request: { proposal: request.proposal, evidence: request.evidence.map(doc => ({ uri: doc.uri, revisionId: doc.revisionId, body: doc.body })) }, response }); return response; }
+    catch (error) { const e = error as { code?: string; message?: string }; rawCalls.push({ kind: 'critique', error: { code: e.code, message: e.message } }); throw error; }
+  };
+}
 const allRuns: Array<Array<Record<string, unknown>>> = [];
 const rawByCase = new Map<string, Array<{ run: number; jobStatus: string; responses: string[]; calls: Array<Record<string, unknown>> }>>();
 for (let run = 1; run <= RUNS; run++) {
@@ -69,8 +80,10 @@ try {
     const sourceValid = hasExactSourceEvidence(proposal?.input.evidence, { uri: source.uri, revisionId: source.revisionId, body: item.text });
     const wantedScope = item.scope === 'global' ? 'global' : 'orion';
     const scopeCorrect = !!proposal && proposal.input.metadata?.scopeLabel === wantedScope;
+    // Diagnostic only (not scored): a vetoed correction still leaves a visible review-gated fallback proposal.
+    const correctionFallbackVisible = (await engine.proposals()).some(p => p.input.metadata?.correctionFallback === true && p.status === 'pending' && p.input.metadata?.correctionFallbackSourceId === source.id);
     const correctionOverride = !prior || (!!proposal && proposal.input.metadata?.evidenceClass === 'explicit' && (proposal.flags ?? []).includes('supersedes_earlier'));
-    rows.push({ id: item.id, expected: expected ? 'insight' : 'none', requiresSupersession: !!item.supersedes, extracted: scored.length > 0, candidateGenerated: proposals.length > 0, match: matches, predictionMatches: scored.map(p => p.match), predictions: scored, retainedPredictions: scored.length, category: proposal?.input.metadata?.category ?? null, preferenceKey: proposal?.input.metadata?.preferenceKey ?? null, scopeCorrect: extracted && scopeCorrect, sourceValid: extracted && sourceValid, reviewGated: !proposal || proposal.status === 'pending' || proposal.status === 'rejected', correctionOverride, jobStatus: job?.status ?? 'missing', outcome: job?.telemetry?.outcome ?? (job?.status === 'dead_letter' ? 'malformed' : 'none'), modelCalls: job?.telemetry?.modelCalls ?? 0, malformed: job?.telemetry?.malformed ?? 0, repairs: job?.telemetry?.repairs ?? 0, ...(job?.error ? { jobError: job.error } : {}), ...(proposal ? { claim: proposal.input.body, proposalStatus: proposal.status, flags: proposal.flags ?? [] } : {}) });
+    rows.push({ id: item.id, expected: expected ? 'insight' : 'none', requiresSupersession: !!item.supersedes, extracted: scored.length > 0, candidateGenerated: proposals.length > 0, match: matches, predictionMatches: scored.map(p => p.match), predictions: scored, retainedPredictions: scored.length, category: proposal?.input.metadata?.category ?? null, preferenceKey: proposal?.input.metadata?.preferenceKey ?? null, scopeCorrect: extracted && scopeCorrect, sourceValid: extracted && sourceValid, reviewGated: !proposal || proposal.status === 'pending' || proposal.status === 'rejected', correctionOverride, correctionFallbackVisible, jobStatus: job?.status ?? 'missing', outcome: job?.telemetry?.outcome ?? (job?.status === 'dead_letter' ? 'malformed' : 'none'), modelCalls: job?.telemetry?.modelCalls ?? 0, malformed: job?.telemetry?.malformed ?? 0, repairs: job?.telemetry?.repairs ?? 0, ...(job?.error ? { jobError: job.error } : {}), ...(proposal ? { claim: proposal.input.body, proposalStatus: proposal.status, flags: proposal.flags ?? [] } : {}) });
   }
 } finally { await fs.rm(root, { recursive: true, force: true }); }
 allRuns.push(rows);
@@ -101,7 +114,7 @@ const thresholdPass = metrics.precision >= thresholds.precision && metrics.recal
 await fs.mkdir(RAW_OUTPUT_DIR, { recursive: true });
 for (const [id, entries] of rawByCase) await fs.writeFile(path.join(RAW_OUTPUT_DIR, `${id}.json`), JSON.stringify({ case: id, note: 'Redacted local model responses for a synthetic case.', attempts: entries }, null, 2) + '\n');
 const evidenceSource = await currentSourceEvidence();
-const report = { status: thresholdPass ? 'PASS' : 'FAIL', configuration: { criticEnabled }, command: `MDB_PROFILE_CORPUS=${corpusPath} MDB_TEST_PROVIDER=${providerName} MDB_TEST_MODEL=${modelName ?? '(CLI default)'} MDB_EVAL_RUNS=${RUNS} MDB_PROFILE_CRITIC=${criticEnabled} npm run eval:profile`, provider: provider.id, model: modelName ?? null, corpus: corpusPath, corpusVersion: corpus.version, holdout, rawResponses: RAW_OUTPUT_DIR, seeding: 'no sampling seed is exposed by the provider; stability is measured by repeated independent runs', runAt: new Date().toISOString(), thresholds, runs: RUNS, counts, jobs: overall.jobs, metrics, intervals95: overall.intervals95, originalV1Subset: originalSubset && { counts: originalSubset.counts, jobs: originalSubset.jobs, metrics: originalSubset.metrics }, perRunMetrics: perRun, cases: rows, evidenceSource, limitations: ['Synthetic corpus is reproducible but is not a sample of real users.', 'Term/category labels are explicit adjudication rules; extraction confidence is not calibrated to factual truth.', 'Sensitive-inference review remains protected by deterministic tests; this corpus does not evaluate sensitive-attribute classification.'] };
+const report = { status: thresholdPass ? 'PASS' : 'FAIL', configuration: { criticEnabled }, provenance: await buildProvenance({ corpusPath: corpusFile, evaluatorFiles: PROFILE_EVALUATOR_FILES, sourceFingerprint: evidenceSource.fingerprint, treeState: evidenceSource.treeState.state, model: { provider: provider.id, model: modelName ?? null, baseUrl: process.env.MDB_TEST_BASE_URL ?? null, temperature: process.env.MDB_TEST_TEMPERATURE ?? null, allowNetwork: process.env.MDB_TEST_ALLOW_NETWORK === '1' }, runs: RUNS }), command: `MDB_PROFILE_CORPUS=${corpusPath} MDB_TEST_PROVIDER=${providerName} MDB_TEST_MODEL=${modelName ?? '(CLI default)'} MDB_EVAL_RUNS=${RUNS} MDB_PROFILE_CRITIC=${criticEnabled} npm run eval:profile`, provider: provider.id, model: modelName ?? null, corpus: corpusPath, corpusVersion: corpus.version, holdout, rawResponses: RAW_OUTPUT_DIR, seeding: 'no sampling seed is exposed by the provider; stability is measured by repeated independent runs', runAt: new Date().toISOString(), thresholds, runs: RUNS, counts, jobs: overall.jobs, metrics, intervals95: overall.intervals95, originalV1Subset: originalSubset && { counts: originalSubset.counts, jobs: originalSubset.jobs, metrics: originalSubset.metrics }, perRunMetrics: perRun, cases: rows, evidenceSource, limitations: ['Synthetic corpus is reproducible but is not a sample of real users.', 'Term/category labels are explicit adjudication rules; extraction confidence is not calibrated to factual truth.', 'Sensitive-inference review remains protected by deterministic tests; this corpus does not evaluate sensitive-attribute classification.'] };
 const reportPath = process.env.MDB_PROFILE_OUTPUT ?? (holdout ? 'verification/profile/holdout-evaluation.json' : 'verification/profile/real-model-evaluation.json');
 await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));

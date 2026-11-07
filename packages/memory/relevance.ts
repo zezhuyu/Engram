@@ -50,7 +50,7 @@ export interface RefreshResult { status: 'model' | 'skipped_private' | 'unavaila
 /** Collects the accepted non-sensitive insights for a project (global + workspace-labelled) exactly as injection does. */
 export async function relevanceRows(client: Engram, workspaceId: string): Promise<RelevanceItem[]> {
   const rows: RelevanceItem[] = [];
-  for (const scopeLabel of ['global', workspaceId]) for (const item of (await client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights as Array<{ id: string; claim: string; category?: string; sensitivity?: string }>) {
+  for (const scopeLabel of ['global', workspaceId]) for (const item of (await client.memory.insights({ status: 'accepted', scopeLabel, limit: 100 })).insights.filter(i => i.effective !== false) as Array<{ id: string; claim: string; category?: string; sensitivity?: string }>) {
     const doc = await client.vault.get(item.id).catch(() => undefined);
     if (!doc || doc.metadata.sensitivity === 'sensitive' || isSensitive(`${doc.title}\n${doc.body}`) || !await insightCurrentlyAccessible(client.vault, doc, scopeLabel)) continue;
     rows.push({ id: item.id, scope: scopeLabel, claim: item.claim, ...(item.category ? { category: item.category } : {}), ...(item.sensitivity === 'sensitive' ? { sensitive: true } : {}) });

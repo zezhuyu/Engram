@@ -400,6 +400,7 @@ export async function execute(argv: string[]): Promise<unknown> {
         ? [...(await import('../dashboard/server.js')).dashboardIPv4Addresses().map(urlFor), urlFor('127.0.0.1')]
         : [urlFor(dashboard.host)];
       const url = urls[0]!;
+      (await import('../dashboard/announce.js')).announceDashboard({ urls, passwordSet: await passwordIsSet(root) });
       if (remote && scheme === 'http') process.stderr.write('WARNING: Remote dashboard uses plain HTTP on the network. Anyone who can reach this port and has the token gets owner-level settings access. Prefer a trusted LAN or VPN. Keep the token private.\n');
       if (flags.open) {
         const { spawn } = await import('node:child_process');

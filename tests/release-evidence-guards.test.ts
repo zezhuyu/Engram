@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:net';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { parseStrictJson } from '../scripts/lib/strict-json.js';
-import { assertSyntheticEvidenceAllowed, evaluateReleaseEvidence } from '../scripts/lib/release-evaluation.js';
+import { assertSyntheticEvidenceAllowed, evaluateReleaseEvidence, trustedTempBases } from '../scripts/lib/release-evaluation.js';
 import { suiteReportConsistent } from '../scripts/lib/release-policy.js';
 import { suiteEvidenceStatus } from '../scripts/lib/release-policy.js';
 import { inventoryDrift } from '../scripts/lib/suite-inventory.js';
@@ -73,19 +73,32 @@ test('strict JSON handles malformed numeric/string edges, BOM, empty input, deep
 });
 
 test('TMPDIR cannot grant fixture trust, including relative and symlinked paths', async () => {
-  const base = await mkdtemp(path.resolve('.engram-trust-'));
+  const base = await mkdtemp(path.join(os.tmpdir(), '.engram-trust-'));
   const cwd = process.cwd(); const oldTmp = process.env.TMPDIR; const oldFixture = process.env.MDB_RELEASE_FIXTURE;
   try {
     const fake = path.join(base, 'fake'); await mkdir(fake); await writeFile(path.join(fake, 'evidence.json'), '{"synthetic":true}');
-    process.env.MDB_RELEASE_FIXTURE = '1'; process.env.TMPDIR = fake; process.chdir(fake);
-    await assert.rejects(assertSyntheticEvidenceAllowed(fake), /synthetic evidence rejected/);
+    process.env.MDB_RELEASE_FIXTURE = '1';
+    const trustedBasesWhenTmpdirUnset = await (async () => { delete process.env.TMPDIR; return trustedTempBases(realpath); })();
+    const tmpdirValues = [fake, await mkdtemp(path.join(os.tmpdir(), 'engram-plain-tmp-')), 'relative/tmp', path.join(fake, '..', 'fake'), cwd];
+    try {
+      for (const value of tmpdirValues) {
+        process.env.TMPDIR = value;
+        assert.deepEqual(await trustedTempBases(realpath), trustedBasesWhenTmpdirUnset, `TMPDIR=${value} must not alter trusted bases`);
+      }
+      const link = path.join(base, 'tmp-link'); await symlink(fake, link, 'dir'); process.env.TMPDIR = link;
+      assert.deepEqual(await trustedTempBases(realpath), trustedBasesWhenTmpdirUnset, 'symlinked TMPDIR must not alter trusted bases');
+    } finally { await rm(tmpdirValues[1]!, { recursive: true, force: true }); }
+    process.env.TMPDIR = fake; process.chdir(fake);
+    await assert.rejects(assertSyntheticEvidenceAllowed(fake, realpath, []), /synthetic evidence rejected/);
     process.chdir(cwd);
-    const link = path.join(base, 'tmp-link'); await symlink(fake, link, 'dir'); process.env.TMPDIR = link; process.chdir(link);
-    await assert.rejects(assertSyntheticEvidenceAllowed(fake), /synthetic evidence rejected/);
+    const link = path.join(base, 'tmp-link'); process.env.TMPDIR = link; process.chdir(link);
+    await assert.rejects(assertSyntheticEvidenceAllowed(fake, realpath, []), /synthetic evidence rejected/);
     process.chdir(cwd); process.env.TMPDIR = 'relative/../fake';
-    await assert.rejects(assertSyntheticEvidenceAllowed(fake), /synthetic evidence rejected/);
+    await assert.rejects(assertSyntheticEvidenceAllowed(fake, realpath, []), /synthetic evidence rejected/);
     process.env.TMPDIR = `${base}/fake/..`; process.chdir(fake);
-    await assert.rejects(assertSyntheticEvidenceAllowed(fake), /synthetic evidence rejected/);
+    await assert.rejects(assertSyntheticEvidenceAllowed(fake, realpath, []), /synthetic evidence rejected/);
+    process.chdir(cwd); process.env.TMPDIR = cwd;
+    await assert.rejects(assertSyntheticEvidenceAllowed(fake, realpath, []), /synthetic evidence rejected/);
   } finally { process.chdir(cwd); if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp; if (oldFixture === undefined) delete process.env.MDB_RELEASE_FIXTURE; else process.env.MDB_RELEASE_FIXTURE = oldFixture; await rm(base, { recursive: true, force: true }); }
 });
 

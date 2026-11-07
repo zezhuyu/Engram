@@ -702,3 +702,22 @@ test('a contradiction between existing claims is kept as an unresolved deep disc
   assert.ok(proposal.flags?.includes('model_critic_skipped_contradiction_checklist'));
   recordCase({ suite: 'dream', name: 'deep-contradiction-single-hop', status: 'PASS' });
 });
+
+test('fact containment accepts faithful paraphrases of a cited revision and rejects conjecture', async () => {
+  const { factContainment } = await import('../../packages/intelligence/dream/critic.js');
+  const python = { title: 'Python rate limiting', body: 'Use a token bucket per client to enforce request quotas in a Python API.' };
+  const cache = { title: 'Frontend caching', body: 'Client side caches reduce repeated fetches but need ratelimit friendly invalidation.' };
+  assert.ok(factContainment('Python rate limiting uses a token bucket per client', python) >= 0.6);
+  assert.ok(factContainment('Frontend caching needs rate limit friendly invalidation', cache) >= 0.6);
+  assert.ok(factContainment('Token buckets could schedule cache invalidation and mitigate abuse', python) < 0.6);
+  assert.ok(factContainment('The database replicates across three regions nightly', cache) < 0.3);
+});
+
+test('evaluator quality: a scenario without a candidate scores zero even when a dimension is vacuously true', async () => {
+  const { dreamDimensionQuality } = await import('../../scripts/lib/dream-metrics.js');
+  const dims = { novelty: false, relevance: false, contradictionHandling: true, citationIntegrity: false };
+  assert.equal(dreamDimensionQuality(dims, false), 0);
+  assert.equal(dreamDimensionQuality(dims, true), 0.25);
+  assert.equal(dreamDimensionQuality({}, true), 0);
+  assert.equal(dreamDimensionQuality({ a: true, b: true }, true), 1);
+});

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Engram } from '../../packages/sdk/index.js';
 import { Cdp, browserExecutable, freePort, removeTree, tempDirectory, terminate, waitFor } from './cdp.js';
@@ -13,7 +13,7 @@ const skipReason = process.env.MDB_E2E_BROWSER !== '1'
   ? 'Set MDB_E2E_BROWSER=1 to opt in to the real-browser dashboard suite'
   : executable ? false : 'Chrome not found: expected /Applications/Google Chrome.app/Contents/MacOS/Google Chrome on macOS or google-chrome/chromium on Linux';
 const repository = process.cwd();
-const reportPath = path.join(repository, 'verification/ga-readiness/dashboard-browser-e2e.json');
+const reportPath = process.env.MDB_E2E_REPORT_PATH || path.join(repository, 'verification/ga-readiness/dashboard-browser-e2e.json');
 const secret = 'E2E_TUNNEL_TOKEN_SHOULD_NEVER_LEAK_48dfe1';
 type Flow = { id: string; status: 'PASS' | 'FAIL'; assertions: string[]; observedFacts: Record<string, unknown>; error?: string };
 function localFetch(url: string, init: RequestInit = {}): Promise<Response> {
@@ -56,10 +56,14 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
   profile = await tempDirectory('engram-dashboard-e2e-chrome-');
   const authFile = path.join(vaultRoot, 'auth', 'dashboard.json');
   const engram = new Engram(vaultRoot);
-  await engram.init({ sqlite: false }); await engram.close();
+  const fakeBin = path.join(vaultRoot, 'fake-bin'); await mkdir(fakeBin, { recursive: true });
+  const fakeCli = path.join(fakeBin, 'claude'); await writeFile(fakeCli, '#!/bin/sh\nexit 0\n'); await chmod(fakeCli, 0o755);
+  await engram.init({ sqlite: false });
+  await engram.vault.setConfig(config => { config.model = { ...config.model, provider: 'claude-cli', command: fakeCli, locality: 'remote', allowNetwork: false }; });
+  await engram.close();
   const dashboardPort = await freePort(); browserPort = await freePort();
   dashboard = spawn(process.execPath, [path.join(repository, 'bin/mdb.js'), 'dashboard', '--root', vaultRoot, '--host', '127.0.0.1', '--port', String(dashboardPort)], {
-    cwd: repository, env: { ...process.env, MDB_DASHBOARD_AUTH_FILE: authFile, MDB_DASHBOARD_ENABLED: 'true' }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: repository, env: { ...process.env, PATH: fakeBin + path.delimiter + (process.env.PATH || ''), MDB_DASHBOARD_AUTH_FILE: authFile, MDB_DASHBOARD_ENABLED: 'true' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
   dashboard.stdout?.on('data', chunk => { stdout += String(chunk); });
@@ -223,6 +227,103 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
     } finally { await second.close(); }
   });
 
+  await run('switch-states-and-model-permission', ['all switch states retain readable track styles in light and dark themes', 'network-gated Use model opens typed consent and refuses an incorrect phrase', 'valid phrase enables audited permission and tab-only selection', 'settings can revoke permission and chat returns to its guarded state', 'screenshots capture switch matrix, chat, consent, and model settings'], async () => {
+    const screenshot = async (name: string) => {
+      const captured = await cdp!.command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+      await mkdir(path.join(repository, 'docs/dashboard-screenshots'), { recursive: true });
+      await writeFile(path.join(repository, 'docs/dashboard-screenshots', name), Buffer.from(String(captured.data), 'base64'));
+    };
+    const openRoute = async (route: string) => {
+      await cdp!.evaluate(`location.hash=${JSON.stringify('#' + route)}`);
+      await waitFor(() => cdp!.evaluate<string>(`document.querySelector('#content h1')?.textContent||''`), title => title === (route === 'chat' ? 'Wiki chat' : 'Settings'), `${route} did not render`);
+    };
+    await cdp!.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+    await openRoute('chat');
+    await cdp!.evaluate(`(()=>{const toast=document.querySelector('.toast');if(toast)toast.textContent=''})()`);
+    const capabilityDebug = await browserApi<{available:boolean;reason:string;settingsTarget?:string}>('/api/chat/capabilities');
+    const uiDebug = await cdp!.evaluate<{role:string|null;disabled:boolean;note:string}>(`(()=>{const input=document.querySelector('.chat-model input');return {role:input?.getAttribute('role')||null,disabled:!!input?.disabled,note:document.querySelector('.chat-model-note')?.innerText||''}})()`);
+    await waitFor(async () => uiDebug, value => value.role==='switch' && /network permission/i.test(value.note), 'Network-gated model switch did not render: '+JSON.stringify({capability:capabilityDebug.body,ui:uiDebug}));
+    await screenshot('t14-chat-before-light.png');
+
+    const matrix = async (theme: 'light'|'dark'): Promise<Record<string, any>> => {
+      await cdp!.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+      await cdp!.evaluate(`(()=>{const root=document.querySelector('#content'),source=document.querySelector('.chat-model');const panel=document.createElement('section');panel.className='panel switch-matrix';panel.setAttribute('aria-label','Switch states matrix');const title=document.createElement('h2');title.textContent='Switch states · ${theme}';panel.append(title);for(const state of ['Off','On','Hover','Focus','Disabled']){const cell=document.createElement('div');cell.className='switch-cell';cell.dataset.state=state;const caption=document.createElement('small');caption.textContent=state;cell.append(caption);const copy=source.cloneNode(true);copy.classList.remove('chat-model');copy.querySelector('.switch-label').textContent='';const input=copy.querySelector('input');input.checked=state==='On'||state==='Hover'||state==='Focus';input.disabled=state==='Disabled';if(state==='Focus')input.dataset.focusFixture='true';if(state==='Hover')copy.dataset.hoverFixture='true';cell.append(copy);panel.append(cell)}root.prepend(panel)})()`);
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const hoverPoint = await cdp!.evaluate<{x:number;y:number}>(`(()=>{const r=document.querySelector('[data-hover-fixture="true"]').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+      await cdp!.command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hoverPoint.x, y: hoverPoint.y });
+      await cdp!.evaluate(`document.activeElement.blur()`);
+      for (let tab = 0; tab < 100 && !await cdp!.evaluate<boolean>(`document.activeElement===document.querySelector('input[data-focus-fixture]')`); tab++) {
+        await cdp!.command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+        await cdp!.command('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+      }
+      const focusedVisible = await cdp!.evaluate<boolean>(`document.querySelector('input[data-focus-fixture]').matches(':focus-visible')`);
+      assert.equal(focusedVisible, true, `${theme} switch receives keyboard focus-visible state`);
+      await screenshot(`t14-switch-matrix-${theme}.png`);
+      const styles = await cdp!.evaluate<Record<string, any>>(`(()=>{const out={};for(const cell of document.querySelectorAll('.switch-matrix .switch-cell')){const input=cell.querySelector('input'),track=cell.querySelector('.track'),style=getComputedStyle(track);out[cell.dataset.state]={backgroundColor:style.backgroundColor,backgroundImage:style.backgroundImage,borderColor:style.borderColor,outlineStyle:style.outlineStyle,disabled:input.disabled,opacity:style.opacity,thumbWidth:getComputedStyle(track.querySelector('.thumb')).width,boxShadow:style.boxShadow}}return out})()`);
+      assert.ok(styles, `${theme} matrix computed styles were returned`);
+      const edgeStyles = await cdp!.evaluate<{ checkedDisabled: string; indeterminate: string }>(`(()=>{const on=document.querySelector('.switch-matrix [data-state="On"] input'),off=document.querySelector('.switch-matrix [data-state="Off"] input'),onTrack=on.parentElement.querySelector('.track'),offTrack=off.parentElement.querySelector('.track');on.disabled=true;off.indeterminate=true;const checkedDisabled=getComputedStyle(onTrack).backgroundImage,indeterminate=getComputedStyle(offTrack).backgroundImage;on.disabled=false;off.indeterminate=false;return{checkedDisabled,indeterminate}})()`);
+      assert.notEqual(edgeStyles.checkedDisabled, 'none', `${theme} disabled checked switch keeps its fill`);
+      assert.equal(edgeStyles.indeterminate, 'none', `${theme} indeterminate switch stays visually off`);
+      assert.ok(Number.parseFloat(styles.Disabled.opacity) < 1, `${theme} disabled switch is visibly reduced`);
+      await cdp!.command('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+      const activeThumb = await cdp!.evaluate<string>(`getComputedStyle(document.querySelector('input[data-focus-fixture]').parentElement.querySelector('.thumb')).width`);
+      await cdp!.command('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+      const spaceChecked = await cdp!.evaluate<boolean>(`document.querySelector('input[data-focus-fixture]').checked`);
+      assert.equal(spaceChecked, false, `${theme} Space toggles a focused checked switch off`);
+      assert.equal(activeThumb, '20px', `${theme} held Space enlarges the thumb while active`);
+      await cdp!.evaluate(`document.querySelector('.switch-matrix').remove()`);
+      return { ...styles, Active: { thumbWidth: activeThumb }, Space: { checked: spaceChecked } };
+    };
+    const light = await matrix('light');
+    const dark = await matrix('dark');
+    await cdp!.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+    for (const [theme, states] of [['light', light], ['dark', dark]] as const) {
+      assert.ok(states.Off.borderColor && states.Off.backgroundColor, `${theme} off switch has track and border`);
+      assert.notEqual(states.On.backgroundImage, 'none', `${theme} on switch has accent fill`);
+      assert.equal(states.Hover.backgroundImage, states.On.backgroundImage, `${theme} hover preserves checked gradient`);
+      assert.equal(states.Hover.backgroundColor, states.On.backgroundColor, `${theme} hover preserves checked color`);
+      assert.equal(states.Focus.outlineStyle, 'solid', `${theme} focus shows ring: ${JSON.stringify(states.Focus)}`);
+      assert.equal(states.Active.thumbWidth, '20px', `${theme} active press enlarges the thumb`);
+      assert.equal(states.Disabled.disabled, true, `${theme} disabled state remains disabled`);
+    }
+    await clickSelector(cdp!, '.chat-model');
+    await waitFor(() => cdp!.evaluate<boolean>(`document.querySelector('#model-consent')?.open===true`), Boolean, 'Use model did not open network permission dialog');
+    const dialogText = await cdp!.evaluate<string>(`document.querySelector('#model-consent').innerText`);
+    assert.match(dialogText, /retrieved excerpts of pages you are authorised to read/i); assert.match(dialogText, /whole vault.*not sent/i); assert.match(dialogText, /local Claude CLI/);
+    await cdp!.command('Emulation.setDeviceMetricsOverride', { width: 900, height: 1100, deviceScaleFactor: 1, mobile: false });
+    await screenshot('t14-model-consent.png');
+    await cdp!.command('Emulation.setDeviceMetricsOverride', { width: 900, height: 677, deviceScaleFactor: 1, mobile: false });
+    await cdp!.evaluate(`(()=>{const input=document.querySelector('#model-consent-confirm');input.value='wrong phrase';input.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+    assert.equal(await cdp!.evaluate<boolean>(`document.querySelector('#model-consent-apply').disabled`), true, 'wrong phrase cannot enable consent apply');
+    const phrase = await cdp!.evaluate<string>(`document.querySelector('#model-consent-confirm-word').textContent`);
+    assert.equal(phrase, 'confirm sensitive setting', 'consent requires exact settings API phrase');
+    await cdp!.evaluate(`(()=>{const input=document.querySelector('#model-consent-confirm');input.value=${JSON.stringify(phrase)};input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#model-consent-apply').click()})()`);
+    await waitFor(() => cdp!.evaluate<boolean>(`document.querySelector('#model-consent')?.open===false && !!document.querySelector('.chat-model-chip')`), Boolean, 'Permission acceptance did not enable model choice');
+    const enabled = await browserApi<{available:boolean}>('/api/chat/capabilities'); assert.equal(enabled.body.available, true);
+    assert.equal(await cdp!.evaluate<boolean>(`document.querySelector('.chat-model input').checked`), true);
+    assert.match(await cdp!.evaluate<string>(`document.querySelector('.chat-model-note').innerText`), /Model: local Claude CLI \(sends excerpts\)/);
+    await cdp!.evaluate(`(()=>{const toast=document.querySelector('.toast');if(toast)toast.textContent=''})()`);
+    await screenshot('t14-chat-after-light.png');
+
+    await openRoute('settings');
+    const allowInput = await cdp!.evaluate<boolean>(`(()=>{const group=document.querySelector('#group-model-provider');group.scrollIntoView({block:'center'});const toast=document.querySelector('.toast');if(toast)toast.textContent='';return !!group.querySelector('.switch input[aria-label="Allow network"]')})()`);
+    await screenshot('t14-settings-model-group.png');
+    assert.equal(allowInput, true, 'Model provider settings render the network switch');
+    await cdp!.evaluate(`document.querySelector('#group-model-provider .switch input[aria-label="Allow network"]').click()`);
+    assert.equal(await cdp!.evaluate<boolean>(`document.querySelector('#group-model-provider .switch input[aria-label="Allow network"]').checked`), false, 'Settings switch turns model network permission off');
+    await clickText(cdp!, 'Review changes');
+    await waitFor(() => cdp!.evaluate<boolean>(`document.querySelector('#review')?.open===true`), Boolean, 'Settings review did not open');
+    await cdp!.evaluate(`(()=>{const input=document.querySelector('#confirm-input'),word=document.querySelector('#confirm-word');input.value=word.textContent||'';input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#apply').click()})()`);
+    await waitFor(() => browserApi<{settings:{'model.allowNetwork':boolean}}>('/api/settings').then(result=>result.body.settings['model.allowNetwork']), value => value === false, 'Settings did not revoke model network permission');
+    await cdp!.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+    await openRoute('chat');
+    await waitFor(() => cdp!.evaluate<boolean>(`!document.querySelector('.chat-model input').checked && document.querySelector('.chat-model-note')?.innerText.includes('network permission')`), Boolean, 'Chat did not return to guarded state after permission revocation');
+    await cdp!.evaluate(`(()=>{const toast=document.querySelector('.toast');if(toast)toast.textContent=''})()`);
+    await screenshot('t14-chat-after-revocation-dark.png');
+    await cdp!.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+    return { light, dark, wrongPhraseDisabledApply: true, consentPhrase: phrase, provider: 'local Claude CLI', allowNetworkAfterRevocation: false, screenshots: ['t14-chat-before-light.png','t14-switch-matrix-light.png','t14-switch-matrix-dark.png','t14-model-consent.png','t14-chat-after-light.png','t14-settings-model-group.png','t14-chat-after-revocation-dark.png'] };
+  });
+
   await run('stored-xss-csp', ['hostile markdown remains inert across routes', 'no injected elements or script execution', 'document/script/style responses carry CSP', 'eval is blocked', 'no CSP violation events'], async () => {
     const payload = '<img src=x onerror=window.__pwned=1><script>window.__pwned=1</script> [link](javascript:window.__pwned=1)';
     const created = await browserApi<{ document: { id: string } }>('/api/documents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: payload, body: payload, kind: 'note', scope: { type: 'global', area: 'wiki' }, tags: [payload] }) });
@@ -294,10 +395,24 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
     const capabilities = await browserApi<{ available: boolean; reason: string }>('/api/chat/capabilities');
     assert.equal(capabilities.status, 200);
     await cdp!.evaluate("location.hash='#chat'"); await waitFor(pageFacts, facts => /Wiki chat/.test(facts.text), 'Chat screen not rendered');
-    const ui = await waitFor(() => cdp!.evaluate<{ disabled: boolean; reason: string }>(`(()=>{const x=document.querySelector('.chat-model input');return {disabled:!!x?.disabled,reason:document.querySelector('.chat-model-note')?.innerText||''}})()`), value => value.disabled && value.reason !== 'Checking model…', 'Unavailable model toggle did not become disabled with a reason');
-    assert.equal(ui.disabled, true); assert.ok(ui.reason.length > 0);
+    const ui = await waitFor(() => cdp!.evaluate<{ disabled: boolean; reason: string }>(`(()=>{const x=document.querySelector('.chat-model input');return {disabled:!!x?.disabled,reason:document.querySelector('.chat-model-note')?.innerText||''}})()`), value => value.reason !== 'Checking model…', 'Unavailable model reason did not render');
+    assert.equal(ui.disabled, false, 'network permission gate remains clickable to open typed consent'); assert.match(ui.reason, /network permission/i);
     await cdp!.evaluate(`(()=>{const input=document.querySelector('textarea[aria-label="Message"]');input.value='Where do marmots live?';document.querySelector('.chat-send').click()})()`);
     const citedUi = await waitFor(() => cdp!.evaluate<string>('document.querySelectorAll(".citation-chip").length+"|"+(document.querySelector(".chat-feed")?.innerText||"")'), value => value.startsWith('1|') && /alpine meadows/i.test(value), 'Chat UI did not render the cited answer');
+    // The sent message must appear at once and a status indicator must show while the answer is pending; Stop must work. The chat response is delayed in the page to make the pending window observable.
+    await cdp!.evaluate(`(()=>{window.__origFetch=window.fetch;window.__chatDelay=1500;window.fetch=(u,o)=>String(u).includes('/api/chat')&&o&&o.method==='POST'?new Promise((resolve,reject)=>{const t=setTimeout(()=>resolve(window.__origFetch(u,o)),window.__chatDelay);if(o.signal)o.signal.addEventListener('abort',()=>{clearTimeout(t);reject(new DOMException('Aborted','AbortError'))})}):window.__origFetch(u,o)})()`);
+    await cdp!.evaluate(`(()=>{const input=document.querySelector('textarea[aria-label="Message"]');input.value='Where do marmots live second time?';document.querySelector('.chat-send').click()})()`);
+    const pendingJson = await waitFor(() => cdp!.evaluate<string>('JSON.stringify({user:[...document.querySelectorAll(".chat-turn.user .chat-text")].map(x=>x.innerText).at(-1)||"",pending:document.querySelector(".chat-pending")?.innerText||"",sendDisabled:!!document.querySelector(".chat-send")?.disabled,stop:!!document.querySelector(".chat-stop")})'), value => /second time/.test(value) && /Searching your wiki/.test(value), 'The sent message and the pending status must show before the answer arrives');
+    const pendingFacts = JSON.parse(pendingJson) as { user: string; pending: string; sendDisabled: boolean; stop: boolean };
+    assert.equal(pendingFacts.sendDisabled, true, 'Send is disabled while a request is running'); assert.equal(pendingFacts.stop, true, 'a Stop button is offered while pending');
+    await waitFor(() => cdp!.evaluate<boolean>('!document.querySelector(".chat-pending")'), done => done === true, 'the pending status must clear after the answer arrives');
+    await cdp!.evaluate('window.__chatDelay=8000');
+    await cdp!.evaluate(`(()=>{const input=document.querySelector('textarea[aria-label="Message"]');input.value='Where do marmots live third time?';document.querySelector('.chat-send').click()})()`);
+    await waitFor(() => cdp!.evaluate<boolean>('!!document.querySelector(".chat-stop")'), shown => shown === true, 'Stop button must appear');
+    await cdp!.evaluate('document.querySelector(".chat-stop").click()');
+    const stopped = await waitFor(() => cdp!.evaluate<string>('JSON.stringify({pending:!!document.querySelector(".chat-pending"),feed:document.querySelector(".chat-feed")?.innerText||""})'), value => !JSON.parse(value).pending && /Stopped\./.test(value), 'Stop must end the pending state with a visible note');
+    assert.match(JSON.parse(stopped).feed, /third time/);
+    await cdp!.evaluate('(()=>{window.fetch=window.__origFetch})()');
     return { emptyReply: empty.body.answer, smallTalk: greeting.body.answer, citation: matching.body.citations?.[0], capability: capabilities.body, modelToggle: ui, citedUi: citedUi.slice(0, 400) };
   });
 
@@ -332,7 +447,7 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
     return { viewport: '390x844', routesChecked: routes, horizontalOverflowRoutes: overflows, focusedElement: focus, focusVisibleRing: focus.outline };
   });
 
-  assert.equal(flows.length, 8, 'all browser flow groups were executed');
+  assert.equal(flows.length, 9, 'all browser flow groups were executed');
   await writeReport();
   for (const [index, flow] of flows.filter(item => item.status === 'FAIL').entries()) t.todo(`FINDING-${String(index + 1).padStart(2, '0')}: ${flow.id} — ${flow.error?.split('\n')[0] ?? 'browser assertion failed'}`);
   assert.equal(dashboard?.exitCode, null, `dashboard stayed alive${stderr}`);

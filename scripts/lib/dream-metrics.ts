@@ -176,3 +176,13 @@ export function dreamMetadataClaimsTraceable(metadata: Record<string, unknown>, 
   }
   return true;
 }
+
+/**
+ * Fraction of rubric dimensions a scenario satisfied. A scenario that produced no candidate scores exactly 0: a dimension that is vacuously true
+ * without a proposal (for example contradiction handling outside the contradiction scenario) must never earn credit for missing output.
+ */
+export function dreamDimensionQuality(dimensions: Record<string, boolean>, proposalPresent: boolean): number {
+  const names = Object.keys(dimensions);
+  if (!proposalPresent || !names.length) return 0;
+  return names.filter(name => dimensions[name] === true).length / names.length;
+}

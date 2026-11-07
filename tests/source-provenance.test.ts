@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createServer } from 'node:net';
 import { archiveAttestationMatches, currentSourceEvidence } from '../scripts/lib/source-evidence.js';
 import { releaseTreeStateValid, suiteReportConsistent } from '../scripts/lib/release-policy.js';
 
@@ -141,6 +142,34 @@ test('archive attestation requires matching fingerprint, valid hashes, and uniqu
   assert.equal(archiveAttestationMatches(JSON.stringify({ ...record, extra: true }), fingerprint), false);
   assert.equal(archiveAttestationMatches(`{"fingerprint":"${fingerprint}","fingerprint":"${fingerprint}","git_commit":"${record.git_commit}","archive_sha256":"${record.archive_sha256}"}`, fingerprint), false);
   assert.equal(archiveAttestationMatches('{', fingerprint), false);
+});
+
+test('archive attestation rejects wrong JSON types and oversized or deeply nested input', () => {
+  const fingerprint = 'a'.repeat(64);
+  const record = { fingerprint, git_commit: 'b'.repeat(40), archive_sha256: 'c'.repeat(64), created_by: 'ci', created_at: '2026-11-04T12:00:00.000Z' };
+  for (const key of Object.keys(record) as (keyof typeof record)[]) {
+    for (const invalid of [null, [], 7, { nested: true }]) {
+      assert.equal(archiveAttestationMatches(JSON.stringify({ ...record, [key]: invalid }), fingerprint), false, `${key} rejects ${JSON.stringify(invalid)}`);
+    }
+  }
+  assert.equal(archiveAttestationMatches(JSON.stringify({ ...record, git_commit: [record.git_commit] }), fingerprint), false, 'an array coercible to a valid commit string is still the wrong JSON type');
+  assert.equal(archiveAttestationMatches(JSON.stringify({ ...record, archive_sha256: [record.archive_sha256] }), fingerprint), false, 'an array coercible to a valid digest string is still the wrong JSON type');
+  assert.equal(archiveAttestationMatches(`${JSON.stringify(record)}${' '.repeat(1024 * 1024)}`, fingerprint), false, 'input above the one MiB bound is rejected');
+  assert.equal(archiveAttestationMatches(`${'{"nested":'.repeat(300)}null${'}'.repeat(300)}`, fingerprint), false, 'deep nesting is rejected');
+});
+
+test('Unix sockets and FIFOs under fingerprinted source fail closed', async () => {
+  const root = await fixture();
+  const socketPath = path.join(root, 'scripts', 'listener.sock');
+  const fifoPath = path.join(root, 'scripts', 'pipe');
+  const server = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+    await assert.rejects(currentSourceEvidence(root), /Unsupported special file in fingerprinted source: scripts\/listener\.sock/);
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    execFileSync('mkfifo', [fifoPath]);
+    await assert.rejects(currentSourceEvidence(root), /Unsupported special file in fingerprinted source: scripts\/pipe/);
+  } finally { server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test('release suite consistency requires recorded tree provenance', () => {

@@ -3,6 +3,7 @@ import { isSensitive } from '../critic.js';
 import { domainOf, words } from './plan.js';
 import { NOVELTY, SUBTYPES, type DiscoverySubtype, type DreamMode } from './types.js';
 import type { ManifestEntry } from '../../search-files/manifest.js';
+import { assessFactGrounding, sourceSupportsFact } from './grounding.js';
 
 const fail = (message: string): never => { throw new MDBError('INVALID_MODEL_OUTPUT', message); };
 const strings = (v: unknown, name: string, min: number, minLen: number): string[] => { if (!Array.isArray(v) || v.length < min || v.some(x => typeof x !== 'string' || x.trim().length < minLen || x.length > 600)) return fail(`${name} must be ${min}+ concrete strings`); return v as string[]; };
@@ -88,13 +89,15 @@ export function checkDiscovery(mode: DreamMode, output: ModelProposal, supplied:
     // Deep discoveries must separate what the sources state from what is conjecture, and say what evidence is still missing.
     const facts = strings(m.facts, 'facts', 1, 10), speculation = strings(m.speculation, 'speculation', 1, 10), missingEvidence = strings(m.missingEvidence, 'missingEvidence', 1, 10);
     const hops = strings(m.hops, 'hops', subtype === 'contradiction' ? 1 : 2, 10);
-    const corpus = cited.map(d => d.body);
-    for (const fact of facts) if (!corpus.some(body => containment(fact, body) >= 0.6)) fail('every entry in facts must restate a cited source; move conjecture to speculation');
+    for (const fact of facts) {
+      const grounding = assessFactGrounding(fact, cited, { contradictionMode: subtype === 'contradiction' || requiredHintKinds.includes('contradiction') });
+      if (!grounding.ok) fail(`every entry in facts must restate a cited source without contradicting it (${grounding.reason}); move conjecture to speculation`);
+    }
     if (requiredHintKinds.includes('contradiction')) {
       if (subtype !== 'contradiction') fail('a planner contradiction must remain an unresolved contradiction');
       const citedSources = [...new Set(output.evidence.map(ref => ref.uri))].map(uri => byUri.get(uri)).filter((doc): doc is Document => !!doc && !goalUris.includes(doc.uri));
       const represented = new Set(facts.flatMap(fact => {
-        const match = citedSources.find(source => containment(fact, source.body) >= 0.6);
+        const match = citedSources.find(source => sourceSupportsFact(fact, source));
         return match ? [match.uri] : [];
       }));
       if (represented.size < 2) fail('an unresolved contradiction must separately state source-supported facts from both claims');
@@ -118,6 +121,19 @@ export function checkDiscovery(mode: DreamMode, output: ModelProposal, supplied:
 }
 
 /** Share of the claim's distinctive words that appear in the source. */
+const stem = (w: string): string => w.length <= 5 ? w : w.replace(/ies$/, 'y').replace(/(?:ing|ed|es|s)$/, '');
+/**
+ * How much of a stated fact a cited source revision restates. Plural/tense variants match ("needs"/"need"), a split compound matches its joined form ("rate limit"/"ratelimit"),
+ * and the revision title counts as source text. This is a syntactic guard only; the critic judges whether the fact is actually entailed.
+ */
+export const factContainment = (claim: string, source: { title?: string; body: string }): number => {
+  const c = words(claim).map(stem), s = new Set(words(`${source.title ?? ''} ${source.body}`).map(stem));
+  if (!c.length) return 0;
+  const matched = new Set<number>();
+  c.forEach((w, i) => { if (s.has(w)) matched.add(i); });
+  for (let i = 0; i + 1 < c.length; i++) if (s.has(c[i]! + c[i + 1]!)) { matched.add(i); matched.add(i + 1); }
+  return matched.size / c.length;
+};
 export const containment = (claim: string, source: string): number => { const c = new Set(words(claim)), s = new Set(words(source)); if (!c.size) return 0; let n = 0; for (const w of c) if (s.has(w)) n++; return n / c.size; };
 export interface CandidateScore { score: number; components: Record<string, number> }
 /**

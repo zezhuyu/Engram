@@ -29,8 +29,18 @@ test('profile critic preserves faithful user statements while deterministic dedu
   assert.match(profile, /faithful restatement of the user’s own explicitly stated preference.*must not be rejected merely for restating/i);
   assert.match(profile, /Deterministic checks handle duplicate and conflict decisions/i);
   assert.doesNotMatch(profile, /Reject if it restates the evidence without adding value/i);
-  const other = critiqueMessages({ instruction: 'Evaluate support.', proposal: { kind: 'wiki_page', title: 'A fact', body: 'A claim.', evidence: [] }, evidence: [] }).map(message => message.content).join('\n');
+  const other = critiqueMessages({ instruction: 'Evaluate support.', proposal: { kind: 'discovery', title: 'A fact', body: 'A claim.', evidence: [] }, evidence: [] }).map(message => message.content).join('\n');
   assert.match(other, /it restates the evidence without adding value/i);
+  const wikiPrompt = critiqueMessages({ instruction: 'Evaluate support.', proposal: { kind: 'wiki_page', title: 'A page', body: 'A claim [1].', evidence: [] }, evidence: [] }).map(message => message.content).join('\n');
+  assert.doesNotMatch(wikiPrompt, /Reject if it restates the evidence without adding value/i);
+  assert.match(wikiPrompt, /must not be rejected merely for being derived from, or restating, its sources/i);
+  assert.match(wikiPrompt, /claim carries no citation/i);
+  for (const kind of ['working_memory', 'reflection']) {
+    const summaryPrompt = critiqueMessages({ instruction: 'Evaluate support.', proposal: { kind, title: 'Handoff', body: 'Decision: X [1].', evidence: [] }, evidence: [] }).map(message => message.content).join('\n');
+    assert.doesNotMatch(summaryPrompt, /Reject if it restates the evidence without adding value/i, kind);
+    assert.match(summaryPrompt, /must not be rejected merely for restating its evidence/i, kind);
+    assert.match(summaryPrompt, /described as done/i, kind);
+  }
 });
 interface Spec { body: string; category?: string; key?: string; evidence: Array<{ doc: Document; span: string }>; explicit?: boolean; sensitivity?: string; extra?: Record<string, unknown> }
 function fakeProvider(spec: () => Spec | undefined): ModelProvider & { calls: ModelRequest[] } {
@@ -223,7 +233,7 @@ test('explicit correction failures remain visible for review and never supersede
       && (proposal.input.metadata?.correctionFallback === true || proposal.critic?.verdict === 'review_required' || proposal.input.metadata?.correctionDetected === true));
     assert.equal(candidates.length, 1, `${channel}: exactly one review-gated correction is visible; proposals=${JSON.stringify(await engine.proposals())}; jobs=${JSON.stringify(await engine.jobs())}`);
     assert.equal((await w.vault.get(old.id)).status, 'accepted', `${channel}: old preference remains current pending human review`);
-    assert.ok(candidates[0]!.flags?.some(flag => flag === 'correction_unresolved' || flag === 'supersedes_earlier'));
+    assert.ok(candidates[0]!.flags?.some(flag => flag === 'correction_unresolved' || flag === 'supersedes_earlier' || flag === 'critic_rejected_explicit_statement'));
     if (channel === 'abstain') {
       const approved = await engine.review(candidates[0]!.id, true, 'owner approved deterministic correction');
       assert.equal(approved.status, 'approved');
@@ -667,4 +677,27 @@ test('no_insight is only valid for the profile stage', async t => {
   await engine.enqueue('wiki', { scope: wiki, objectIds: [note.id] }); const [job] = await engine.run({ job: 'wiki', limit: 1 });
   assert.notEqual(job!.status, 'complete'); assert.equal((await engine.proposals()).length, 0);
   recordCase({ suite: 'profile', name: 'no-insight-profile-only', status: 'PASS' });
+});
+
+test('a malformed preference key copied from the identity list never silently drops a user statement', async t => {
+  const w = await world(t);
+  const message = await w.userSaid('I want commit messages that explain why the change was made.', undefined, profile);
+  const engine = new IntelligenceEngine(w.vault, fakeProvider(() => ({ body: 'The user prefers commit messages that explain why a change was made.', key: 'Preference: Commit Style!', evidence: [{ doc: message, span: 'commit messages that explain why the change was made' }] })));
+  await engine.enqueue('profile', { scope: profile, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 3 });
+  const proposal = await last(engine);
+  assert.notEqual(proposal.status, 'rejected', `flags=${JSON.stringify(proposal.flags)}`);
+  assert.ok(!(proposal.flags ?? []).includes('missing_preference_key'));
+  assert.equal(proposal.input.metadata!.preferenceKey, 'commit-style');
+  recordCase({ suite: 'profile', name: 'malformed-preference-key-is-normalized-not-dropped', status: 'PASS' });
+});
+
+test('a statement whose model output omits preferenceKey gets a derived key and stays reviewable', async t => {
+  const w = await world(t);
+  const message = await w.userSaid('My goal this quarter is to reduce the build pipeline time below five minutes.', undefined, profile);
+  const engine = new IntelligenceEngine(w.vault, fakeProvider(() => ({ body: 'My goal this quarter is to reduce the build pipeline time below five minutes.', category: 'goal', key: '', evidence: [{ doc: message, span: 'reduce the build pipeline time below five minutes' }] })));
+  await engine.enqueue('profile', { scope: profile, objectIds: [message.id] }); await engine.run({ job: 'profile', limit: 3 });
+  const proposal = await last(engine);
+  assert.notEqual(proposal.status, 'rejected', `flags=${JSON.stringify(proposal.flags)}`);
+  assert.match(String(proposal.input.metadata!.preferenceKey), /^goal-/);
+  recordCase({ suite: 'profile', name: 'missing-preference-key-is-derived-not-dropped', status: 'PASS' });
 });

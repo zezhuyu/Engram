@@ -38,5 +38,7 @@ export interface ModelRequest { job: string; documents: Document[]; goals: strin
 export interface CritiqueRequest { proposal: ModelProposal; evidence: Document[]; instruction: string }
 export interface CriticVerdict { verdict: 'accept' | 'reject'; rationale: string; flags?: string[] }
 /** locality: 'remote' providers receive no private workspace content unless the vault config explicitly allows it. Omitted means in-process host code (treated as local). */
-export interface ModelProvider { id: string; locality?: 'local' | 'remote'; generate(input: ModelRequest, options?: ModelCallOptions): Promise<ModelProposal>; critique?(input: CritiqueRequest, options?: ModelCallOptions): Promise<CriticVerdict> }
+/** Free-text conversation turn for the dashboard chat: the reply is plain text, never knowledge, and is never stored by the provider layer. */
+export interface ConverseRequest { system: string; turns: Array<{ role: 'user' | 'assistant'; content: string }> }
+export interface ModelProvider { id: string; locality?: 'local' | 'remote'; generate(input: ModelRequest, options?: ModelCallOptions): Promise<ModelProposal>; critique?(input: CritiqueRequest, options?: ModelCallOptions): Promise<CriticVerdict>; /** optional: plain-text conversation (agent CLI providers only for now) */ converse?(input: ConverseRequest, options?: ModelCallOptions): Promise<string> }
 export class MDBError extends Error { constructor(public code: string, message: string) { super(message); this.name = 'MDBError'; } }

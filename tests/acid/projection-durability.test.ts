@@ -45,18 +45,18 @@ test('a deliberate external edit is never overwritten by automatic tail repair, 
   recordCase({ suite: 'acid', name: 'projection-external-edit-preserved', status: 'PASS' });
 });
 
-test('flushProjections makes pending head and view writes durable; a flush failure never undoes or fails an acknowledged commit and is retried', async t => {
+test('flushProjections makes the pending view durable (heads are rebuildable and never flushed); a flush failure never undoes or fails an acknowledged commit and is retried', async t => {
   const { root } = await disposableVault(t); let failing = true;
   const vault = new Vault(root, undefined, { fault: stage => { if (failing && stage === 'projection.flush.file') { const e = new Error('injected EIO') as NodeJS.ErrnoException; e.code = 'EIO'; throw e; } } });
   const d = await put(vault, 'flush', 'flush me'); assert.equal((await vault.events()).length, 1, 'acknowledged before any flush');
   await assert.rejects(() => vault.flushProjections(), { code: 'EIO' }); assert.equal((await new Vault(root).get(d.id)).body, 'flush me');
-  failing = false; const done = await vault.flushProjections(); assert.equal(done.files, 2, 'the retained pending keys are flushed on the next attempt'); assert.equal((await vault.flushProjections()).files, 0, 'nothing left pending');
+  failing = false; const done = await vault.flushProjections(); assert.equal(done.files, 1, 'the retained pending view is flushed on the next attempt (heads are never read and are never flushed)'); assert.equal((await vault.flushProjections()).files, 0, 'nothing left pending');
   recordCase({ suite: 'acid', name: 'projection-flush-failure', status: 'PASS' });
 });
 
 test('the background timer flushes pending projections by itself', async t => {
   const { vault } = await disposableVault(t); await put(vault, 'timer', 'flushed by the timer'); const pending = () => (vault as unknown as { pendingProjections: Map<string, number> }).pendingProjections.size;
-  assert.ok(pending() >= 2); for (let i = 0; i < 40 && pending(); i++) await sleep(50); assert.equal(pending(), 0);
+  assert.ok(pending() >= 1); for (let i = 0; i < 40 && pending(); i++) await sleep(50); assert.equal(pending(), 0);
   recordCase({ suite: 'acid', name: 'projection-timer-flush', status: 'PASS' });
 });
 
@@ -90,4 +90,13 @@ test('purging an object with pending projections never makes a later flush fail;
   await agent.put({ scope: { type: 'workspace', workspaceId: 'w' }, kind: 'note', title: 'by agent', body: 'agent commit' }); assert.equal((await read(root, e.path)).length, 20, 'non-owner commits leave repair to the owner');
   await vault.recover(); assert.equal(await read(root, e.path), full);
   recordCase({ suite: 'acid', name: 'projection-purge-and-non-owner', status: 'PASS' });
+});
+
+test('the flush waits for a quiet moment: it does not run while commits keep arriving, and runs once they stop', async t => {
+  const { vault } = await disposableVault(t); const pending = () => (vault as unknown as { pendingProjections: Map<string, number> }).pendingProjections.size;
+  let flushes = 0; const original = vault.flushProjections.bind(vault); vault.flushProjections = () => { flushes++; return original(); };
+  for (let i = 0; i < 10; i++) { await put(vault, `burst ${i}`, 'body'); await sleep(120); }
+  assert.equal(flushes, 0, 'no flush competed with the burst of commits'); assert.ok(pending() >= 10, `all ${pending()} view writes were still pending after a 1.2 s burst`);
+  for (let i = 0; i < 60 && pending(); i++) await sleep(50); assert.equal(pending(), 0, 'flushed after the writes stopped'); assert.ok(flushes >= 1);
+  recordCase({ suite: 'acid', name: 'projection-flush-waits-for-idle', status: 'PASS' });
 });

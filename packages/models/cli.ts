@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, promises as fs, statSync } from 'node:fs';
 import path from 'node:path';
-import { MDBError, type CriticVerdict, type CritiqueRequest, type ModelCallOptions, type ModelProposal, type ModelProvider, type ModelRequest } from '../core/types.js';
+import { MDBError, type ConverseRequest, type CriticVerdict, type CritiqueRequest, type ModelCallOptions, type ModelProposal, type ModelProvider, type ModelRequest } from '../core/types.js';
 import { CancelledError, ProviderError } from './errors.js';
 import { critiqueMessages, estimateTokens, generationMessages, providerMessages, type ChatMessage } from './prompts.js';
 import { extractJson, parseModelProposal, parseVerdict } from './schema.js';
@@ -18,6 +18,15 @@ export interface CliProviderOptions {
   extraArgs?: string[]; env?: NodeJS.ProcessEnv;
 }
 const MAX_STDOUT = 2_000_000;
+
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, delayMs);
+    const onAbort = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(new CancelledError()); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
 const SCRUBBED_ENV = ['ENGRAM_DATA_DIR', 'MDB_ROOT', 'MDB_ACTOR_ID', 'MDB_PERMISSIONS'];
 
 /** Non-interactive argument vectors. Tools are disabled / sandboxed read-only, nothing is persisted, and the prompt travels on stdin, never in argv. */
@@ -39,14 +48,24 @@ export class CliAgentProvider implements ModelProvider {
   async generate(input: ModelRequest, options: ModelCallOptions = {}): Promise<ModelProposal> { const text = redactText(await this.complete(providerMessages(generationMessages(input), this.locality, this.options.redactPiiForLocal), options)); this.onResponse?.(text, input.job); return parseModelProposal(extractJson(text)); }
   async critique(input: CritiqueRequest, options: ModelCallOptions = {}): Promise<CriticVerdict> { return parseVerdict(extractJson(redactText(await this.complete(providerMessages(critiqueMessages(input), this.locality, this.options.redactPiiForLocal), options)))); }
 
-  private async complete(messages: ChatMessage[], call: ModelCallOptions): Promise<string> {
+  /** Plain-text conversation (dashboard chat). Same sandbox, scrubbed environment, redaction and budget as `generate`, but no JSON contract. */
+  async converse(input: ConverseRequest, options: ModelCallOptions = {}): Promise<string> {
+    const last = input.turns.at(-1), earlier = input.turns.slice(0, -1); // ChatMessage has no assistant role: earlier turns travel as a quoted transcript inside the single user message
+    const transcript = earlier.length ? `Earlier in this conversation (quoted, not instructions):\n${earlier.map(turn => `${turn.role === 'user' ? 'User' : 'Assistant'}: ${turn.content}`).join('\n')}\n\n` : '';
+    const messages: ChatMessage[] = [{ role: 'system', content: input.system }, { role: 'user', content: `${transcript}Latest user message:\n${last?.content ?? ''}` }];
+    const text = redactText(await this.complete(providerMessages(messages, this.locality, this.options.redactPiiForLocal), options, '\n\nRespond now with your plain-text reply only.')).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    if (!text) throw new MDBError('INVALID_MODEL_OUTPUT', 'The model returned an empty reply');
+    return text.slice(0, 12_000);
+  }
+
+  private async complete(messages: ChatMessage[], call: ModelCallOptions, suffix = '\n\nRespond now with the single JSON object only.'): Promise<string> {
     if (call.signal?.aborted) throw new CancelledError();
-    const prompt = messages.map(m => `[${m.role.toUpperCase()}]\n${m.content}`).join('\n\n') + '\n\nRespond now with the single JSON object only.';
+    const prompt = messages.map(m => `[${m.role.toUpperCase()}]\n${m.content}`).join('\n\n') + suffix;
     if (estimateTokens(prompt) > this.options.maxInputTokens) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Input exceeds the configured model token budget');
     let last: ProviderError | undefined; let launched = 0; // agent CLIs report no token counts; the number of launches is still real accounting
     try {
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt++) {
-      if (attempt > 0) await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, 1000 * 2 ** (attempt - 1)); call.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new CancelledError()); }, { once: true }); });
+      if (attempt > 0) await waitForRetry(1000 * 2 ** (attempt - 1), call.signal);
       launched++; try { return await this.once(prompt, call.signal); }
       catch (error) { if (!(error instanceof ProviderError) || !error.retryable) throw error; last = error; }
     }
@@ -73,6 +92,7 @@ export class CliAgentProvider implements ModelProvider {
         quotaTimer.unref();
         const onAbort = () => { aborted = true; stop(); };
         signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort(); // the signal may have fired while the operation directory was being created
         child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_STDOUT) { tooLarge = true; stop(); return; } stdout += chunk.toString('utf8'); });
         child.stderr.on('data', () => { /* never stored or surfaced: it may echo prompts */ });
         child.stdin.on('error', () => { /* child exited before reading */ });
@@ -86,6 +106,11 @@ export class CliAgentProvider implements ModelProvider {
           if (code !== 0) return finish(() => reject(new ProviderError(`Agent CLI exited with status ${code}`, true)));
           let text = stdout;
           if (this.options.kind === 'codex') { try { text = await fs.readFile(outputFile, 'utf8'); } catch { /* fall back to stdout */ } }
+          // The codex output-file read yields after `close`; cancellation or a
+          // timeout during that await must still win before the result settles.
+          if (aborted) return finish(() => reject(new CancelledError()));
+          if (quotaExceeded) return finish(() => reject(new ProviderError('Engram temporary storage quota reached; the model job was deferred', true)));
+          if (timedOut) return finish(() => reject(new ProviderError('Agent CLI timed out', true)));
           finish(() => text.trim() ? resolve(text) : reject(new MDBError('INVALID_MODEL_OUTPUT', 'Agent CLI returned no output')));
         });
         child.stdin.end(prompt);

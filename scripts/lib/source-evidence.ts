@@ -13,12 +13,20 @@ export interface SourceEvidence {
 
 export function archiveAttestationMatches(text: string, fingerprint: string): boolean {
   try {
-    const value = parseStrictJson(text, 'archive attestation') as { fingerprint?: string; git_commit?: string; archive_sha256?: string; created_by?: string; created_at?: string };
+    if (Buffer.byteLength(text, 'utf8') > MAX_ARCHIVE_ATTESTATION_BYTES) return false;
+    const parsed = parseStrictJson(text, 'archive attestation');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    const value = parsed as { fingerprint?: unknown; git_commit?: unknown; archive_sha256?: unknown; created_by?: unknown; created_at?: unknown };
     return Object.keys(value).sort().join('\0') === ['archive_sha256', 'created_at', 'created_by', 'fingerprint', 'git_commit'].join('\0')
-      && value.fingerprint === fingerprint && /^[a-f0-9]{40,64}$/.test(value.git_commit ?? '') && /^[a-f0-9]{64}$/.test(value.archive_sha256 ?? '')
-      && value.created_by === 'ci' && Number.isFinite(Date.parse(value.created_at ?? '')) && new Date(value.created_at!).toISOString() === value.created_at;
+      && typeof value.fingerprint === 'string' && value.fingerprint === fingerprint
+      && typeof value.git_commit === 'string' && /^[a-f0-9]{40,64}$/.test(value.git_commit)
+      && typeof value.archive_sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.archive_sha256)
+      && value.created_by === 'ci' && typeof value.created_at === 'string' && Number.isFinite(Date.parse(value.created_at)) && new Date(value.created_at).toISOString() === value.created_at;
   } catch { return false; }
 }
+
+/** Attestations are tiny metadata documents; cap parsing at one MiB. */
+export const MAX_ARCHIVE_ATTESTATION_BYTES = 1024 * 1024;
 
 function sourceBytes(name: string, bytes: Buffer): Buffer {
   if (name !== 'AGENTS.md') return bytes;
@@ -33,7 +41,7 @@ function sourceBytes(name: string, bytes: Buffer): Buffer {
 
 const SOURCE_DIRS = ['.github', 'bin', 'ci', 'deploy', 'docs', 'fixtures', 'integrations', 'linux', 'macos', 'packages', 'scripts', 'skills', 'tests'];
 const ROOT_FILES = ['.dockerignore', '.gitignore', 'AGENTS.md', 'Makefile', 'README.md', 'package.json', 'package-lock.json', 'tsconfig.json', '.nvmrc'];
-const EVALUATION_INPUTS = ['verification/profile/labeled-corpus.json', 'verification/profile/correction-corpus.json', 'fixtures/inputs/profile/holdout-corpus.json', 'verification/dream/labeled-scenarios.json', 'verification/benchmarks/corpus-manifest.json'];
+export const EVALUATION_INPUTS = ['verification/profile/labeled-corpus.json', 'verification/profile/correction-corpus.json', 'fixtures/inputs/profile/holdout-corpus.json', 'fixtures/inputs/dream/labeled-scenarios.json', 'verification/benchmarks/corpus-manifest.json'];
 
 /** Hash application, test, deployment and evaluation inputs without consulting or changing the Git index. */
 export async function currentSourceEvidence(root = process.cwd()): Promise<SourceEvidence> {
@@ -71,6 +79,7 @@ export async function currentSourceEvidence(root = process.cwd()): Promise<Sourc
       // These directories are the declared release input set. Include extensionless and
       // dot-example deployment files too; a filename extension is not a security boundary.
       else if (entry.isFile()) names.add(child);
+      else throw new Error(`Unsupported special file in fingerprinted source: ${child}`);
     }
   };
   for (const directory of SOURCE_DIRS) await walk(directory);

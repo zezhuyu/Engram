@@ -304,14 +304,19 @@ test('dashboard route security matrix: every current route/method rejects anonym
     const lockoutPath = path.join(path.dirname(await passwordFilePath(vault.root, lockoutAuth)), 'login-lockouts.json');
     lockoutServer = await createDashboardServer({ engram: vault.engram, token: dashboard.token, authLocation: lockoutAuth, failedTokenLimit: 10_000, rateLimit: 10_000 });
     const lockoutOrigin = `http://127.0.0.1:${lockoutServer.port}`;
+    const lockoutSetup = await requestDashboard(lockoutServer.port, '/api/auth/setup', { method: 'POST', headers: { Origin: lockoutOrigin, 'Content-Type': 'application/json' }, body: JSON.stringify({ token: dashboard.token, password: 'Lockout-Test-Password-61!', confirm: 'Lockout-Test-Password-61!' }) });
+    assert.equal(lockoutSetup.status, 200, `lockout fixture setup: ${lockoutSetup.body}`);
     let locked: Reply | undefined;
     for (let i = 0; i < 8; i++) locked = await requestDashboard(lockoutServer.port, '/api/auth/login', { method: 'POST', headers: { Origin: lockoutOrigin, 'X-Forwarded-For': `198.51.100.${i + 1}`, Forwarded: `for=203.0.113.${i + 1}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) });
     assert.equal(locked?.status, 429);
-    const lockoutStat = await stat(lockoutPath), lockoutData = JSON.parse(await readFile(lockoutPath, 'utf8')) as { global: { count: number; retryAt: number }; sources: Record<string, unknown> };
+    const lockoutStat = await stat(lockoutPath), lockoutData = JSON.parse(await readFile(lockoutPath, 'utf8')) as { global: { count: number; retryAt: number }; sources: Record<string, { count: number; retryAt: number }> };
     const hashedSourceKeys = Object.keys(lockoutData.sources).every(key => /^[a-f0-9]{64}$/.test(key));
     record('/api/auth/login', 'POST', 'forwarded-header-lockout-spoof', 'eight distinct forwarded addresses cannot evade lockout', `status=${locked?.status}; globalCount=${lockoutData.global.count}`, locked?.status === 429 ? 'PASS' : 'FAIL');
     assert.equal(locked?.status, 429);
-    record('/api/auth/login', 'POST', 'socket-address-lockout-key', 'source counter persists under socket-address hash', `persisted source keys=${Object.keys(lockoutData.sources).length}`, Object.keys(lockoutData.sources).length === 1 ? 'PASS' : 'NOT_RUN', Object.keys(lockoutData.sources).length === 1 ? undefined : 'Global lockout reached 429, but the source map remained empty, so this fixture cannot establish per-socket lockout persistence.');
+    const sourceRows = Object.values(lockoutData.sources);
+    const socketKeyProven = Object.keys(lockoutData.sources).length === 1 && sourceRows[0]!.count >= 5;
+    record('/api/auth/login', 'POST', 'socket-address-lockout-key', 'different spoofed forwarding headers from one socket share one lockout bucket', `persisted source keys=${Object.keys(lockoutData.sources).length}; source failures=${sourceRows[0]?.count ?? 0}`, socketKeyProven ? 'PASS' : 'FAIL');
+    assert.ok(socketKeyProven, `forwarding headers split or omitted the socket peer bucket: sources=${JSON.stringify(lockoutData.sources)} global=${JSON.stringify(lockoutData.global)} replies=${dashboardReplies.slice(-9).map(r => `${r.status}:${r.body.slice(0, 90)}`).join('|')}`);
     record('/api/auth/login', 'POST', 'lockout-persisted-hashed-private-file', 'global and hashed per-source counters persist in a 0600 file', `mode ${(lockoutStat.mode & 0o777).toString(8)}; hashed keys ${hashedSourceKeys}`, (lockoutStat.mode & 0o777) === 0o600 && hashedSourceKeys && lockoutData.global.count >= 5 ? 'PASS' : 'FAIL');
     assert.equal(lockoutStat.mode & 0o777, 0o600); assert.ok(hashedSourceKeys); assert.ok(lockoutData.global.count >= 5);
     await stopDashboard(lockoutServer); lockoutServer = undefined;
@@ -343,6 +348,20 @@ test('dashboard route security matrix: every current route/method rejects anonym
     const afterRevoke = await resolveDashboardCredential(vault.root, view.token, '127.0.0.1');
     record('/api/dashboard/credentials/:id', 'DELETE', 'credential-token-hash-once-revoke', 'registry stores hash only, list omits token, revoke invalidates token', `${!registry.includes(view.token)}/${!listed.includes(view.token)}/${!!resolved}/${!afterRevoke}`, !registry.includes(view.token) && !listed.includes(view.token) && !!resolved && !afterRevoke ? 'PASS' : 'FAIL');
     assert.equal(registry.includes(view.token), false); assert.equal(listed.includes(view.token), false); assert.ok(resolved); assert.equal(afterRevoke, undefined);
+    const allowlisted = await createDashboardCredential(vault.root, { label: 'socket-peer-only', mode: 'view', sourceIps: ['127.0.0.1'] });
+    const oldRemoteAdmin = process.env.MDB_DASHBOARD_REMOTE_ADMIN; let credentialServer: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
+    try {
+      process.env.MDB_DASHBOARD_REMOTE_ADMIN = 'true';
+      credentialServer = await createDashboardServer({ engram: vault.engram, host: '127.0.0.1', token: dashboard.token, idleMs: 60_000 });
+      const peerReply = await requestDashboard(credentialServer.port, '/api/status', { headers: { Authorization: `Bearer ${allowlisted.token}`, 'X-Forwarded-For': '198.51.100.231', Forwarded: 'for=203.0.113.177' } });
+      const used = (await listDashboardCredentials(vault.root)).find(item => item.id === allowlisted.id);
+      const socketPeerAccepted = peerReply.status === 200 && used?.lastUsedIp === '127.0.0.1';
+      record('/api/status', 'GET', 'credential-source-ips-use-socket-peer', 'spoofed forwarding headers cannot change credential allowlist identity', `status=${peerReply.status}; recorded peer=${used?.lastUsedIp}`, socketPeerAccepted ? 'PASS' : 'FAIL');
+      assert.ok(socketPeerAccepted, peerReply.body);
+    } finally {
+      await stopDashboard(credentialServer);
+      if (oldRemoteAdmin === undefined) delete process.env.MDB_DASHBOARD_REMOTE_ADMIN; else process.env.MDB_DASHBOARD_REMOTE_ADMIN = oldRemoteAdmin;
+    }
     let expiryRejected = false; try { await createDashboardCredential(vault.root, { label: 'too-long', mode: 'view', expiresAt: new Date(Date.now() + 367 * 24 * 60 * 60_000).toISOString() }); } catch { expiryRejected = true; }
     record('/api/dashboard/credentials', 'POST', 'credential-expiry-cap', 'expiry beyond 366 days rejected', String(expiryRejected), expiryRejected ? 'PASS' : 'FAIL'); assert.equal(expiryRejected, true);
     let allowlistRejected = false; try { await createDashboardCredential(vault.root, { label: 'too-many-ips', mode: 'view', sourceIps: Array(65).fill('127.0.0.1') }); } catch { allowlistRejected = true; }
@@ -421,6 +440,7 @@ test('dashboard matrix artifacts are emitted with explicit coverage states', asy
   const artifactDir = path.join(repoRoot, 'verification/ga-readiness');
   const counts = { PASS: 0, FAIL: 0, NOT_RUN: 0, OPEN_POLICY: 0 };
   for (const cell of cases) counts[cell.status]++;
+  await mkdir(artifactDir, { recursive: true });
   const artifact = { generatedAt: new Date().toISOString(), source: 'packages/dashboard/server.ts', routes, summary: { cells: cases.length, ...counts }, cells: cases };
   await writeFile(path.join(artifactDir, 'dashboard-security-matrix.json'), `${JSON.stringify(artifact, null, 2)}\n`);
   const findingCells = cases.filter(cell => cell.status === 'FAIL');

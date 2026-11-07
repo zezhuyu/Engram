@@ -53,6 +53,9 @@ const exec = async (v, iteration) => {
     if (system === 'sqlite-fts-hydrated') { const s = sqlQuery(w, false); if (!s || !sdb) return { skipped: true }; const t = performance.now(); const rows = sdb.prepare(s.sql).all(...s.params); const get = sdb.prepare('SELECT title, body FROM docs WHERE id = ?'); const hits = rows.map(r => { const d = get.get(r.id); const lines = d.body.split('\n'); return { id: r.id, title: d.title, snippet: lines.slice(0, 3).join('\n').slice(0, 600) }; }); return { ms: performance.now() - t, ids: hits.map(h => h.id) }; }
   } finally { await fs.rm(tmp, { recursive: true, force: true }); }
 };
+// --purge: drop the OS page cache before EVERY sample (macOS `purge` needs root: run `sudo -v` in this terminal first; the script never asks for or stores a password).
+const purge = process.argv.includes('--purge');
+const purgeCache = () => { const r = spawnSync('sudo', ['-n', 'purge'], { stdio: 'inherit' }); if (r.status !== 0) { console.error('sudo purge failed: run `sudo -v` in this terminal first'); process.exit(3); } };
 const shuffle = (arr, r) => { const a = [...arr]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 for (const w of workloads) {
   const vs = variants.filter(v => v.w === w); const r = rng(20261010 + w.name.length * 7919); const top = golden(w.name, 'topk');
@@ -60,7 +63,7 @@ for (const w of workloads) {
   const cap = new Map();
   for (let it = 0; it < warmups + iterations; it++) for (const v of shuffle(vs, r)) {
     const key = `${w.name}/${v.system}`; if (cap.get(key) === 'stop') continue;
-    let res; try { res = await exec(v, it); } catch (e) { resultsByKey[key] = { error: String(e.message).slice(0, 300) }; cap.set(key, 'stop'); console.error(`ERR ${key}: ${e.message.slice(0, 160)}`); continue; }
+    let res; try { if (purge) purgeCache(); res = await exec(v, it); } catch (e) { resultsByKey[key] = { error: String(e.message).slice(0, 300) }; cap.set(key, 'stop'); console.error(`ERR ${key}: ${e.message.slice(0, 160)}`); continue; }
     if (res?.skipped) { resultsByKey[key] = { skipped: true }; cap.set(key, 'stop'); continue; }
     if (it >= warmups) samples[key].push(+res.ms.toFixed(3)); resultsByKey[key] = { ids: res.ids };
     if (it === 0 && res.ms > 5000 && iterations > slowIterations) cap.set(key, { limit: warmups + slowIterations });
@@ -75,6 +78,6 @@ for (const w of workloads) for (const v of variants.filter(x => x.w === w)) {
   if (res?.ids) { if (v.system === 'shell-floor') { comparedTo = 'oracle all-match set'; correct = allEq(res.ids, golden(w.name, 'all')); } else if (v.system.startsWith('sqlite-fts') && w.input.mode === 'keyword') { comparedTo = 'diagnostic (ranking not equivalent)'; correct = null; } else { comparedTo = 'oracle ranked top-K'; correct = same(res.ids, golden(w.name, 'topk')); if (!correct && v.system === 'engram-sqlite' || !correct && v.system === 'engram-cli-sqlite') { const all = new Set(golden(w.name, 'all')); const k = golden(w.name, 'topk').length; if (res.ids.length === k && res.ids.every(i => all.has(i))) { correct = null; comparedTo = 'valid top-K (SQLite backend ranks by BM25; oracle ranks lexically)'; special = 'VALID_DIFFERENT_RANKING'; } } } }
   rows.push({ workload: w.name, system: v.system, equivalentToProductAnswer: v.equivalent, equivalenceNote: v.why, status: res?.error ? 'ERROR' : res?.skipped ? 'NOT_EQUIVALENT_OR_UNSUPPORTED' : correct === false ? 'WRONG' : correct === true ? 'CORRECT' : (special ?? 'DIAGNOSTIC'), comparedTo, error: res?.error, resultCount: res?.ids?.length ?? null, stats: s?.length ? stats(s) : null, samples: s });
 }
-const result = { schema: 'competitive-100k-run/1', label, createdAt: new Date().toISOString(), corpusId: manifest.corpus.corpusId, iterations, warmups, slowIterations, cacheNote: 'warm OS cache (corpus read repeatedly); cold-cache runs NOT_RUN: dropping the macOS page cache needs sudo purge, not authorized. engram-cli-* includes node startup and vault open; engram-fs/engram-sqlite are in-process steady state.', environment: manifest.environment, rows };
+const result = { schema: 'competitive-100k-run/1', label, createdAt: new Date().toISOString(), corpusId: manifest.corpus.corpusId, iterations, warmups, slowIterations, cacheNote: (purge ? 'COLD OS page cache: sudo purge before every sample (process-level caches such as in-process Engram manifests stay warm within a process; engram-cli-* and shell start cold processes).'     : 'warm OS cache (corpus read repeatedly); cold-cache runs NOT_RUN: dropping the macOS page cache needs sudo purge.') + ' engram-cli-* includes node startup and vault open; engram-fs/engram-sqlite are in-process steady state.', environment: manifest.environment, rows };
 await fs.writeFile(`${out}/raw/${label}-samples.json`, JSON.stringify(result, null, 2));
 await fs.rm(scratch, { recursive: true, force: true }); console.log(JSON.stringify({ label, rows: rows.length, wrong: rows.filter(r => r.status === 'WRONG').map(r => `${r.workload}/${r.system}`), errors: rows.filter(r => r.status === 'ERROR').map(r => `${r.workload}/${r.system}`) }));

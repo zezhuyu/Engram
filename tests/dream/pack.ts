@@ -61,3 +61,22 @@ export async function buildNegativeControlDocs(vault: Vault): Promise<Record<str
   }
   return result;
 }
+
+/** Data-driven pack for an externally supplied (custodian-held) evaluation corpus. Same shape as the built-in pack; nothing is read from the repository. */
+export interface PackSpecFile { docs: Array<{ key: string; kind: string; title: string; body: string; tags: string[]; privateWorkspace?: boolean; contradicts?: string }>; goal: { preferenceKey: string; claim: string }; privateKeys?: string[]; negativeControlSources?: Array<{ key: string; domain: string; title: string; body: string; term: string }> }
+export async function buildPackFromSpec(vault: Vault, spec: PackSpecFile): Promise<Pack> {
+  await vault.createWorkspace('private', 'private notes', {});
+  const ids: Record<string, string> = {}; const docs: Record<string, Document> = {};
+  for (const s of spec.docs) {
+    const links = s.contradicts ? [{ type: 'contradicts', target: docs[s.contradicts]!.uri }] : undefined;
+    const d = await vault.put({ scope: s.privateWorkspace ? { type: 'workspace', workspaceId: 'private' } : wiki, kind: s.kind, title: s.title, body: s.body, tags: s.tags, ...(links ? { links } : {}) });
+    ids[s.key] = d.id; docs[s.key] = d;
+  }
+  const goal = await correctInsight(vault, { scope: { type: 'global', area: 'profile' }, preferenceKey: spec.goal.preferenceKey, claim: spec.goal.claim, category: 'goal', reason: 'stated by the user' });
+  return { ids, docs, goalId: goal.id, privateWorkspace: 'private' };
+}
+export async function buildNegativeControlDocsFromSpec(vault: Vault, spec: PackSpecFile): Promise<Record<string, Document>> {
+  const result: Record<string, Document> = {};
+  for (const source of spec.negativeControlSources ?? []) result[source.key] = await vault.put({ scope: wiki, kind: 'wiki_page', title: source.title, body: source.body, tags: [`domain:${source.domain}`, source.term] });
+  return result;
+}

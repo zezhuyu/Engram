@@ -8,6 +8,12 @@ import { parseStrictJson } from './strict-json.js';
 import { currentSourceEvidence, type SourceEvidence } from './source-evidence.js';
 
 /** Verification INPUT fixtures (not generated reports) live in the tracked fixtures/inputs/ tree; verification/ itself is generated output and is not tracked. */
+/** The single canonical location of an evaluation input: the tracked copy under fixtures/inputs. There is NO silent fallback to a verification/ copy (they drifted apart once). */
+export function canonicalInput(relative: string, root = process.cwd()): string {
+  const p = `fixtures/inputs/${relative}`;
+  if (!existsSync(`${root}/${p}`)) throw new Error(`Canonical evaluation input ${p} is missing; refusing to fall back to a verification/ copy`);
+  return p;
+}
 export function inputPath(relative: string): string { return existsSync(`fixtures/inputs/${relative}`) ? `fixtures/inputs/${relative}` : `verification/${relative}`; }
 import { redactText } from '../../packages/memory/redact.js';
 const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE|SESSION)/i;

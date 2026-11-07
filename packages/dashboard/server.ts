@@ -19,7 +19,7 @@ import { changePassword, clearDashboardSessions, dashboardSessionKey, loadDashbo
 import { mkdir, writeFile, unlink, chmod, readFile, rmdir, lstat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import pathUtil from 'node:path';
-import { CHAT_BODY_LIMIT, CHAT_TIMEOUT_MS, isSmallTalk, parseMultipart, readLimited, retrievalAnswer, safeSourceName, smallTalkAnswer, stableUploadKey, uploadLimit, validScope, validateChatModelOutput, validateUpload } from './chat.js';
+import { CHAT_BODY_LIMIT, CHAT_TIMEOUT_MS, isSmallTalk, parseMultipart, readLimited, retrievalAnswer, safeSourceName, smallTalkAnswer, stableUploadKey, uploadLimit, validScope, validateChatModelOutput, validateUpload, synthesisFailureReason, CHAT_ASSISTANT_SYSTEM, sanitizeChatHistory } from './chat.js';
 import { describeModel, parseModelProposal } from '../sdk/index.js';
 import { newUrlNoteJobId, parseUrlNoteDraft, readUrlNotesEnabled, runUrlNoteAgent, setUrlNotesEnabled, urlAuditHost, urlNoteCliEnvironment, validUrlNoteAgent, validateUrlNoteUrl, type UrlNoteJob } from './url-notes.js';
 import { createDashboardCredential, listDashboardCredentials, resolveDashboardCredential, revokeDashboardCredential } from './credentials.js';
@@ -118,7 +118,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
   const persistLockouts = () => {
     const write = lockoutWrites.then(async () => {
     const now = Date.now();
-    for (const [key, value] of loginFailures) if (now - value.retryAt >= 7 * 24 * 60 * 60_000) loginFailures.delete(key);
+    for (const [key, value] of loginFailures) if (value.retryAt > 0 && now - value.retryAt >= 7 * 24 * 60 * 60_000) loginFailures.delete(key);
     while (loginFailures.size > 4096) loginFailures.delete(loginFailures.keys().next().value!);
     const data = JSON.stringify({ version: 1, global: globalFailures, sources: Object.fromEntries(loginFailures) });
     if (Buffer.byteLength(data) > 512 * 1024) throw new Error('Dashboard login lockout file exceeds limit');
@@ -508,8 +508,25 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       const work = (async () => {
         const scope = body.scope === undefined ? undefined : validScope(body.scope);
         const visibleDocs = await options.engram.listDocuments({ ...(scope ? { scopes: [scope] } : {}) });
-        if (!visibleDocs.length) return { kind: 'empty_vault', answer: 'Your vault has no documents yet.', citations: [], actions: [{ label: 'Create document', target: 'knowledge-create' }, { label: 'Add a source', target: 'composer' }] };
-        if (isSmallTalk(body.question)) return smallTalkAnswer(body.question, visibleDocs);
+        // "Use model" means the agent answers every message: retrieval is optional context, never a gate. Without a usable model the deterministic replies below stay in place.
+        const history = sanitizeChatHistory(body.history);
+        const general = async (): Promise<{ reply?: Record<string, unknown>; skip?: string }> => {
+          if (body.useModel !== true) return {};
+          const cfg = await options.engram.config(), mdl = describeModel(cfg.model, options.engram.modelEnv);
+          if (!mdl.available) return { skip: mdl.reason ?? 'Model provider unavailable' };
+          const prov = options.engram.provider ?? createProviderFromConfig(cfg.model, options.engram.modelEnv);
+          if (!prov.converse) return { skip: 'The configured model provider cannot hold a free conversation yet, so only questions that match wiki pages use it.' };
+          const loc = prov.locality ?? mdl.locality;
+          if (loc === 'remote' && !cfg.model.allowNetwork) return { skip: 'The configured model provider (local agent CLI) is treated as remote. Allow it in Settings > Model provider (network permission), then try again' };
+          if (controller.signal.aborted) throw new Error('Chat request aborted');
+          try {
+            const text = await prov.converse({ system: CHAT_ASSISTANT_SYSTEM, turns: [...history, { role: 'user', content: body.question.trim() }] }, { signal: controller.signal, maxOutputTokens: 1200 });
+            return { reply: { kind: 'model_general', answer: text, citations: [], synthesis: { available: true, used: true, grounded: false, provider: prov.id, locality: loc } } };
+          } catch (error) { if (controller.signal.aborted) throw error; return { skip: synthesisFailureReason(error) }; }
+        };
+        const withSkip = (reply: Record<string, unknown>, skip?: string) => skip ? { ...reply, synthesis: { available: true, used: false, reason: skip } } : reply;
+        if (!visibleDocs.length) { const g = await general(); return g.reply ?? withSkip({ kind: 'empty_vault', answer: 'Your vault has no documents yet.', citations: [], actions: [{ label: 'Create document', target: 'knowledge-create' }, { label: 'Add a source', target: 'composer' }] }, g.skip); }
+        if (isSmallTalk(body.question)) { const g = await general(); return g.reply ?? withSkip(smallTalkAnswer(body.question, visibleDocs), g.skip); }
         const queryOptions = { mode: 'keyword' as const, ...(scope ? { scopes: [scope] } : {}), limit: 12 };
         const exact = await options.engram.search.query({ ...queryOptions, query: body.question.trim() });
         let hits = exact.hits;
@@ -523,7 +540,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
         const retrieved = retrievalAnswer(body.question, docs);
         const config = await options.engram.config(), model = describeModel(config.model, options.engram.modelEnv);
         const answerDocs = docs.filter(doc => retrieved.citations.some(citation => citation.uri === doc.uri && citation.revisionId === doc.revisionId));
-        if (!retrieved.citations.length) { const recent = visibleDocs.filter(doc => doc.status !== 'deleted').sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0,5).map(doc => ({id:doc.id,title:doc.title})); return { ...retrieved, kind: 'no_match', suggestions: recent, ...(model.available ? { modelHint: 'Use model is available for an evidence-grounded synthesis when you find matching pages.' } : {}), synthesis: { available: model.available, used: false, ...(model.reason ? { reason: model.reason } : {}) } }; }
+        if (!retrieved.citations.length) { const g = await general(); if (g.reply) return g.reply; const recent = visibleDocs.filter(doc => doc.status !== 'deleted').sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0,5).map(doc => ({id:doc.id,title:doc.title})); return { ...retrieved, kind: 'no_match', suggestions: recent, ...(model.available ? { modelHint: 'Use model is available for an evidence-grounded synthesis when you find matching pages.' } : {}), synthesis: { available: model.available, used: false, reason: g.skip ?? (body.useModel === true ? 'The model could not be asked.' : model.reason) } }; }
         if (body.useModel !== true) return { ...retrieved, synthesis: { available: model.available, used: false, ...(model.reason ? { reason: model.reason } : {}) } };
         const hasPrivate = answerDocs.some(doc => doc.scope.type === 'workspace');
         if (!model.available) return { ...retrieved, synthesis: { available: false, used: false, reason: model.reason ?? 'Model provider unavailable' } };
@@ -537,7 +554,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
           return { ...valid, synthesis: { available: true, used: true, provider: provider.id, locality } };
         } catch (error) {
           if (controller.signal.aborted) throw error;
-          return { ...retrieved, synthesis: { available: true, used: false, reason: 'Model synthesis failed. Your retrieved answer is unchanged.' } };
+          return { ...retrieved, synthesis: { available: true, used: false, reason: synthesisFailureReason(error) } };
         }
       })();
       chatFlights.set(sessionKey, work);

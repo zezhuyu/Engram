@@ -4,14 +4,22 @@ import path from 'node:path';
 import { Vault } from '../packages/core/vault.js';
 import { createProviderFromConfig } from '../packages/models/factory.js';
 import { IntelligenceEngine } from '../packages/intelligence/index.js';
-import { buildNegativeControlDocs, buildPack } from '../tests/dream/pack.js';
-import { inputPath } from './lib/suite.js';
+import { buildNegativeControlDocs, buildNegativeControlDocsFromSpec, buildPack, buildPackFromSpec, type PackSpecFile } from '../tests/dream/pack.js';
+import { canonicalInput, inputPath } from './lib/suite.js';
+import { buildProvenance } from './lib/eval-provenance.js';
 import { currentSourceEvidence } from './lib/source-evidence.js';
 import { configureDreamEvalVault } from './lib/dream-eval-vault.js';
-import { dreamContradictionHandled, dreamHasUnsupportedUniversalClaim, dreamHeuristicQualityPass, dreamMetadataClaimsTraceable, dreamNegativeControlOutcome, dreamNegativeControlsPass, dreamScenarioOutcome, dreamTextMatchesTerms, isUsableDreamCandidate } from './lib/dream-metrics.js';
+import { dreamDimensionQuality, dreamContradictionHandled, dreamHasUnsupportedUniversalClaim, dreamHeuristicQualityPass, dreamMetadataClaimsTraceable, dreamNegativeControlOutcome, dreamNegativeControlsPass, dreamScenarioOutcome, dreamTextMatchesTerms, isUsableDreamCandidate } from './lib/dream-metrics.js';
 import { isHonestNoMechanismProposal } from '../packages/intelligence/dream/critic.js';
 
-const spec = JSON.parse(await fs.readFile(inputPath('dream/labeled-scenarios.json'), 'utf8')) as { thresholds: { meanQualityPerMode: number; minimumEvidenceGrounding: number; criticAdversarialRejectionRecall: number; criticSupportedAcceptanceRate: number; feedbackDeterministicInfluence: number }; scenarios: Array<{ id: string; mode: 'micro' | 'deep' | 'strategic'; evidence: string[]; goal: string; relevanceTerms?: string[]; expectedOutcome?: 'candidate' | 'abstention' }>; negativeControls?: Array<{ id: string; evidence: string[]; instruction: string; expectedUsableCandidates: number; minimumProviderCalls: number }>; criticCases: Array<{ id: string; expected: 'accept' | 'reject'; proposal: string; evidence: string[] }> };
+const corpusEnv = process.env.MDB_DREAM_CORPUS;
+const corpusFile = corpusEnv ? (path.isAbsolute(corpusEnv) ? corpusEnv : inputPath(corpusEnv)) : canonicalInput('dream/labeled-scenarios.json');
+// Optional custodian-held corpus and pack (absolute paths, outside the repository). Defaults are unchanged.
+const packSpec = process.env.MDB_DREAM_PACK ? JSON.parse(await fs.readFile(process.env.MDB_DREAM_PACK, 'utf8')) as PackSpecFile : undefined;
+const makePack = (v: Vault) => packSpec ? buildPackFromSpec(v, packSpec) : buildPack(v);
+const makeControlDocs = (v: Vault) => packSpec ? buildNegativeControlDocsFromSpec(v, packSpec) : buildNegativeControlDocs(v);
+const spec = JSON.parse(await fs.readFile(corpusEnv ? (path.isAbsolute(corpusEnv) ? corpusEnv : inputPath(corpusEnv)) : canonicalInput('dream/labeled-scenarios.json'), 'utf8')) as { thresholds: { meanQualityPerMode: number; minimumEvidenceGrounding: number; criticAdversarialRejectionRecall: number; criticSupportedAcceptanceRate: number; feedbackDeterministicInfluence: number }; scenarios: Array<{ id: string; mode: 'micro' | 'deep' | 'strategic'; evidence: string[]; goal: string; relevanceTerms?: string[]; expectedOutcome?: 'candidate' | 'abstention' }>; negativeControls?: Array<{ id: string; evidence: string[]; instruction: string; expectedUsableCandidates: number; minimumProviderCalls: number }>; criticCases: Array<{ id: string; expected: 'accept' | 'reject'; proposal: string; evidence: string[] }> };
+const DREAM_EVALUATOR_FILES = ['scripts/evaluate-dream.ts', 'scripts/lib/dream-metrics.ts', 'scripts/lib/eval-provenance.ts', 'packages/intelligence/dream/critic.ts', 'packages/intelligence/dream/grounding.ts', 'tests/dream/pack.ts'];
 const providerName = process.env.MDB_TEST_PROVIDER ?? 'claude-cli';
 const modelName = process.env.MDB_TEST_MODEL;
 if (!/-cli$|^auto$/.test(providerName) && !modelName) throw new Error('MDB_TEST_MODEL is required for API providers');
@@ -48,7 +56,7 @@ const scoreProposal = (scenario: (typeof spec.scenarios)[number], proposal: { in
   const steps = Array.isArray(m.testPlan) ? (m.testPlan as unknown[]).filter(x => typeof x === 'string' && x.length >= 15) : [];
   const feasibility = !!proposal && typeof m.proposedValidation === 'string' && m.proposedValidation.length >= 20 && OBSERVABLE.test(m.proposedValidation) && steps.length >= 1;
   const novelty = !!proposal && (m.novelty === 'new_to_user' || /hypothesis|could|might|combine|connect|composition|transfer|opportunity/i.test(proposal.input.body));
-  const contradiction = scenario.mode !== 'deep' || scenario.id !== 'deep-cache-contradiction' || dreamContradictionHandled(text);
+  const contradiction = !!proposal && (scenario.mode !== 'deep' || scenario.id !== 'deep-cache-contradiction' || dreamContradictionHandled(text));
   const metadataTraceability = !!proposal && dreamMetadataClaimsTraceable(m, sources.map(source => source.body));
   // These deterministic checks are syntax/provenance guards, not semantic
   // entailment. Keep metadata overlap visible as a diagnostic without letting
@@ -59,7 +67,7 @@ const scoreProposal = (scenario: (typeof spec.scenarios)[number], proposal: { in
     dims.factSpeculationSeparation = Array.isArray(m.facts) && m.facts.length >= 1 && Array.isArray(m.speculation) && m.speculation.length >= 1 && Array.isArray(m.missingEvidence) && m.missingEvidence.length >= 1;
     dims.multiHop = Array.isArray(m.hops) && m.hops.length >= (m.subtype === 'contradiction' ? 1 : 2);
   }
-  const quality = Object.values(dims).filter(Boolean).length / Object.keys(dims).length;
+  const quality = dreamDimensionQuality(dims, !!proposal);
   const legacy = [novelty, modeRelevance, legacyFeasibility, grounded, contradiction, !!proposal && grounded && !/verified fact|proven that|always safe|never leaks/i.test(proposal.input.body)].filter(Boolean).length / 6;
   return { dims, quality, legacy, diagnostics: { metadataClaimLexicalOverlap: metadataTraceability ? 'NO_WARNING' : 'WARNING_ONLY', semanticGrounding: 'NOT_ASSESSED' } };
 };
@@ -70,8 +78,8 @@ try {
     try {
       const vault = new Vault(root); await vault.init();
       await configureDreamEvalVault(vault, root);
-      const pack = await buildPack(vault);
-      for (const key of ['privApi', 'privDash']) await vault.delete(pack.ids[key]!, pack.docs[key]!.revisionId);
+      const pack = await makePack(vault);
+      for (const key of packSpec?.privateKeys ?? ['privApi', 'privDash']) await vault.delete(pack.ids[key]!, pack.docs[key]!.revisionId);
       const engine = new IntelligenceEngine(vault, provider);
       const getSources = async (keys: string[]) => Promise.all(keys.map(key => key === 'goal' ? vault.get(pack.goalId) : vault.get(pack.ids[key]!, pack.docs[key]!.revisionId)));
       if (scenario.mode === 'deep') {
@@ -109,7 +117,7 @@ try {
   for (let run = 1; run <= RUNS; run++) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mdb-dream-eval-'));
     try {
-      const vault = new Vault(root); await vault.init(); const pack = await buildPack(vault);
+      const vault = new Vault(root); await vault.init(); const pack = await makePack(vault);
       const getSources = async (keys: string[]) => Promise.all(keys.map(key => key === 'goal' ? vault.get(pack.goalId) : vault.get(pack.ids[key]!, pack.docs[key]!.revisionId)));
   for (const testCase of spec.criticCases) {
     const evidence = await getSources(testCase.evidence);
@@ -128,8 +136,8 @@ for (let run = 1; run <= RUNS; run++) for (const control of spec.negativeControl
   try {
     const vault = new Vault(root); await vault.init();
     await configureDreamEvalVault(vault, root);
-    await buildPack(vault);
-    const controlDocs = await buildNegativeControlDocs(vault);
+    await makePack(vault);
+    const controlDocs = await makeControlDocs(vault);
     const keep = new Set(control.evidence.map(key => controlDocs[key]?.id));
     if (keep.size !== control.evidence.length || [...keep].some(id => !id)) throw new Error(`Negative control ${control.id} references an unknown source`);
     for (const doc of await vault.listDocuments()) if (doc.kind !== 'user_insight' && !keep.has(doc.id)) await vault.delete(doc.id, doc.revisionId);
@@ -202,7 +210,7 @@ const candidateMetrics = { generatedCandidates, evaluatedCandidates, persistedCa
 const evidenceSource = await currentSourceEvidence();
 await fs.mkdir(rawDir, { recursive: true });
 await fs.writeFile(path.join(rawDir, `critic-run-${Date.now()}.json`), JSON.stringify({ calls: providerCalls.slice(criticRawStart), scoredCases: criticResults }, null, 2) + '\n');
-const report = { status: heuristicPass ? 'INCOMPLETE' : 'FAIL', deterministicChecks: heuristicPass ? 'SATISFIED' : 'FAILED', semanticGrounding: 'NOT_ASSESSED', humanAdjudication: 'NOT_RUN', runs: RUNS, minimumRunsRequired, minimumScenarioQuality, command: `MDB_TEST_PROVIDER=${providerName} MDB_TEST_MODEL=${modelName ?? '(CLI default)'} MDB_EVAL_RUNS=${RUNS} npm run eval:dream`, provider: provider.id, model: modelName ?? null, corpus: 'verification/dream/labeled-scenarios.json', runAt: new Date().toISOString(), thresholds, counts: { dreamScenarios: results.length, criticCases: criticResults.length, ...candidateMetrics, negativeControls: negativeControlResults.length, negativeControlsPassed: negativeControlResults.filter(row => row.status === 'PASS').length }, metrics: { ...metrics, minimumScenarioRunQuality, scenarioQualityPass, negativeControlPass }, scenarios: results, negativeControls: negativeControlResults, criticCases: criticResults, evidenceSource, rawResponses: rawDir, retrieval: { lexicalGraph: 'deterministic evidence: npm run verify:dream', semanticHybrid: 'NOT_RUN; no configured real embedding provider/backend for this run; optional semantic retrieval remains additive' }, limitations: ['The status remains INCOMPLETE whenever deterministic checks pass because semantic grounding and qualified human adjudication have not been completed.', 'A negative-control abstention is a valid outcome when the job completes, meets the provider-call floor, produces no usable candidate, and no unsupported candidate survives; unsupported generated candidates remain separately reported.', 'Dream lexical checks are diagnostics, not entailment. Adjudication packets expose exact cited spans and facts/speculation/hops/mechanism separately; semantic adjudication remains NOT_ASSESSED until a qualified independent review is recorded.', 'Candidate quality, critic rejection accuracy and usable-output yield are separate counts; rejected or not-selected hypotheses are not usable results.', 'Feedback influence is established by deterministic regression testing, not a multi-run model experiment.', 'No production embedding model was configured, so real semantic/hybrid quality comparison was not run.'] };
+const report = { status: heuristicPass ? 'INCOMPLETE' : 'FAIL', deterministicChecks: heuristicPass ? 'SATISFIED' : 'FAILED', semanticGrounding: 'NOT_ASSESSED', humanAdjudication: 'NOT_RUN', runs: RUNS, minimumRunsRequired, minimumScenarioQuality, command: `MDB_TEST_PROVIDER=${providerName} MDB_TEST_MODEL=${modelName ?? '(CLI default)'} MDB_EVAL_RUNS=${RUNS} npm run eval:dream`, provider: provider.id, model: modelName ?? null, corpus: corpusFile, provenance: await buildProvenance({ corpusPath: corpusFile, ...(process.env.MDB_DREAM_PACK ? { packPath: process.env.MDB_DREAM_PACK } : {}), evaluatorFiles: DREAM_EVALUATOR_FILES, sourceFingerprint: evidenceSource.fingerprint, treeState: evidenceSource.treeState.state, model: { provider: provider.id, model: modelName ?? null, baseUrl: process.env.MDB_TEST_BASE_URL ?? null, temperature: process.env.MDB_TEST_TEMPERATURE ?? null, allowNetwork: process.env.MDB_TEST_ALLOW_NETWORK === '1' }, runs: RUNS }), runAt: new Date().toISOString(), thresholds, counts: { dreamScenarios: results.length, criticCases: criticResults.length, ...candidateMetrics, negativeControls: negativeControlResults.length, negativeControlsPassed: negativeControlResults.filter(row => row.status === 'PASS').length }, metrics: { ...metrics, minimumScenarioRunQuality, scenarioQualityPass, negativeControlPass }, scenarios: results, negativeControls: negativeControlResults, criticCases: criticResults, evidenceSource, rawResponses: rawDir, retrieval: { lexicalGraph: 'deterministic evidence: npm run verify:dream', semanticHybrid: 'NOT_RUN; no configured real embedding provider/backend for this run; optional semantic retrieval remains additive' }, limitations: ['The status remains INCOMPLETE whenever deterministic checks pass because semantic grounding and qualified human adjudication have not been completed.', 'A negative-control abstention is a valid outcome when the job completes, meets the provider-call floor, produces no usable candidate, and no unsupported candidate survives; unsupported generated candidates remain separately reported.', 'Dream lexical checks are diagnostics, not entailment. Adjudication packets expose exact cited spans and facts/speculation/hops/mechanism separately; semantic adjudication remains NOT_ASSESSED until a qualified independent review is recorded.', 'Candidate quality, critic rejection accuracy and usable-output yield are separate counts; rejected or not-selected hypotheses are not usable results.', 'Feedback influence is established by deterministic regression testing, not a multi-run model experiment.', 'No production embedding model was configured, so real semantic/hybrid quality comparison was not run.'] };
 const reportPath = path.resolve(process.env.MDB_DREAM_OUTPUT ?? 'verification/dream/real-model-evaluation.json');
 await fs.mkdir(path.dirname(reportPath), { recursive: true });
 await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');

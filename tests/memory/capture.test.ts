@@ -261,6 +261,7 @@ test('abandoned sessions are closed as INCOMPLETE with a clearly labeled partial
   assert.equal(abandoned.metadata.lifecycle, 'closed'); assert.equal(abandoned.metadata.incomplete, true); assert.match(abandoned.body, /INCOMPLETE/); assert.equal(active.metadata.lifecycle, 'open');
   const job = (await new Engram(s.root).intelligence.jobs()).find(j => j.kind === 'reflect' && j.input.objectIds?.includes(abandoned.id));
   assert.match(job!.input.instruction ?? '', /PARTIAL handoff/);
+  assert.match(job!.input.instruction ?? '', /kind "reflection"/, 'the instruction must name the only kind this stage accepts, otherwise a real model answers with kind "handoff" and the job dead-letters');
   assert.equal((await sweepAbandoned(s.vault, { timeoutMs: 3600_000 })).closed.length, 0, 'sweep is idempotent');
   recordCase({ suite: 'memory', name: 'abandoned-session-sweep', status: 'PASS' });
 });

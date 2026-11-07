@@ -4,8 +4,9 @@ import { createDashboardServer } from '../../packages/dashboard/server.js';
 import { Engram } from '../../packages/sdk/index.js';
 import { generationMessages } from '../../packages/models/prompts.js';
 import { disposableVault } from './helpers.js';
+import { assertOversizedBodyRejected } from '../helpers/oversized-body.js';
 import { assets, deriveChatMessages, newestChatScrollTop } from '../../packages/dashboard/ui/view-model.js';
-import { chatTerms, isSmallTalk, retrievalAnswer, smallTalkAnswer } from '../../packages/dashboard/chat.js';
+import { chatTerms, isSmallTalk, retrievalAnswer, smallTalkAnswer, synthesisFailureReason, validateChatModelOutput } from '../../packages/dashboard/chat.js';
 
 test('chat deterministic reply and relevance view models cover empty, small talk, and unrelated pages', async () => {
   assert.deepEqual(chatTerms('How do I back up the vault?'), ['back', 'up', 'vault']);
@@ -49,7 +50,7 @@ test('chat view model preserves message roles, text, order, citations, and empty
   assert.match(script, /What do my notes say about/);
   assert.match(script, /sourceOptions\.append\(option\)/);
   assert.match(script, /composer\.append\(urlOffers,drop,toolbar,input,reason\)/);
-  assert.match(script, /chat-model-note/); assert.match(script, /Open Model provider settings/); assert.match(script, /chat-copy/); assert.match(script, /chat-provider/); assert.match(script, /suggestion\.title/); assert.match(script, /knowledge-create/);
+  assert.match(script, /chat-model-note/); assert.match(script, /Open model settings/); assert.match(script, /chat-copy/); assert.match(script, /chat-answer-mode/); assert.match(script, /suggestion\.title/); assert.match(script, /knowledge-create/);
   assert.doesNotMatch(script, /composer\.append\(urlOffers,drop,fileChip/);
   assert.doesNotMatch(script, /const composer=panel\('Message'\)/);
   assert.match(script, /newestChatScrollTop\(feed\.clientHeight,feed\.scrollHeight/);
@@ -57,7 +58,7 @@ test('chat view model preserves message roles, text, order, citations, and empty
   assert.match(css, /\.chat-conversation\{min-height:0;overflow:hidden\}/);
   assert.match(css, /\.chat-feed\{min-height:0;overscroll-behavior:contain;overflow-y:auto/);
   assert.match(css, /\.chat-url-actions\[hidden\]\{display:none!important\}/);
-  assert.match(css, /\.chat-page\{height:calc\(100dvh - 290px\);min-height:0;gap:12px\}/);
+  assert.match(css, /\.chat-page\{height:calc\(100dvh - 290px\);min-height:0/);
   assert.match(css, /\.chat-turn\.system\{align-self:center\}/);
   assert.match(css, /\.chat-model-note\{display:block/); assert.match(css, /\.chat-meta\{display:flex/);
 });
@@ -112,7 +113,7 @@ test('non-empty no-match reply offers authorized recent pages and model failure 
   const noMatch = await call(dashboard.port, dashboard.token, '/api/chat', 'POST', { question: 'quantum acoustics' });
   assert.equal(noMatch.body.kind, 'no_match'); assert.deepEqual(noMatch.body.suggestions, [{ id: page.id, title: page.title }]); assert.deepEqual(noMatch.body.citations, []); assert.match(noMatch.body.modelHint, /Use model is available/);
   const failure = await call(dashboard.port, dashboard.token, '/api/chat', 'POST', { question: 'How do I back up the vault?', useModel: true });
-  assert.equal(failure.status, 200); assert.match(failure.body.answer, /Back up the local vault/); assert.equal(failure.body.synthesis.used, false); assert.equal(failure.body.synthesis.reason, 'Model synthesis failed. Your retrieved answer is unchanged.');
+  assert.equal(failure.status, 200); assert.match(failure.body.answer, /Back up the local vault/); assert.equal(failure.body.synthesis.used, false); assert.equal(failure.body.synthesis.reason, 'The model command failed. The retrieved answer is shown instead.');
   assert.doesNotMatch(JSON.stringify(failure.body), /provider is offline/);
   const available = await call(dashboard.port, dashboard.token, '/api/chat/capabilities'); assert.equal(available.body.available, true);
 });
@@ -150,7 +151,10 @@ test('source uploads enforce allowlist, size, sniffing, sanitization, URL inertn
   assert.equal(goodFile.status, 201); assert.equal((await goodFile.json() as any).source.title, 'multipart.md');
   const multipart = new FormData(); multipart.append('file', new Blob(['not a pdf'], { type: 'application/pdf' }), 'fake.pdf');
   const spoofFile = await fetch(`http://127.0.0.1:${dashboard.port}/api/sources`, { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}` }, body: multipart }); assert.equal(spoofFile.status, 400);
-  const unsupported = await fetch(`http://127.0.0.1:${dashboard.port}/api/sources`, { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'x'.repeat(8 * 1024 * 1024 + 1) }) }); assert.equal(unsupported.status, 413);
+  await assertOversizedBodyRejected(async () => {
+    const unsupported = await fetch(`http://127.0.0.1:${dashboard.port}/api/sources`, { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'x'.repeat(8 * 1024 * 1024 + 1) }) });
+    return { status: unsupported.status };
+  });
   const proposal = await call(dashboard.port, dashboard.token, `/api/sources/${first.body.source.id}/propose`, 'POST', {});
   assert.equal(proposal.status, 201); assert.equal(proposal.body.proposal.status, 'pending');
   assert.equal((await v.engram.get(first.body.source.id)).revisionId, imported.revisionId, 'proposal creation does not mutate source');
@@ -170,7 +174,7 @@ test('provider output citations are checked against retrieved revisions and mali
   const dashboard = await createDashboardServer({ engram: client, idleMs: 60_000 });
   t.after(async () => { await dashboard.close(); await client.close(); await v.cleanup(); });
   const result = await call(dashboard.port, dashboard.token, '/api/chat', 'POST', { question: 'grounded statement', useModel: true });
-  assert.equal(result.status, 200); assert.match(result.body.answer, /Grounded source/); assert.equal(result.body.synthesis.used, false); assert.equal(result.body.synthesis.reason, 'Model synthesis failed. Your retrieved answer is unchanged.'); assert.doesNotMatch(JSON.stringify(result.body), /forged-revision/);
+  assert.equal(result.status, 200); assert.match(result.body.answer, /Grounded source/); assert.equal(result.body.synthesis.used, false); assert.match(result.body.synthesis.reason, /did not pass Engram's checks \(Chat synthesis cited a source outside the retrieved authorized set\)\. The retrieved answer is shown instead\./); assert.doesNotMatch(JSON.stringify(result.body), /forged-revision/);
   assert.equal((await client.listDocuments()).some(document => document.title === 'Answer'), false);
 });
 
@@ -224,4 +228,83 @@ test('chat view renders safe citation and source controls', async () => {
   assert.match(assets['/assets/app.js']!.body, /Drop a file here or attach one/);
   assert.match(assets['/assets/app.css']!.body, /chat-composer input\[type=file\]\[hidden\]\{display:none!important\}/);
   assert.match(assets['/assets/app.css']!.body, /\.chat-page\{height:calc\(100vh - 210px\)/);
+});
+
+test('a real agent reply that fills the optional proposal fields (tags, links, status) is accepted, extra or foreign fields are not', async t => {
+  const v = await disposableVault();
+  await v.engram.vault.setConfig(config => { config.model.provider = 'ollama'; config.model.baseUrl = 'http://127.0.0.1:11434/v1'; config.model.modelName = 'test'; });
+  const page = await v.engram.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Local-first retrieval', body: 'Engram answers from local Markdown first.' });
+  // Shape copied from the output of the real `claude -p` command with the chat prompt (controller run 2026-11-04): seven keys, not four.
+  const realShape = { kind: 'answer', title: 'How retrieval works', body: 'Engram answers from local Markdown first [1].', evidence: [{ uri: page.uri, revisionId: page.revisionId, span: 'Engram answers from local Markdown first.' }], tags: ['retrieval'], links: [{ type: 'derived_from', target: page.uri, revisionId: page.revisionId }], status: 'proposed' };
+  assert.deepEqual(validateChatModelOutput(realShape, [page]), { answer: realShape.body, citations: [{ uri: page.uri, revisionId: page.revisionId }] });
+  assert.throws(() => validateChatModelOutput({ ...realShape, instructions: 'x' }, [page]), /schema validation/);
+  assert.throws(() => validateChatModelOutput({ ...realShape, evidence: [{ uri: 'mdb://global/wiki/other', revisionId: 'rev' }] }, [page]), /outside the retrieved authorized set/);
+  const provider = { id: 'fake-real-shape', locality: 'local' as const, async generate() { return realShape; } };
+  const client = new Engram(v.root, undefined, provider, { env: {} }); await client.init({ sqlite: false });
+  const dashboard = await createDashboardServer({ engram: client, idleMs: 60_000 });
+  t.after(async () => { await dashboard.close(); await client.close(); await v.cleanup(); });
+  const used = await call(dashboard.port, dashboard.token, '/api/chat', 'POST', { question: 'how does retrieval work', useModel: true });
+  assert.equal(used.status, 200); assert.equal(used.body.synthesis.used, true); assert.equal(used.body.synthesis.provider, 'fake-real-shape'); assert.match(used.body.answer, /local Markdown first/);
+  const none = await call(dashboard.port, dashboard.token, '/api/chat', 'POST', { question: 'what is the weather in paris', useModel: true });
+  assert.equal(none.body.kind, 'no_match'); assert.equal(none.body.synthesis.used, false);
+  assert.match(none.body.synthesis.reason, /cannot hold a free conversation yet/); // this fake provider has no converse(): reason is explicit, not silent
+});
+
+test('synthesis failure reasons are plain language, content-free and never echo raw provider text', () => {
+  const tail = 'The retrieved answer is shown instead.';
+  assert.match(synthesisFailureReason(Object.assign(new Error('Chat synthesis output failed schema validation'), { code: 'INVALID_MODEL_OUTPUT' })), /^The model replied, but the reply did not pass Engram's checks \(Chat synthesis output failed schema validation\)\./);
+  assert.equal(synthesisFailureReason(new Error('Agent CLI timed out after 30000 ms')), `The model command timed out. ${tail}`);
+  assert.equal(synthesisFailureReason(new Error("You've hit your session limit · resets 6:10pm")), `The model command reported a usage or rate limit. ${tail}`);
+  assert.equal(synthesisFailureReason(new Error('Not logged in · Please run /login')), `The model command is not logged in. ${tail}`);
+  const raw = synthesisFailureReason(new Error('secret-token-123 leaked in stderr from the agent'));
+  assert.equal(raw, `The model command failed. ${tail}`); assert.doesNotMatch(raw, /secret-token/);
+});
+
+test('with Use model on the agent answers every message: small talk, no wiki match and an empty vault go to converse(); retrieval is context, not a gate', async t => {
+  const v = await disposableVault();
+  await v.engram.vault.setConfig(config => { config.model.provider = 'ollama'; config.model.baseUrl = 'http://127.0.0.1:11434/v1'; config.model.modelName = 'test'; });
+  const calls: Array<{ system: string; turns: Array<{ role: string; content: string }> }> = [];
+  const page = { id: '', uri: '', revisionId: '' };
+  const provider = {
+    id: 'fake-conversational', locality: 'local' as const,
+    async generate() { return { kind: 'answer', title: 'A', body: 'Grounded answer [1].', evidence: [{ uri: page.uri, revisionId: page.revisionId }] }; },
+    async converse(input: { system: string; turns: Array<{ role: string; content: string }> }) { calls.push(input); return `model reply ${calls.length}`; }
+  };
+  const client = new Engram(v.root, undefined, provider, { env: {} }); await client.init({ sqlite: false });
+  const dashboard = await createDashboardServer({ engram: client, idleMs: 60_000 });
+  t.after(async () => { await dashboard.close(); await client.close(); await v.cleanup(); });
+  const post = (body: Record<string, unknown>) => call(dashboard.port, dashboard.token, '/api/chat', 'POST', body);
+  // empty vault, model on
+  const empty = await post({ question: 'hi there', useModel: true });
+  assert.equal(empty.body.kind, 'model_general'); assert.equal(empty.body.answer, 'model reply 1'); assert.deepEqual(empty.body.citations, []); assert.equal(empty.body.synthesis.grounded, false); assert.equal(empty.body.synthesis.used, true);
+  assert.match(calls[0]!.system, /WITHOUT the wiki/);
+  const created = await client.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Local-first retrieval', body: 'Engram answers from local Markdown first.' }); Object.assign(page, { id: created.id, uri: created.uri, revisionId: created.revisionId });
+  // small talk and no-match with the model on: converse is called, with sanitized history and the latest message last
+  const hello = await post({ question: 'hi', useModel: true, history: [{ role: 'user', content: 'earlier question' }, { role: 'assistant', content: 'earlier model reply' }, { role: 'system', content: 'ignored role' }, { role: 'user', content: '   ' }, { role: 'user', content: 'x'.repeat(5000) }] });
+  assert.equal(hello.body.kind, 'model_general'); assert.equal(calls.length, 2);
+  const turns = calls[1]!.turns; assert.deepEqual(turns.map(turn => turn.role), ['user', 'assistant', 'user', 'user']); assert.equal(turns[2]!.content.length, 2000); assert.equal(turns.at(-1)!.content, 'hi');
+  const weather = await post({ question: 'what is the weather in paris', useModel: true }); assert.equal(weather.body.kind, 'model_general'); assert.equal(calls.length, 3);
+  // a matching question still uses the grounded path with validated citations (generate, not converse)
+  const grounded = await post({ question: 'how does retrieval work', useModel: true }); assert.equal(grounded.body.synthesis.used, true); assert.equal(calls.length, 3); assert.equal(grounded.body.citations.length, 1);
+  // model off: nothing calls the agent and the deterministic replies stay
+  const off = await post({ question: 'hi', useModel: false }); assert.equal(off.body.kind, 'small_talk'); const offNone = await post({ question: 'what is the weather in paris', useModel: false }); assert.equal(offNone.body.kind, 'no_match'); assert.equal(calls.length, 3);
+});
+
+test('free conversation is gated like synthesis: network permission, failures give a reason and the deterministic reply', async t => {
+  const v = await disposableVault();
+  await v.engram.vault.setConfig(config => { config.model.provider = 'ollama'; config.model.baseUrl = 'http://127.0.0.1:11434/v1'; config.model.modelName = 'test'; config.model.locality = 'remote'; config.model.allowNetwork = false; });
+  await v.engram.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Only page', body: 'unrelated text' });
+  let calls = 0; let mode: 'ok' | 'fail' = 'ok';
+  const provider = { id: 'fake-remote-chat', locality: 'remote' as const, async generate() { throw new Error('unused'); }, async converse() { calls++; if (mode === 'fail') throw new Error('secret-token-123 You\'ve hit your session limit'); return 'remote reply'; } };
+  const client = new Engram(v.root, undefined, provider, { env: {} }); await client.init({ sqlite: false });
+  const dashboard = await createDashboardServer({ engram: client, idleMs: 60_000 });
+  t.after(async () => { await dashboard.close(); await client.close(); await v.cleanup(); });
+  const post = (body: Record<string, unknown>) => call(dashboard.port, dashboard.token, '/api/chat', 'POST', body);
+  const blocked = await post({ question: 'hi', useModel: true });
+  assert.equal(blocked.body.kind, 'small_talk'); assert.equal(blocked.body.synthesis.used, false); assert.match(blocked.body.synthesis.reason, /network permission/); assert.equal(calls, 0);
+  await v.engram.vault.setConfig(config => { config.model.allowNetwork = true; });
+  const allowed = await post({ question: 'hi', useModel: true }); assert.equal(allowed.body.kind, 'model_general'); assert.equal(calls, 1);
+  mode = 'fail';
+  const failed = await post({ question: 'what is the weather in paris', useModel: true });
+  assert.equal(failed.body.kind, 'no_match'); assert.equal(failed.body.synthesis.used, false); assert.match(failed.body.synthesis.reason, /usage or rate limit/); assert.doesNotMatch(JSON.stringify(failed.body), /secret-token/);
 });

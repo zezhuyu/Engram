@@ -5,6 +5,7 @@ import { scopeMatches } from '../search-files/index.js';
 import { SearchEngine } from '../search-sqlite/index.js';
 import { profileAsync, profileSync } from '../bench/instrumentation.js';
 import { insightCurrentlyAccessible } from './insight-access.js';
+import { insightActiveAt } from '../intelligence/temporal.js';
 
 export const MEMORY_KINDS = ['observation', 'note', 'decision', 'finding', 'insight', 'reflection', 'session', 'working_memory', 'procedure', 'analysis'];
 export type RecallMode = 'recent' | 'timeline' | 'time_range' | 'grep' | 'regex' | 'keyword' | 'semantic' | 'hybrid' | 'links' | 'auto';
@@ -173,7 +174,8 @@ export class MemoryRecall {
   }
 
   /** Searches user insights with their evidence. Superseded and rejected items are hidden unless asked for by status. Respects the same access rules as every other read. */
-  async insights(input: { query?: string; category?: string; status?: string; evidenceClass?: string; scopeLabel?: string; limit?: number }): Promise<MemoryPage & { insights: Array<{ id: string; claim: string; category?: string; status: string; evidenceClass?: string; confidence?: string; sensitivity?: string; scope: string; sources: unknown[]; supersededBy?: string }> }> {
+  async insights(input: { query?: string; category?: string; status?: string; evidenceClass?: string; scopeLabel?: string; limit?: number; /** ISO instant to evaluate time-limited instructions at (default: now) */ asOf?: string; includeExpired?: boolean }): Promise<MemoryPage & { insights: Array<{ id: string; claim: string; category?: string; status: string; evidenceClass?: string; confidence?: string; sensitivity?: string; scope: string; sources: unknown[]; supersededBy?: string; validUntil?: string; effective?: boolean }> }> {
+    const asOf = input.asOf ? new Date(input.asOf) : new Date(); if (Number.isNaN(asOf.getTime())) fail('INVALID_INPUT', 'asOf must be an ISO instant');
     const manifest = await manifestFor(this.vault); await manifest.sync();
     const limit = input.limit ?? 20; if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('INVALID_INPUT', 'limit must be 1..100');
     let entries: ManifestEntry[];
@@ -186,11 +188,15 @@ export class MemoryRecall {
       let doc: Document; try { doc = await this.vault.get(e.id); } catch { continue; }
       if (!await insightCurrentlyAccessible(this.vault, doc, input.scopeLabel)) continue;
       if (input.evidenceClass && doc.metadata.evidenceClass !== input.evidenceClass) continue;
+      if (!input.includeExpired && !insightActiveAt(doc.metadata, asOf)) continue; // an expired time-limited instruction is no longer a fact about the user
       if (input.scopeLabel && (typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : 'global') !== input.scopeLabel) continue;
       items.push({ id: doc.id, uri: doc.uri, revisionId: doc.revisionId, kind: doc.kind, at: doc.updatedAt, title: doc.title, scope: doc.scope, snippet: doc.body.replace(/\s+/g, ' ').slice(0, 300) });
-      insights.push({ id: doc.id, claim: doc.body, ...(typeof doc.metadata.category === 'string' ? { category: doc.metadata.category } : {}), status: doc.status, ...(typeof doc.metadata.evidenceClass === 'string' ? { evidenceClass: doc.metadata.evidenceClass } : {}), ...(typeof doc.metadata.confidenceLabel === 'string' ? { confidence: doc.metadata.confidenceLabel } : {}), ...(typeof doc.metadata.sensitivity === 'string' ? { sensitivity: doc.metadata.sensitivity } : {}), scope: typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : doc.scope.type === 'global' ? 'global' : doc.scope.workspaceId, sources: Array.isArray(doc.metadata.sources) ? doc.metadata.sources : [], ...(typeof doc.metadata.supersededBy === 'string' ? { supersededBy: doc.metadata.supersededBy } : {}) });
+      insights.push({ id: doc.id, claim: doc.body, ...(typeof doc.metadata.category === 'string' ? { category: doc.metadata.category } : {}), status: doc.status, ...(typeof doc.metadata.evidenceClass === 'string' ? { evidenceClass: doc.metadata.evidenceClass } : {}), ...(typeof doc.metadata.confidenceLabel === 'string' ? { confidence: doc.metadata.confidenceLabel } : {}), ...(typeof doc.metadata.sensitivity === 'string' ? { sensitivity: doc.metadata.sensitivity } : {}), scope: typeof doc.metadata.scopeLabel === 'string' ? doc.metadata.scopeLabel : doc.scope.type === 'global' ? 'global' : doc.scope.workspaceId, sources: Array.isArray(doc.metadata.sources) ? doc.metadata.sources : [], ...(typeof doc.metadata.supersededBy === 'string' ? { supersededBy: doc.metadata.supersededBy } : {}), ...(typeof doc.metadata.validUntil === 'string' ? { validUntil: doc.metadata.validUntil } : {}), ...(typeof doc.metadata.preferenceKey === 'string' ? { key: doc.metadata.preferenceKey } as object : {}) });
       if (items.length >= limit) break;
     }
+    // While a time-limited instruction's window is open it takes precedence over the standing preference with the same key and scope (which resumes afterwards).
+    const windowed = new Set(insights.filter(i => i.validUntil).map(i => `${(i as { key?: string }).key}|${i.scope}`));
+    for (const i of insights as Array<{ key?: string; validUntil?: string; scope: string; effective?: boolean }>) { i.effective = i.validUntil ? true : !(i.key && windowed.has(`${i.key}|${i.scope}`)); delete i.key; }
     return { items, insights, truncated: false, mode: 'insight', estimatedTokens: estimateTokens(JSON.stringify(items)) };
   }
 }

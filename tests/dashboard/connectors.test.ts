@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { createServer as createHttpsServer } from 'node:https';
 import path from 'node:path';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
@@ -77,8 +79,17 @@ test('connector DNS rebinding uses one validated answer and pins that address', 
 });
 
 test('connector connection pins the resolver address and refuses a local redirect to a private host', async t => {
-  const cert = await fs.readFile(path.join(process.cwd(), 'tests/dashboard/test-cert.pem'));
-  const key = await fs.readFile(path.join(process.cwd(), 'tests/dashboard/test-key.pem'));
+  const fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-connector-tls-'));
+  t.after(() => fs.rm(fixtureDir, { recursive: true, force: true }));
+  const certPath = path.join(fixtureDir, 'cert.pem'), keyPath = path.join(fixtureDir, 'key.pem');
+  const generated = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:memory.example.com', '-keyout', keyPath, '-out', certPath], { encoding: 'utf8' });
+  if (generated.error && (generated.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    t.skip('TLS redirect test requires openssl to generate its throwaway self-signed certificate');
+    return;
+  }
+  assert.equal(generated.status, 0, `openssl certificate generation failed: ${generated.stderr}`);
+  const cert = await fs.readFile(certPath);
+  const key = await fs.readFile(keyPath);
   const server = createHttpsServer({ cert, key }, (_request, response) => { response.writeHead(302, { Location: 'https://127.0.0.1/private' }); response.end(); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>(resolve => server.close(() => resolve())));

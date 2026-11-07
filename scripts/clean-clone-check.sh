@@ -3,10 +3,11 @@
 #   scripts/clean-clone-check.sh            clone HEAD exactly as committed
 #   scripts/clean-clone-check.sh --overlay  also copy the working tree's uncommitted and untracked files that are not ignored into the clone
 #                                           (use BEFORE committing to see what the commit must contain; rerun without --overlay afterwards)
-# Needs: git, node >= 22.13, npm, network access for `npm ci`. Writes under $TMPDIR; prints one line per step and a summary; exit code 0 only if every step passed.
+# Needs: git, node >= 22.13, npm, network access for `npm ci`. Writes under $CLEAN_CLONE_PARENT (default: the repository's parent directory; never $TMPDIR); prints one line per step and a summary; exit code 0 only if every step passed.
 set -u
 SRC=$(git rev-parse --show-toplevel) || exit 2; OVERLAY=0; [ "${1:-}" = "--overlay" ] && OVERLAY=1
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/engram-clean-clone-XXXXXX") || exit 2; REPORT="$WORK/steps.tsv"; : > "$REPORT"
+# The clone must NOT live under $TMPDIR: several tests assert that a temp-directory location grants no trust (release-evidence guards) and exercise watcher processes that treat temp paths specially, so a checkout inside $TMPDIR changes their outcome. Default: a hidden sibling directory of the repository.
+PARENT=${CLEAN_CLONE_PARENT:-$(dirname "$SRC")}; WORK=$(mktemp -d "$PARENT/.tmp-engram-clean-clone-XXXXXX") || exit 2; REPORT="$WORK/steps.tsv"; : > "$REPORT"
 cleanup() { [ "${KEEP:-0}" = "1" ] || rm -rf "$WORK"; }; trap cleanup EXIT
 git clone --quiet --no-hardlinks "$SRC" "$WORK/repo" || exit 2; cd "$WORK/repo" || exit 2
 if [ "$OVERLAY" = "1" ]; then
@@ -24,6 +25,7 @@ step unit-tests npm test
 step benchmark-build-1k node dist/scripts/benchmark.js build --size 1000 --retain --root "$WORK/bench1k"
 step benchmark-replay-1k node dist/scripts/benchmark.js replay --root "$WORK/bench1k" --runs 3 --warmups 1 --output-dir "$WORK/bench1k-out"
 for suite in acid security search intelligence recovery memory profile wiki dream adaptive query unix platform; do step "verify-$suite" npm run "verify:$suite"; done
+step suite-inventory npm run verify:suite-inventory
 step verify-release npm run verify:release
 echo; awk -F'\t' '{ n++; if ($2 != 0) bad++ } END { printf "%d steps, %d failed\n", n, bad }' "$REPORT"
 bad=$(awk -F'\t' '$2 != 0 { c++ } END { print c+0 }' "$REPORT"); if [ "$bad" != "0" ]; then echo "logs kept in $WORK (KEEP=1 not needed on failure)"; KEEP=1; trap - EXIT; fi
