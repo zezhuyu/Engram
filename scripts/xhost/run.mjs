@@ -68,18 +68,20 @@ mk roguesrv xhost-a rogue`;
 }
 
 // ---------------------------------------------------------------- client helpers
-const payloads = (host, session, marker) => host === 'claude-code' ? {
-  start: { hook_event_name: 'SessionStart', session_id: session, cwd: '/work/project', source: 'startup' },
-  prompt: n => ({ hook_event_name: 'UserPromptSubmit', session_id: session, cwd: '/work/project', prompt_id: `p-${marker}-${n}`, prompt: `Please make the billing retry logic use exponential backoff and note the decision. ${marker} #${n}` }),
-  tool: n => ({ hook_event_name: 'PostToolUse', session_id: session, cwd: '/work/project', tool_name: 'Bash', tool_use_id: `t-${marker}-${n}`, tool_input: { command: `npm test -- billing ${marker} ${n}` }, tool_response: { stdout: `billing tests passed ${marker} ${n}`, stderr: '' } }),
-  end: { hook_event_name: 'SessionEnd', session_id: session, cwd: '/work/project', reason: 'other' }
+// Each hook is installed with --project-root and ignores payloads whose cwd is outside that project, so the payload cwd is the client's own project directory.
+const payloads = (host, session, marker, cwd = host === 'claude-code' ? '/work/proj-b' : '/work/proj-c') => host === 'claude-code' ? {
+  start: { hook_event_name: 'SessionStart', session_id: session, cwd, source: 'startup' },
+  prompt: n => ({ hook_event_name: 'UserPromptSubmit', session_id: session, cwd, prompt_id: `p-${marker}-${n}`, prompt: `Please make the billing retry logic use exponential backoff and note the decision. ${marker} #${n}` }),
+  tool: n => ({ hook_event_name: 'PostToolUse', session_id: session, cwd, tool_name: 'Bash', tool_use_id: `t-${marker}-${n}`, tool_input: { command: `npm test -- billing ${marker} ${n}` }, tool_response: { stdout: `billing tests passed ${marker} ${n}`, stderr: '' } }),
+  end: { hook_event_name: 'SessionEnd', session_id: session, cwd, reason: 'other' }
 } : {
-  start: { hook_event_name: 'SessionStart', session_id: session, cwd: '/work/project', source: 'startup' },
-  prompt: n => ({ hook_event_name: 'UserPromptSubmit', session_id: session, turn_id: `turn-${marker}-${n}`, cwd: '/work/project', prompt: `Add rate limiting to the ingestion endpoint and record why. ${marker} #${n}` }),
-  tool: n => ({ hook_event_name: 'PostToolUse', session_id: session, turn_id: `turn-${marker}-${n}`, cwd: '/work/project', tool_name: 'Bash', tool_use_id: `t-${marker}-${n}`, tool_input: { command: `pytest ingestion ${marker} ${n}` }, tool_response: { stdout: `ingestion tests passed ${marker} ${n}`, stderr: '' } }),
-  end: { hook_event_name: 'SessionEnd', session_id: session, cwd: '/work/project', reason: 'other' }
+  start: { hook_event_name: 'SessionStart', session_id: session, cwd, source: 'startup' },
+  prompt: n => ({ hook_event_name: 'UserPromptSubmit', session_id: session, turn_id: `turn-${marker}-${n}`, cwd, prompt: `Add rate limiting to the ingestion endpoint and record why. ${marker} #${n}` }),
+  tool: n => ({ hook_event_name: 'PostToolUse', session_id: session, turn_id: `turn-${marker}-${n}`, cwd, tool_name: 'Bash', tool_use_id: `t-${marker}-${n}`, tool_input: { command: `pytest ingestion ${marker} ${n}` }, tool_response: { stdout: `ingestion tests passed ${marker} ${n}`, stderr: '' } }),
+  end: { hook_event_name: 'SessionEnd', session_id: session, cwd, reason: 'other' }
 };
-function hookCommands(settingsJson) { const found = {}; (function walk(node, event) { if (Array.isArray(node)) node.forEach(n => walk(n, event)); else if (node && typeof node === 'object') { if (typeof node.command === 'string' && event) (found[event] ??= []).push(node.command); for (const [k, v] of Object.entries(node)) walk(v, /^[A-Z][A-Za-z]+$/.test(k) ? k : event); } })(settingsJson, null); return found; }
+// Only the remote-capture commands: `init --project` also installs `memory context` (SessionStart) and `memory handoff-check` (Stop) hooks, which are not capture hooks and carry no remote URL.
+function hookCommands(settingsJson) { const found = {}; (function walk(node, event) { if (Array.isArray(node)) node.forEach(n => walk(n, event)); else if (node && typeof node === 'object') { if (typeof node.command === 'string' && event && /\bmemory capture\b/.test(node.command)) (found[event] ??= []).push(node.command); for (const [k, v] of Object.entries(node)) walk(v, /^[A-Z][A-Za-z]+$/.test(k) ? k : event); } })(settingsJson, null); return found; }
 function runHook(c, command, payload, env) { const t = Date.now(); const r = dx(c, command, { env, input: JSON.stringify(payload), timeout: 20000 }); return { code: r.code, stdout: r.out, ms: Date.now() - t }; }
 
 // ---------------------------------------------------------------- scenarios
@@ -138,7 +140,7 @@ async function main() {
   check(spoolCount('xhost-b', '/work/spool-b') >= 4 && spoolCount('xhost-c', '/work/spool-c') >= 4, 'X6: events were durably buffered on each client', { b: spoolCount('xhost-b', '/work/spool-b'), c: spoolCount('xhost-c', '/work/spool-c') });
   // Fill client B toward the 1000-entry cap with concurrent hooks (8 at a time, like parallel tool calls) and one more batch past the cap.
   const fillCmd = hooks.b.PostToolUse[0];
-  const fillScript = `#!/bin/sh\nn=$1\nprintf '{"hook_event_name":"PostToolUse","session_id":"sess-b-1","tool_name":"Bash","tool_use_id":"fill-%s","tool_input":{"command":"echo fill %s"},"tool_response":{"stdout":"fill %s"}}' $n $n $n | ${fillCmd}\n`;
+  const fillScript = `#!/bin/sh\nn=$1\nprintf '{"hook_event_name":"PostToolUse","session_id":"sess-b-1","cwd":"/work/proj-b","tool_name":"Bash","tool_use_id":"fill-%s","tool_input":{"command":"echo fill %s"},"tool_response":{"stdout":"fill %s"}}' $n $n $n | ${fillCmd}\n`;
   dx('xhost-b', 'cat > /work/fill.sh && chmod +x /work/fill.sh', { input: fillScript });
   const fillStart = Date.now(); const fill = dx('xhost-b', 'seq 1 1100 | xargs -P 8 -I{} /work/fill.sh {}', { env: env('b'), timeout: 900000 }); const fillMs = Date.now() - fillStart;
   const capCount = spoolCount('xhost-b', '/work/spool-b'); const fillBuffered = Number(dx('xhost-b', "grep -l 'fill-' /work/spool-b/*.json | wc -l").out.trim()); await raw('X6-fill', `fill exit=${fill.code} ms=${fillMs} spool=${capCount}\n${fill.err.slice(0, 500)}`);
@@ -197,7 +199,7 @@ out.forEach((t,i)=>fs.writeFileSync(p.join(d,String(i+1).padStart(14,'0')+'-shuf
 
   scenario('X14', 'Client process/container crash and restart with events still queued');
   stopServer(); check(await waitLocal(false), 'X14: receiver is down while the client keeps queueing');
-  const loop = docker(['exec', '-d', '-e', `ENGRAM_TOKEN=${S.c.cred.token}`, '-e', 'ENGRAM_REMOTE_SPOOL=/work/spool-c', '-e', 'NODE_EXTRA_CA_CERTS=/etc/xhost/ca.pem', 'xhost-c', 'sh', '-c', `for i in $(seq 1 400); do printf '{"hook_event_name":"PostToolUse","session_id":"sess-c-1","tool_name":"Bash","tool_use_id":"crash-%s","tool_input":{"command":"echo crash %s"},"tool_response":{"stdout":"crash %s"}}' $i $i $i | ${hooks.c.PostToolUse[0].replace(/\s+#.*$/, '')}; done`]); // the installed command ends in a marker comment, which would swallow `done`
+  const loop = docker(['exec', '-d', '-e', `ENGRAM_TOKEN=${S.c.cred.token}`, '-e', 'ENGRAM_REMOTE_SPOOL=/work/spool-c', '-e', 'NODE_EXTRA_CA_CERTS=/etc/xhost/ca.pem', 'xhost-c', 'sh', '-c', `for i in $(seq 1 400); do printf '{"hook_event_name":"PostToolUse","session_id":"sess-c-1","cwd":"/work/proj-c","tool_name":"Bash","tool_use_id":"crash-%s","tool_input":{"command":"echo crash %s"},"tool_response":{"stdout":"crash %s"}}' $i $i $i | ${hooks.c.PostToolUse[0].replace(/\s+#.*$/, '')}; done`]); // the installed command ends in a marker comment, which would swallow `done`
   await sleep(4000); const kill = docker(['kill', '-s', 'KILL', 'xhost-c']); const queuedAtKill = 'unknown (container killed mid-loop)';
   docker(['start', 'xhost-c']); await sleep(1500);
   const post = dx('xhost-c', `ls /work/spool-c | wc -l; ls /work/spool-c | grep -c '\\.json$'; ls /work/spool-c | grep -c '\\.tmp$' || true`).out.trim().split('\n');

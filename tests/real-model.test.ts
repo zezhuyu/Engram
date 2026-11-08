@@ -44,10 +44,13 @@ test('real model evaluation: labeled preference extraction and micro/deep/strate
   // The evaluation sends only synthetic public-domain material to the real provider.
   for (const key of ['privApi', 'privDash']) await vault.delete(pack.ids[key]!, pack.docs[key]!.revisionId);
   const engine = new IntelligenceEngine(vault, provider);
+  // A job that uses its whole model-call budget stops as "partial" (status pending) and is resumed by the next run, which is the product's designed behaviour; a verbose model needs that. Resume a bounded number of times, then judge.
+  const runToCompletion = async (jobId: string) => { let job; for (let attempt = 0; attempt < 3; attempt++) { job = (await engine.run({ jobId }))[0]; if (job?.status !== 'pending') break; } return job; };
   await vault.createWorkspace('preference-eval', 'synthetic preference eval');
   const user = await vault.put({ scope: { type: 'workspace', workspaceId: 'preference-eval' }, kind: 'observation', title: '[SYNTHETIC] Labeled user preference', body: 'I prefer concise code review feedback with concrete tests run and a short explanation of tradeoffs. I dislike hard-coded environment-specific values. For this coding project, favor configurable defaults.', metadata: { speaker: 'user', evidenceClass: 'user_authored' } });
-  await engine.enqueue('profile', { scope: { type: 'workspace', workspaceId: 'preference-eval' }, objectIds: [user.id], instruction: 'Labeled target: preferences concise feedback, tests, explain tradeoffs, avoid hard-coded environment values; scope project only.' });
-  const profileJob = (await engine.run({ job: 'profile', limit: 1 }))[0]; assert.equal(profileJob?.status, 'complete', profileJob?.error);
+  // Run exactly the job queued here: writing the pack documents also queued automatic jobs, and `run({ job, limit: 1 })` would take the oldest pending one instead (a different document, possibly retried by a weaker model).
+  const queuedProfile = await engine.enqueue('profile', { scope: { type: 'workspace', workspaceId: 'preference-eval' }, objectIds: [user.id], instruction: 'Labeled target: preferences concise feedback, tests, explain tradeoffs, avoid hard-coded environment values; scope project only.' });
+  const profileJob = await runToCompletion(queuedProfile.id); assert.equal(profileJob?.status, 'complete', `${profileJob?.status}: ${profileJob?.error ?? JSON.stringify(profileJob?.telemetry)}`);
   const profileProposal = (await engine.proposals()).find(p => p.input.kind === 'user_insight'); assert.ok(profileProposal, 'real model extracted an insight');
   assert.ok(profileProposal.input.evidence?.some(e => e.uri === user.uri && e.revisionId === user.revisionId), 'preference evidence points to the labeled source revision');
   assert.equal(profileProposal.input.metadata?.scopeLabel, 'preference-eval'); assert.equal(profileProposal.status, 'pending', 'extraction remains review gated');
@@ -56,8 +59,8 @@ test('real model evaluation: labeled preference extraction and micro/deep/strate
   const scores: Record<string, unknown> = { dataset: 'synthetic-labeled-preference-and-five-domain-pack-v1', preference: { ...preferenceLabels, evidenceGrounded: true, scopeCorrect: true, reviewGated: true, extractedCategory: profileProposal.input.metadata?.category } };
   for (const mode of ['micro', 'deep', 'strategic'] as const) {
     const input = mode === 'micro' ? { mode, objectIds: [pack.ids.pyApi!, pack.ids.jsDash!] } : { mode };
-    await engine.enqueue('dream', { ...input, instruction: `real-eval-${mode}-${Date.now()}` });
-    const job = (await engine.run({ job: 'dream', limit: 1 }))[0]; assert.equal(job?.status, 'complete', `${mode}: ${job?.error}`);
+    const queuedDream = await engine.enqueue('dream', { ...input, instruction: `real-eval-${mode}-${Date.now()}` });
+    const job = await runToCompletion(queuedDream.id); assert.equal(job?.status, 'complete', `${mode}: ${job?.status} ${job?.error ?? JSON.stringify(job?.telemetry)}`);
     const proposal = (await engine.proposals()).filter(p => p.input.kind === 'discovery' && p.input.metadata?.mode === mode).at(-1);
     if (!proposal) { scores[mode] = { outcome: 'no_candidate', trace: job?.trace, note: 'retrieval produced no model candidate for this labeled scenario' }; continue; }
     const cited = new Set(proposal.input.evidence?.map(e => `${e.uri}\0${e.revisionId}`));

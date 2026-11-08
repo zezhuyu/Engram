@@ -87,3 +87,15 @@ Nothing starts by itself. A daily cycle runs only after `mdb intelligence schedu
 ## Reads never modify a vault; the activity marker lives outside it
 - `search`, `grep`, `get`, `history`, `context`, `links`, `backlinks`, `related`, `query` (except `query save`), `verify`, `doctor`, `capabilities` and the listing/status subcommands are read-only: they leave every file in the vault unchanged, apart from **rebuildable derived caches under `.mdb/indexes/`** (the persisted manifest, the filesystem trigram index, SQLite indexes), which are created only when the vault is writable and are skipped on a read-only filesystem. `tests/security/read-only.test.ts` checks this on both backends, including a `chmod`-read-only copy.
 - The "someone is using the vault" marker that makes the nightly Dream wait is **telemetry kept outside the vault**: `$ENGRAM_STATE_DIR`, else `$XDG_STATE_HOME/engram`, else `~/.local/state/engram`, file `activity/<sha256 of the vault's real path>.json`. It is written only for a vault whose schedule is enabled and only by commands that are not read-only (`put`, `patch`, `delete`, `ingest`, ...). Delete the directory at any time; the only effect is that the scheduler loses the hint (journal commits still count as activity). An in-vault `.mdb/adaptive/activity.json` written by older versions is still read and is never written again.
+
+## Starting the worker at boot on Linux (systemd)
+
+`mdb intelligence schedule service systemd` prints a **user** unit (`WantedBy=default.target`). Install it for the account that owns the vault, and enable lingering so that the user's systemd manager starts at boot without anyone logging in:
+
+```sh
+sudo loginctl enable-linger USER
+mkdir -p ~USER/.config/systemd/user   # save the printed unit here as engram-worker.service
+systemctl --user daemon-reload && systemctl --user enable --now engram-worker.service
+```
+
+Without lingering the service only starts at the first login of that user. Verified on a real reboot of a Debian 12 guest (systemd 252): the service came back as a new process with no login, the schedule and its event history were intact, and the due cycle ran once.

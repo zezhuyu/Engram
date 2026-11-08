@@ -132,13 +132,31 @@ test('secrets are redacted before anything is queued or stored; hidden reasoning
   recordCase({ suite: 'memory', name: 'redaction-reasoning-exclusion', status: 'PASS' });
 });
 
+test('an event stamped far in the future by a skewed client clock is kept with the receipt time and a skew flag instead of being rejected', async t => {
+  const s = await setup(t); const p = await claudePayloads();
+  const good = eventFromHostPayload(s.registration, p.UserPromptSubmit!)!;
+  const at = (offsetMs: number, id: string) => ({ registrationId: s.registration.id, event: { ...good, eventId: id, timestamp: new Date(Date.now() + offsetMs).toISOString() } });
+  const find = async (id: string) => (await s.vault.listDocuments()).find(d => d.metadata.eventId === id);
+  const far = at(5 * 864e5, 'skewfar00000001'), near = at(23 * 3600e3, 'skewnear0000001'), past = at(-5 * 864e5, 'skewpast0000001');
+  for (const record of [far, near, past]) assert.equal((await ingestRecord(s.root, record)).status, 'ingested', record.event.eventId);
+  const farDoc = (await find('skewfar00000001'))!;
+  assert.equal(farDoc.metadata.clockSkewSuspected, true); assert.equal(farDoc.metadata.claimedEventTime, far.event.timestamp);
+  assert.ok(Math.abs(Date.parse(String(farDoc.metadata.eventTime)) - Date.now()) < 60_000, 'stamped with the receipt time, not the claimed future time');
+  assert.equal(farDoc.body, good.content, 'the content is stored unchanged');
+  const nearDoc = (await find('skewnear0000001'))!; assert.equal(nearDoc.metadata.clockSkewSuspected, undefined, 'inside the 24 hour tolerance nothing is flagged'); assert.equal(nearDoc.metadata.eventTime, near.event.timestamp);
+  assert.equal((await find('skewpast0000001'))!.metadata.eventTime, past.event.timestamp, 'a past timestamp is kept as claimed');
+  assert.equal((await ingestRecord(s.root, far)).status, 'duplicate', 'delivering the same skewed event again is still deduplicated');
+  recordCase({ suite: 'memory', name: 'clock-skew-future-event-kept-and-flagged', status: 'PASS' });
+});
+
 test('forged or unauthorized events are rejected and persist nothing: wrong principal, workspace, collection, registration, type, timestamp, ACL', async t => {
   const s = await setup(t); const p = await claudePayloads();
   const good = eventFromHostPayload(s.registration, p.UserPromptSubmit!)!;
   const forge = (patch: Partial<MemoryEvent>, registrationId = s.registration.id) => ({ registrationId, event: { ...good, eventId: `forged${Math.random().toString(16).slice(2, 10)}`, ...patch } });
   const cases: [string, ReturnType<typeof forge>][] = [
     ['principal', forge({ principalId: 'root-admin' })], ['workspace', forge({ workspaceId: 'other' })], ['collection', forge({ collectionId: 'secretcol' })],
-    ['registration', forge({}, 'reg_doesnotexist')], ['type', forge({ type: 'decision' })], ['future', forge({ timestamp: new Date(Date.now() + 5 * 864e5).toISOString() })],
+    ['registration', forge({}, 'reg_doesnotexist')], ['type', forge({ type: 'decision' })], // a far-future timestamp is no longer a forgery: see the clock-skew test below
+
     ['schema', forge({ schemaVersion: 2 as never })], ['host', forge({ host: 'codex' })], ['unknown field', { registrationId: s.registration.id, event: { ...good, isAdmin: true } as never }]
   ];
   for (const [name, record] of cases) { const outcome = await ingestRecord(s.root, record as never); assert.equal(outcome.status, 'rejected', name); }

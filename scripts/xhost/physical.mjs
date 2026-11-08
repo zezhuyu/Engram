@@ -29,7 +29,8 @@ if (role === 'client') {
   if (!url || !registration || !tokenEnv || !process.env[tokenEnv]) { console.error('client needs --url, --registration and --token-env (with the token set)'); process.exit(2); }
   const { queueRemoteCapture, drainRemoteCaptureSpool } = await import(new URL('dist/packages/memory/remote-spool.js', `file://${root}`).href);
   const runId = flag('run-id') ?? randomUUID().slice(0, 8); const token = process.env[tokenEnv]; const spool = flag('spool') ?? await fs.mkdtemp(path.join(os.tmpdir(), 'engram-physical-'));
-  if (flag('ca')) process.env.NODE_EXTRA_CA_CERTS = path.resolve(flag('ca'));
+  // Node reads NODE_EXTRA_CA_CERTS once, at startup: setting it here would be ignored by tls.connect and fetch. Re-run this process with the CA in its environment instead (trust is added, verification is never disabled).
+  if (flag('ca') && process.env.NODE_EXTRA_CA_CERTS !== path.resolve(flag('ca'))) { const again = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: { ...process.env, NODE_EXTRA_CA_CERTS: path.resolve(flag('ca')) } }); process.exit(again.status ?? 1); }
   const steps = []; const step = (id, status, detail) => { steps.push({ id, status, ...(detail === undefined ? {} : { detail }) }); console.log(`${status.padEnd(8)} ${id}${detail === undefined ? '' : ' ' + JSON.stringify(detail).slice(0, 200)}`); };
   const markers = []; const payload = (n, kind) => { const m = `PHYS-${runId}-${kind}-${n}`; markers.push(m); return { hook_event_name: 'UserPromptSubmit', session_id: `phys-${runId}`, cwd: '/w', prompt_id: m, prompt: `physical verification ${m}` }; };
   const base = new URL(url); const captureUrl = `${base.origin}${base.pathname.replace(/\/mcp$/, '')}/capture`;
@@ -56,7 +57,7 @@ if (role === 'client') {
     [...bodies].reverse().concat(bodies.slice(0, 3)).forEach((b, i) => fs.writeFile(path.join(spool, `${String(i + 1).padStart(14, '0')}-shuffled-${i}.json`), b));
     await sleep(200); step('duplicate-reorder-injected', 'PASS', { entries: bodies.length + 3 });
     if (flag('restart-server')) { const r = runShell(flag('restart-server')); step('server-restart-during-outage', r.status === 0 ? 'PASS' : 'FAIL', { exit: r.status }); } else step('server-restart-during-outage', 'NOT_RUN', 'supply --restart-server to restart the server while this client is offline');
-    const r = runShell(restore); await sleep(2000); const up = await probe(''); step('network-restored', r.status === 0 && up === 401 ? 'PASS' : 'FAIL', { restoreExit: r.status, probe: up });
+    const r = runShell(restore); await sleep(2000); let up = await probe(''); for (let waited = 0; up !== 401 && waited < 30000; waited += 1000) { await sleep(1000); up = await probe(''); } /* an interface or firewall change can take several seconds to take effect */ step('network-restored', r.status === 0 && up === 401 ? 'PASS' : 'FAIL', { restoreExit: r.status, probe: up });
     let rounds = 0, delivered = 0, left = 1; while (left && rounds++ < 50) { const d = await drainRemoteCaptureSpool({ token, directory: spool }); delivered += d.delivered; left = d.queued; if (left) await sleep(500); } step('backlog-drained', left === 0 ? 'PASS' : 'FAIL', { delivered, left, rounds });
   }
   await out(`verification/memory/physical-client-${hostIdentity().hostname}.json`, { role: 'client', runId, at: new Date().toISOString(), url: `${base.origin}`, registration, host: hostIdentity(), markers, steps });

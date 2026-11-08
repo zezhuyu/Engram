@@ -64,3 +64,13 @@ MCP tools (same semantics, identity bound by the host process, never by argument
 
 ## Opting out
 Uninstall the adapter, or set `capture.enabled: false` in `mdb.yaml`, or revoke one registration. Recorded objects remain until you delete or purge them (`mdb` purge removes content from the vault; existing backups are outside its reach).
+
+## Client clock errors and captured events
+
+Every captured event carries the time the client queued it. A client whose clock is wrong must not cost a real event, so the server never rejects an event for its timestamp:
+
+- A timestamp inside 24 hours of the receipt time, or in the past, is kept as claimed.
+- A timestamp more than 24 hours in the future is replaced by the receipt time. The stored document records `clockSkewSuspected: true` and the claimed time in `claimedEventTime`, so a reviewer can see what happened. The content is stored unchanged and the event id does not depend on the timestamp, so redelivery is still deduplicated.
+- The server stamps `createdAt` with its own clock in every case.
+
+(Earlier versions acknowledged such an event over HTTP and then rejected it with the reason "timestamp in the future" during the asynchronous commit; the rejected spool keeps no content, so the event was lost.)
