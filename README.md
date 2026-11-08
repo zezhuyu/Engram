@@ -2,6 +2,23 @@
 
 A local Markdown database for agent knowledge, memory and reviewed synthesis. Immutable revisions and a committed journal preserve accepted history; SQLite and navigation are disposable derivatives. SDK, CLI and stdio MCP share the same scoped operations.
 
+## Install on macOS (no build needed)
+
+1. Download the disk image for your Mac (Apple silicon: `arm64`) from [GitHub Releases](https://github.com/zezhuyu/Engram/releases): `Engram Server` for the machine that holds the vault, `Engram Client` for every other Mac that should send memory to it.
+2. Open the image and drag the app into `/Applications`.
+3. The apps are ad hoc signed, not notarized, so macOS blocks them until you remove the quarantine flag. Run this once per app, using that app's exact name:
+
+```bash
+sudo xattr -rd com.apple.quarantine "/Applications/Engram Server.app"
+sudo xattr -rd com.apple.quarantine "/Applications/Engram Client.app"
+```
+
+4. Open the app. It appears in the menu bar and starts its background service at login. Configure it as described in [macos/README.md](macos/README.md) and [docs/client-daemon.md](docs/client-daemon.md).
+
+The app only contains code. Your data stays outside it: the vault in `~/.Engram` (or `ENGRAM_DATA_DIR`), configuration and tokens in `~/.config/engram/`. To update, download the new release, replace the app in `/Applications`, run the `xattr` command again for the new copy, and restart the background service. The vault and configuration are not touched.
+
+## Build from source
+
 Use Node >=22.13 (Node 24 LTS recommended). Install and build from this repository:
 
 ```bash

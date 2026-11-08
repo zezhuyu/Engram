@@ -8,6 +8,17 @@ The release contains `Engram Client.app` and `Engram Server.app`. Both use `maco
 
 The app bundles use ad hoc signatures. Developer ID signing and notarization require an Apple developer identity and are not configured here. Packaging tests compile and sign fixture app bundles without installing or opening production apps.
 
+## Install from a release
+
+Download the `.dmg` for your role and Mac from [GitHub Releases](https://github.com/zezhuyu/Engram/releases), drag the app to `/Applications`, then remove the quarantine flag. This is required on macOS because the apps are ad hoc signed and not notarized. Run it once per app, with that app's exact name:
+
+```sh
+sudo xattr -rd com.apple.quarantine "/Applications/Engram Server.app"
+sudo xattr -rd com.apple.quarantine "/Applications/Engram Client.app"
+```
+
+Open the app afterwards. To update, replace the app in `/Applications`, run the same command on the new copy, and restart its background service. The app bundle contains only code: the vault (`~/.Engram` or `ENGRAM_DATA_DIR`) and the configuration in `~/.config/engram/` are never part of an update.
+
 ## Configuration and login startup
 
 Move the app to a stable location such as `/Applications` before first opening it. Each app creates a private configuration file and enables Start at Login by default. Both apps use separate launchd labels, configuration files, and logs:
