@@ -7,7 +7,7 @@ import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js'
 
 const FILE = '.mdb/http-credentials.json';
 const actorPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
-const permissionPattern = /^(?:workspace:[A-Za-z0-9][A-Za-z0-9_-]{0,99}:(?:read|write|promote|\*)|global:(?:wiki|shared|discoveries|profile|\*):(?:read|write|promote|\*))$/;
+const permissionPattern = /^(?:workspace:create|workspace:[A-Za-z0-9][A-Za-z0-9_-]{0,99}:(?:read|write|promote|\*)|workspace:[A-Za-z0-9][A-Za-z0-9_-]{0,99}:collection:[A-Za-z0-9][A-Za-z0-9._-]{0,99}:(?:read|write)|global:(?:wiki|shared|discoveries|profile|\*):(?:read|write|promote|\*))$/;
 export const isValidRemotePermission = (permission: string): boolean => permissionPattern.test(permission) && !permission.includes('*');
 type Credential = { id: string; tokenHash: string; actorId: string; permissions: string[]; createdAt: string; expiresAt?: string; lastUsedAt?: string };
 export interface CredentialAuditEvent { at: string; action: 'created' | 'revoked' | 'rotated' | 'authorization_failed'; attempts?: number; actorId?: string; credentialId?: string; replacementId?: string; permissions?: string[] }

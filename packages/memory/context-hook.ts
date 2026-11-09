@@ -23,7 +23,7 @@ export interface ContextHookResult { outcome: ContextOutcome; output: string; wo
 export interface ContextHookOptions { host: string; stdin: string; projectRoot?: string; user?: boolean; root?: string; format?: 'claude' | 'text'; env?: NodeJS.ProcessEnv; now?: Date; timeoutMs?: number; cacheTtlMs?: number }
 
 export const cacheDir = (env: NodeJS.ProcessEnv = process.env): string => resolveStoragePath('cache', env);
-const cacheFile = (env: NodeJS.ProcessEnv, url: string, workspace: string) => path.join(cacheDir(env), 'context', `${createHash('sha256').update(`${url}\0${workspace}`).digest('hex').slice(0, 24)}.json`);
+const cacheFile = (env: NodeJS.ProcessEnv, url: string, workspace: string, credential: string) => path.join(cacheDir(env), 'context', `${createHash('sha256').update(`${url}\0${workspace}\0${credential}`).digest('hex').slice(0, 24)}.json`);
 async function writePrivate(file: string, content: string): Promise<void> { await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 }); const temp = `${file}.${process.pid}.${randomUUID()}.tmp`; try { await fs.writeFile(temp, content, { mode: 0o600, flag: 'wx' }); await fs.rename(temp, file); } finally { await fs.rm(temp, { force: true }); } }
 export interface ContextState { host: string; at: string; outcome: ContextOutcome; workspaceId?: string; reason?: string }
 export const contextStateFile = (env: NodeJS.ProcessEnv = process.env): string => path.join(resolveStoragePath('state', env), 'context-state.json');
@@ -67,13 +67,16 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     // Writes this machine kept while the server was unreachable are sent now that a session is starting (bounded: the hook has a few seconds). Failure here never affects the context.
     await drainWaitingWrites(serverUrl, token, workspaceId, env);
     await ensureStorageDirectory('cache', env);
-    const file = cacheFile(env, serverUrl, workspaceId); const credential = createHash('sha256').update(`engram-credential\0${token}`).digest('hex').slice(0, 24); // identity of the credential, never the credential
+    const credential = createHash('sha256').update(`engram-credential\0${token}`).digest('hex').slice(0, 24); // identity of the credential, never the credential
+    const file = cacheFile(env, serverUrl, workspaceId, credential);
     try {
       const session = await openRemoteSession({ url: serverUrl, token, workspaceId, timeoutMs: options.timeoutMs ?? 1500 });
       const reply = await session.call('engram_session_context', { maxTokens });
       const value = reply.value as { text?: string; revision?: string } | undefined;
       if (reply.isError || !value?.text) { if (/NOT_FOUND_OR_FORBIDDEN/.test(JSON.stringify(reply.value))) throw new RemoteError('workspace', 'access refused'); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the server returned no context' }); }
-      const cachedContent = JSON.stringify({ workspaceId, serverUrl, credential, fetchedAt: now.toISOString(), revision: value.revision, text: value.text });
+      const sections = { profile: /## Accepted user (?:preferences|insights)/.test(value.text), shared: /## Shared notes/.test(value.text), wiki: /## Accepted wiki pages/.test(value.text) };
+      const contentBinding = createHash('sha256').update(`${value.revision ?? ''}\0${JSON.stringify(sections)}\0${credential}`).digest('hex');
+      const cachedContent = JSON.stringify({ workspaceId, serverUrl, credential, sections, contentBinding, fetchedAt: now.toISOString(), revision: value.revision, text: value.text });
       await assertAvailableStorage(cacheDir(env), env, Buffer.byteLength(cachedContent));
       await assertStorageQuota('cache', cacheDir(env), Buffer.byteLength(cachedContent), env);
       await writePrivate(file, cachedContent);
@@ -83,8 +86,10 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
       if (error instanceof RemoteError && error.kind === 'transport-refused') return finish({ outcome: 'none', output: '', workspaceId, reason: error.message });
       // unreachable or unreadable: a recent cached copy of what this credential was allowed to see, clearly marked
       try {
-        const cached = JSON.parse(await fs.readFile(file, 'utf8')) as { workspaceId: string; serverUrl: string; credential?: string; fetchedAt: string; text: string };
+        const cached = JSON.parse(await fs.readFile(file, 'utf8')) as { workspaceId: string; serverUrl: string; credential?: string; sections?: { profile?: boolean; shared?: boolean; wiki?: boolean }; contentBinding?: string; revision?: string; fetchedAt: string; text: string };
         if (cached.credential !== credential) { await fs.rm(file, { force: true }); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the cached context belongs to a different credential' }); } // another identity must never be served what the previous one was allowed to see
+        const expectedBinding = createHash('sha256').update(`${cached.revision ?? ''}\0${JSON.stringify(cached.sections ?? {})}\0${credential}`).digest('hex');
+        if (cached.contentBinding !== expectedBinding) { await fs.rm(file, { force: true }); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the cached context binding is invalid' }); }
         const age = now.getTime() - Date.parse(cached.fetchedAt); const ttl = options.cacheTtlMs ?? 24 * 3600_000;
         if (cached.workspaceId === workspaceId && cached.serverUrl === serverUrl && Number.isFinite(age) && age >= 0 && age <= ttl) {
           const text = cached.text.replace(/status: FRESH/, `status: STALE (cached ${cached.fetchedAt}; the server could not be reached)`);

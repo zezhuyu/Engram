@@ -32,6 +32,11 @@ export function workspaceIdFor(projectDir: string): string {
   const value = path.basename(path.resolve(projectDir)).normalize('NFKD').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100);
   return value || 'project';
 }
+/** Remote self-service workspaces use a stable lowercase slug; collisions are refused by the server and require an explicit --workspace choice. */
+export function remoteWorkspaceIdFor(projectDir: string): string {
+  const value = path.basename(path.resolve(projectDir)).normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return value || 'project';
+}
 
 // ---- projection: accepted, authorized, project-relevant claims only ---------------------------------------------------------------------
 /** A claim is data. It is flattened to one line and cannot carry markers, headings or list syntax that would change the instruction file around it. */
@@ -62,7 +67,8 @@ type InsightRow = { id: string; claim: string; category?: string; sensitivity?: 
 export async function fetchProjection(from: { client?: Engram; remote?: RemoteSession }, workspace: string, maxTokens: number): Promise<Projection> {
   if (from.remote) {
     const empty: Projection = { revision: 'none', preferences: [], insights: [], source: 'remote', ranking: 'deterministic' };
-    const result = await from.remote.call('mdb_project_projection', { workspaceId: workspace, maxTokens }).catch(() => undefined);
+    const tool = from.remote.tools.includes('engram_project_projection') ? 'engram_project_projection' : 'mdb_project_projection';
+    const result = await from.remote.call(tool, { workspaceId: workspace, maxTokens }).catch(() => undefined);
     const value = result && !result.isError ? result.value as Partial<Projection> | undefined : undefined;
     if (!value || typeof value.revision !== 'string' || !Array.isArray(value.preferences) || !Array.isArray(value.insights)) return empty;
     const clean = (list: unknown[]): ProjectionItem[] => list.filter((item): item is ProjectionItem => !!item && typeof (item as ProjectionItem).id === 'string' && typeof (item as ProjectionItem).claim === 'string').map(item => ({ ...item, claim: neutralize(item.claim) })).filter(item => item.claim && !item.sensitive);
@@ -104,11 +110,14 @@ export function renderBlock(host: Host, workspace: string, projectName: string, 
 
 /** Exactly one start and one end marker (start first) is a managed block; none is absent; anything else is a diagnostic, never a guess. */
 export function locateBlock(text: string, file: string): { start: number; end: number } | undefined {
-  const starts = text.split(START).length - 1, ends = text.split(END).length - 1;
+  return locateManagedBlock(text, file, { start: START, end: END });
+}
+export function locateManagedBlock(text: string, file: string, markers: { start: string; end: string }): { start: number; end: number } | undefined {
+  const starts = text.split(markers.start).length - 1, ends = text.split(markers.end).length - 1;
   if (starts === 0 && ends === 0) return undefined;
-  const start = text.indexOf(START), end = text.indexOf(END);
+  const start = text.indexOf(markers.start), end = text.indexOf(markers.end);
   if (starts !== 1 || ends !== 1 || end < start) throw new MDBError('INVALID_INPUT', `${file} has a malformed Engram managed block (${starts} start and ${ends} end markers, or out of order); fix or remove the markers by hand, nothing was changed`);
-  return { start, end: end + END.length };
+  return { start, end: end + markers.end.length };
 }
 async function atomicWriteText(file: string, content: string, fallbackMode: number): Promise<void> {
   let mode = fallbackMode; try { mode = (await fs.stat(file)).mode & 0o777; } catch { /* new file */ }
@@ -116,13 +125,26 @@ async function atomicWriteText(file: string, content: string, fallbackMode: numb
   try { await fs.writeFile(temp, content, { mode, flag: 'wx' }); await fs.rename(temp, file); } finally { await fs.rm(temp, { force: true }); }
 }
 /** Replaces only the managed block, keeping all other text, its line endings and the file mode. Returns false (and writes nothing) when the result would be identical. */
-export async function updateInstructions(file: string, block: string): Promise<boolean> {
+export async function updateManagedBlock(file: string, block: string, markers: { start: string; end: string }, options: { backup?: boolean; dryRun?: boolean; preserveUserText?: boolean } = {}): Promise<boolean> {
   let existing = ''; try { existing = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const eol = existing.includes('\r\n') ? '\r\n' : '\n'; const rendered = block.replace(/\n/g, eol);
-  const located = locateBlock(existing, file);
-  const result = located ? `${existing.slice(0, located.start)}${rendered}${existing.slice(located.end)}` : `${existing.trimEnd()}${existing.trim() ? `${eol}${eol}` : ''}${rendered}${eol}`;
+  const located = locateManagedBlock(existing, file, markers);
+  const separator = options.preserveUserText ? (existing ? (existing.endsWith(eol) ? eol : `${eol}${eol}`) : '') : `${existing.trim() ? `${eol}${eol}` : ''}`;
+  const result = located ? `${existing.slice(0, located.start)}${rendered}${existing.slice(located.end)}` : `${options.preserveUserText ? existing : existing.trimEnd()}${separator}${rendered}${eol}`;
   if (result === existing) return false;
+  if (options.dryRun) return true;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  if (options.backup && existing && !(await fs.readdir(path.dirname(file))).some(name => name.startsWith(`${path.basename(file)}.engram-backup-`))) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   await atomicWriteText(file, result, 0o644); return true;
+}
+export async function updateInstructions(file: string, block: string): Promise<boolean> { return updateManagedBlock(file, block, { start: START, end: END }); }
+export async function removeManagedBlock(file: string, markers: { start: string; end: string }, options: { dryRun?: boolean } = {}): Promise<boolean> {
+  let existing: string; try { existing = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  const located = locateManagedBlock(existing, file, markers); if (!located) return false;
+  let result = `${existing.slice(0, located.start)}${existing.slice(located.end)}`;
+  if (result.startsWith('\r\n')) result = result.slice(2); else if (result.startsWith('\n')) result = result.slice(1);
+  if (!options.dryRun) await atomicWriteText(file, result, 0o644);
+  return true;
 }
 
 // ---- host MCP configuration ---------------------------------------------------------------------------------------------------------------
@@ -135,7 +157,7 @@ export function validateMcpTarget(url: string, tokenEnv: string): URL {
   return endpoint;
 }
 /** Adds or updates mcpServers.engram in a Claude Code MCP JSON file (project .mcp.json or the user-level ~/.claude.json). Every other key is kept; a different engram entry is a conflict, never overwritten. */
-export async function upsertClaudeMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { offlineBuffer?: boolean } = {}): Promise<boolean> {
+export async function upsertClaudeMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { offlineBuffer?: boolean; backup?: boolean; allowEndpointChange?: boolean } = {}): Promise<boolean> {
   const endpoint = validateMcpTarget(url, tokenEnv);
   let config: Record<string, unknown> = {}; let current = '';
   try { current = await fs.readFile(file, 'utf8'); config = JSON.parse(current) as Record<string, unknown>; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot parse ${file}`); }
@@ -144,17 +166,17 @@ export async function upsertClaudeMcp(file: string, url: string, tokenEnv: strin
   const authHeader = 'Bearer ${' + tokenEnv + '}';
   const existing = servers.engram as { type?: string; url?: string; command?: string; args?: string[]; headers?: Record<string, string> } | undefined;
   // Either of our two shapes (direct HTTP, or the local offline-buffering proxy for the same server) may be replaced by the other; anything hand-written is a conflict.
-  const ours = !!existing && ((existing.type === 'http' && existing.url === endpoint.toString() && existing.headers?.Authorization === authHeader) || (existing.type === 'stdio' && Array.isArray(existing.args) && existing.args.includes('mcp-proxy') && existing.args.includes(endpoint.toString())));
+  const ours = !!existing && ((existing.type === 'http' && (existing.url === endpoint.toString() || options.allowEndpointChange === true && typeof existing.url === 'string') && existing.headers?.Authorization === authHeader && typeof existing.headers?.['X-Engram-Workspace'] === 'string') || (existing.type === 'stdio' && Array.isArray(existing.args) && existing.args.includes('mcp-proxy') && (existing.args.includes(endpoint.toString()) || options.allowEndpointChange === true && existing.args.some(arg => /^https?:\/\//.test(arg)))));
   if (existing && !ours) throw new Error(`${file} already defines a different mcpServers.engram entry; resolve the conflict before Engram init`);
   servers.engram = options.offlineBuffer ? { type: 'stdio', ...proxyCommand(endpoint.toString(), tokenEnv, workspace, mdbBinaryPath()), env: { [tokenEnv]: '${' + tokenEnv + '}' } } : { type: 'http', url: endpoint.toString(), headers: { Authorization: authHeader, 'X-Engram-Workspace': workspace } };
   config.mcpServers = servers;
   const text = `${JSON.stringify(config, null, 2)}\n`;
   if (current === text) return false;
-  if (current) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+  if (current && options.backup !== false) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
   await atomicWriteText(file, text, 0o600); return true;
 }
 /** Same for Codex TOML: only the marked block is ours; a hand-written [mcp_servers.engram] table is a conflict. */
-export async function upsertCodexMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { approveTools?: boolean; offlineBuffer?: boolean } = {}): Promise<boolean> {
+export async function upsertCodexMcp(file: string, url: string, tokenEnv: string, workspace: string, options: { approveTools?: boolean; offlineBuffer?: boolean; backup?: boolean } = {}): Promise<boolean> {
   const endpoint = validateMcpTarget(url, tokenEnv);
   await fs.mkdir(path.dirname(file), { recursive: true });
   let existing = ''; try { existing = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -168,7 +190,7 @@ export async function upsertCodexMcp(file: string, url: string, tokenEnv: string
   const block = `${MCP_START}\n[mcp_servers.engram]\n${transport}${options.approveTools ? 'default_tools_approval_mode = "approve"\n' : ''}${MCP_END}`;
   const text = `${base}${base ? '\n\n' : ''}${block}\n`;
   if (text === existing) return false;
-  if (existing) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+  if (existing && options.backup !== false) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
   await atomicWriteText(file, text, 0o600); return true;
 }
 /** What a LOCAL agent runs to reach the built-in server: stdio, no network, no token. The identity and default workspace are plain (non-secret) settings; access is the grant the init registration gave that identity. */
@@ -178,13 +200,13 @@ export function localServerEntry(root: string, workspace: string, principal: str
   return { command: process.execPath, args: [server, '--root', root], env: { MDB_ACTOR_ID: principal, MDB_PERMISSIONS: `workspace:${workspace}:read,workspace:${workspace}:write`, MDB_DEFAULT_WORKSPACE: workspace } };
 }
 const isEngramEntry = (e: { type?: string; url?: string; command?: string; args?: string[]; headers?: Record<string, string> } | undefined): boolean => !!e && ((e.type === 'http' && !!e.headers?.['X-Engram-Workspace']) || (e.type === 'stdio' && Array.isArray(e.args) && e.args.some(a => /mdb-mcp\.js$|^mcp-proxy$/.test(a))));
-export async function upsertClaudeLocalMcp(file: string, entry: LocalServerEntry): Promise<boolean> {
+export async function upsertClaudeLocalMcp(file: string, entry: LocalServerEntry, options: { backupPath?: string } = {}): Promise<boolean> {
   let config: Record<string, unknown> = {}; let current = '';
   try { current = await fs.readFile(file, 'utf8'); config = JSON.parse(current) as Record<string, unknown>; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot parse ${file}`); }
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>; if (!servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error(`${file} mcpServers must be an object`);
   const existing = servers.engram as Parameters<typeof isEngramEntry>[0]; if (existing && !isEngramEntry(existing)) throw new Error(`${file} already defines a different mcpServers.engram entry; resolve the conflict before Engram init`);
   servers.engram = { type: 'stdio', ...entry }; config.mcpServers = servers; const text = `${JSON.stringify(config, null, 2)}\n`; if (current === text) return false;
-  if (current) await fs.copyFile(file, `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch(() => undefined);
+  if (current) await fs.copyFile(file, options.backupPath ?? `${file}.engram-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   await atomicWriteText(file, text, 0o600); return true;
 }
 export async function upsertCodexLocalMcp(file: string, entry: LocalServerEntry, options: { approveTools?: boolean } = {}): Promise<boolean> {
@@ -238,7 +260,7 @@ export async function detectHosts(projectDir: string): Promise<Host[]> {
 }
 const cap = (status: FeatureStatus, detail: string): Capability => ({ status, detail });
 export interface InitOptions { /** Local projects only: skip writing the stdio connection to the built-in server. */ noLocalMcp?: boolean; /** Remote projects only: the host talks to the server through the local stdio proxy, which keeps task/note/handoff writes on this machine while the server is unreachable and merges them in when it returns. */ offlineBuffer?: boolean; projectDir: string; host?: Host; hosts?: Host[] | 'auto'; workspaceId?: string; settingsPath?: string; settingsPaths?: Partial<Record<Host, string>>; principalId?: string; mcpUrl?: string; tokenEnv?: string; registrationId?: string; consent?: boolean; /** Separate from `consent`: allows approved Markdown files (and only those) to be uploaded in full. */ fileSyncConsent?: boolean; notesInclude?: string[]; /** false: no accepted-profile text in AGENTS.md/CLAUDE.md (still delivered at session start) */ profileInFiles?: boolean; /** explicit consent to record Codex trust for THIS project's Engram hooks (otherwise the user must trust them in Codex) */ trustCodexHooks?: boolean; /** Codex only: pre-approve the Engram MCP tools so headless (`codex exec`) sessions can use them; interactive sessions otherwise prompt */ approveEngramTools?: boolean }
-export interface InitResult { fileSyncScope?: { include: string[]; exclude: string[] }; workspaceId: string; instructionsFile: string; instructionsFiles: Record<string, string>; adapter: unknown; adapters: Record<string, unknown>; mcpConfigFile?: string; mcpConfigFiles?: Record<string, string>; binding: ProjectBinding; projection: { revision: string; source: Projection['source']; preferences: number; insights: number }; readiness: Readiness; warnings: string[] }
+export interface InitResult { fileSyncScope?: { include: string[]; exclude: string[] }; workspaceId: string; workspaceCreated: boolean; instructionsFile: string; instructionsFiles: Record<string, string>; adapter: unknown; adapters: Record<string, unknown>; mcpConfigFile?: string; mcpConfigFiles?: Record<string, string>; binding: ProjectBinding; projection: { revision: string; source: Projection['source']; preferences: number; insights: number }; readiness: Readiness; warnings: string[] }
 
 /** Initialize a repository's agent memory context without overwriting user-authored instructions. */
 export async function initializeProject(client: Engram | undefined, options: InitOptions): Promise<InitResult> {
@@ -252,23 +274,32 @@ export async function initializeProject(client: Engram | undefined, options: Ini
   await fs.mkdir(projectDir, { recursive: true });
   return withInitLock(projectDir, async () => {
     const existing = await readBinding(projectDir).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
-    const workspace = options.workspaceId ?? existing?.workspaceId ?? workspaceIdFor(projectDir);
+    const workspace = options.workspaceId ?? existing?.workspaceId ?? (options.mcpUrl ? remoteWorkspaceIdFor(projectDir) : workspaceIdFor(projectDir));
     if (existing && existing.workspaceId !== workspace) throw new MDBError('INVALID_INPUT', `This project is bound to workspace ${existing.workspaceId}; remove .engram/project.json deliberately before binding it to ${workspace}`);
     const warnings: string[] = [];
     if (options.mcpUrl && !options.workspaceId && !existing) warnings.push(`Workspace id "${workspace}" was derived from the folder name. Any other project with the same folder name on this server would share it (and its memory). Pass --workspace to pin an explicit id.`);
     const base = existing ?? defaultBinding({ workspaceId: workspace });
     const profileInFiles = options.profileInFiles ?? base.profileInFiles ?? true;
     const tokenEnv = options.tokenEnv ?? 'ENGRAM_MCP_TOKEN';
-    let projection: Projection; let remoteSession: RemoteSession | undefined; let remote: Capability = cap('DISABLED', 'local vault, no remote server configured');
+    let projection: Projection; let remoteSession: RemoteSession | undefined; let workspaceCreated = false; let remote: Capability = cap('DISABLED', 'local vault, no remote server configured');
     if (client) {
       const known = await client.listWorkspaces();
-      if (!known.some(item => item.id === workspace)) await client.createWorkspace(workspace, `Engram memory for ${path.basename(projectDir)}`);
+      if (!known.some(item => item.id === workspace)) { await client.createWorkspace(workspace, `Engram memory for ${path.basename(projectDir)}`); workspaceCreated = true; }
       projection = await fetchProjection({ client }, workspace, base.profileMaxTokens);
     } else {
       projection = buildProjection([], workspace, base.profileMaxTokens, 'none');
       const token = process.env[tokenEnv];
       if (!token) remote = cap('INCOMPLETE', `$${tokenEnv} is not set in this shell; the server was not contacted`);
       else try {
+        const provisioner = await openRemoteSession({ url: options.mcpUrl!, token });
+        if (!provisioner.tools.includes('engram_workspace_ensure')) throw new RemoteError('protocol', 'The server does not provide engram_workspace_ensure; upgrade the server before remote init.');
+        if (options.consent) {
+          const ensured = await provisioner.call('engram_workspace_ensure', { projectName: path.basename(projectDir), workspaceId: workspace });
+          if (ensured.isError || !ensured.value || typeof ensured.value !== 'object') throw new RemoteError('workspace', typeof ensured.value === 'string' ? ensured.value : 'Remote workspace creation was refused; ask the owner to create and grant this workspace.');
+          const value = ensured.value as { workspaceId?: string; status?: string };
+          if (value.workspaceId !== workspace) throw new RemoteError('protocol', 'Server workspace slug did not match local project binding; pass --workspace explicitly.');
+          workspaceCreated = value.status === 'created';
+        } else warnings.push(`Remote workspace ${workspace} was not created because --consent was not supplied. Rerun with --consent or ask the owner to create and grant it.`);
         remoteSession = await openRemoteSession({ url: options.mcpUrl!, token, workspaceId: workspace });
         remote = cap('PASS', `authenticated; workspace ${workspace} bound; ${remoteSession.tools.length} tools`);
         projection = await fetchProjection({ remote: remoteSession }, workspace, base.profileMaxTokens);
@@ -276,7 +307,7 @@ export async function initializeProject(client: Engram | undefined, options: Ini
       } catch (error) {
         const kind = error instanceof RemoteError ? error.kind : 'network';
         remote = cap(kind === 'network' ? 'INCOMPLETE' : 'FAIL', error instanceof Error ? error.message : String(error));
-        if (kind === 'workspace') warnings.push(`The credential cannot use workspace ${workspace}: create it and grant this actor access on the server.`);
+        if (kind === 'workspace') warnings.push(error instanceof Error ? error.message : `The credential cannot use workspace ${workspace}; ask the owner to create and grant it.`);
       }
     }
     const instructionsFiles: Record<string, string> = {}, adapters: Record<string, unknown> = {}, mcpConfigFiles: Record<string, string> = {};
@@ -337,7 +368,7 @@ export async function initializeProject(client: Engram | undefined, options: Ini
       sessionContext: !contextInstalled ? cap('DISABLED', 'no SessionStart context hook') : codexTrust && codexTrust.state !== 'trusted' ? cap('INCOMPLETE', codexTrust.detail) : cap('INCOMPLETE', 'SessionStart context hook installed; it has not run yet. `mdb doctor --project` reports the result after the first session'), fileSync: binding.fileSyncConsent ? cap('INCOMPLETE', `file-sync consent recorded for ${binding.notesInclude.join(', ')}; hooks installed, nothing synchronized yet`) : cap('DISABLED', 'no file-sync consent; Markdown files are never uploaded'),
     };
     const first = hosts[0]!;
-    return { ...(fileSync ? { fileSyncScope: { include: binding.notesInclude, exclude: binding.notesExclude } } : {}), workspaceId: workspace, instructionsFile: instructionsFiles[first]!, instructionsFiles, adapter: adapters[first], adapters, ...(mcpConfigFiles[first] ? { mcpConfigFile: mcpConfigFiles[first]!, mcpConfigFiles } : {}), binding, projection: { revision: projection.revision, source: projection.source, preferences: projection.preferences.length, insights: projection.insights.length }, readiness, warnings };
+    return { ...(fileSync ? { fileSyncScope: { include: binding.notesInclude, exclude: binding.notesExclude } } : {}), workspaceId: workspace, workspaceCreated, instructionsFile: instructionsFiles[first]!, instructionsFiles, adapter: adapters[first], adapters, ...(mcpConfigFiles[first] ? { mcpConfigFile: mcpConfigFiles[first]!, mcpConfigFiles } : {}), binding, projection: { revision: projection.revision, source: projection.source, preferences: projection.preferences.length, insights: projection.insights.length }, readiness, warnings };
   });
 }
 

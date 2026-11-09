@@ -1,33 +1,23 @@
-# Client dashboard and remote administration
+# Engram Client dashboard
 
-`mdb dashboard --client` starts the same password protected dashboard on the client machine. Open **Connections** to save server addresses and select one; selecting a server proxies dashboard API requests through the local process. Server credentials stay in a local file with mode `0600` and are never returned to the browser. The Connections screen accepts HTTP only for localhost, or an explicitly trusted tailnet endpoint; use HTTPS for other hosts.
+`mdb dashboard --client` is a local, loopback-only dashboard for this device. It defaults to port `4872` and runs without a content vault. Its landing screen, **This device**, reports only local capture configuration and local queue state; it is labeled “Local state of this device. This is not a copy of the server’s data.” Use **Refresh** to fetch the latest local values.
 
-## Create a server dashboard credential
+On macOS, starting either the server or supervised client dashboard shows the same native startup alert with its URL and sign-in instructions. Set `MDB_DASHBOARD_ALERT=false` to disable the alert. For the supervised client, the token-bearing URL appears only in that alert and the private `client-dashboard.txt` note; it is never printed to the shared supervisor log. Other platforms do not display a popup, and the private-note client writes no token-bearing banner to stderr.
 
-Run these commands against the server vault. A credential is shown once and its SHA-256 hash is stored under `.mdb/dashboard/credentials.json` with mode `0600`:
+The client screen list is limited to **This device**, **Server**, **Connections**, and **Client settings**. Server-only dashboard APIs and screens are unavailable in client mode. **Server** previews and changes the capture server URL and token file path used by this device. It shows a per-target change table, requires both a checked confirmation and the phrase `APPLY SERVER CHANGE`, then asks for the dashboard password again before applying.
 
-```sh
-mdb dashboard credential create --label laptop --mode admin
-mdb dashboard credential list
-mdb dashboard credential revoke --id dash_...
-```
+The device view shows user-level capture identifiers, hosts, mode, pause/consent and project filters; the capture server host only; remote-spool and outbox counts; the oldest queued write and last recorded delivery event; service status; bounded trusted/bound project paths; token-file presence and mode status; dashboard listener and runtime versions. It never returns the token value, capture URL path, or token file contents. It does not fetch or cache server workspace or memory data.
 
-The default expiry is 90 days. Use `--expires-days 1..366` to change it and `--source-ips 192.0.2.10,192.0.2.11` to restrict source addresses. View credentials may call GET routes only. Dashboard credentials are distinct from MCP capture credentials.
+In client mode, the status pill reflects the client service, private token-file permissions, server reachability, and queued, conflicting, or rejected events. Its tooltip lists the plain-language checks. “Connecting” appears only before the first successful client status response; a failed status request changes the pill to Problem. The reachability check requests only the configured server origin’s `/version`, without credentials, with a three-second timeout and a ten-second result cache. An unreachable server is Attention because local events remain queued for delivery.
 
-## Enable a remote listener
+Password and connection state are independent of the content vault. By default, state is stored under `~/Library/Application Support/Engram/client-dashboard/` on macOS and `${XDG_CONFIG_HOME:-~/.config}/engram/client-dashboard/` on Linux. `MDB_CLIENT_DASHBOARD_STATE_DIR` selects another state directory; `MDB_DASHBOARD_AUTH_FILE` selects the auth file. Directories are private (`0700`) and state files are private (`0600`).
 
-Remote administration is disabled unless `MDB_DASHBOARD_REMOTE_ADMIN=true` is set on the server. Configure a private RFC1918 or tailnet interface, or configure TLS certificate and key paths:
+`mdb service install|start|stop|status|uninstall` supervises both the outbox watcher and the client dashboard. The dashboard binds to `127.0.0.1`; set `ENGRAM_CLIENT_DASHBOARD_PORT` in `~/.config/engram/client.env` or the service environment to override `4872`. Changing the port requires uninstall and reinstall. Its one-time setup URL is written to `~/.config/engram/client-dashboard.txt` with mode `0600`, under `umask 077`; dashboard diagnostics go to `~/Library/Logs/Engram/client-dashboard.log` and use the existing rotation policy. The setup token is not written to that shared log.
 
-```sh
-MDB_DASHBOARD_REMOTE_ADMIN=true \
-MDB_DASHBOARD_HOST=192.168.1.20 \
-MDB_DASHBOARD_TLS_CERT=/etc/engram/dashboard.crt \
-MDB_DASHBOARD_TLS_KEY=/etc/engram/dashboard.key \
-mdb dashboard
-```
+For first-time setup, use **Engram Client → Open dashboard**. It reads the private note and opens the complete one-time URL; **Copy first-time sign-in link** copies that URL when setup is pending. If the dashboard has not started yet, Open dashboard uses the plain local URL and the note is refreshed on the next poll. After a password is set, the setup link is hidden and Open dashboard uses the plain URL. `mdb service dashboard-url` exposes the same state as JSON for app integrations; it rejects missing, unsafe, malformed, or oversized notes and never returns the token outside the `url` field.
 
-A non-loopback listener without TLS is accepted only on a private interface. Wildcard binds require TLS. Remote dashboard process lifecycle is not exposed over HTTP; use the host's service manager. The dashboard audit records credential label, source IP, method and route without request bodies or token values.
+After a Client app update, `mdb service install` reconciles executable and bundle paths automatically when the saved URL, token-file path, workspace, outbox, and project settings still match. It can add a missing dashboard unit or replace a stale dashboard unit without restarting the outbox watcher. To change those saved settings, use the Server form or uninstall before installing with new values.
 
-The local browser signs into its local dashboard password. Connection metadata is stored beside the dashboard auth file. The credential file path and token are handled only by the local dashboard process. Protect both local state and remote TLS private keys. The local process requires the server credential file to be a regular file with mode `0600`.
+The Server form accepts only HTTPS, loopback HTTP, or an explicitly trusted tailnet URL, with no embedded credentials, query, or fragment. The token is never entered into the form: provide a path to an owned regular file with mode `0600` or `0400`. Preview binds a digest to the normalized URL, token-file path, and current configuration files; apply refuses a stale preview. Updates preserve unrelated `client.env` entries and comments, use atomic file replacement, and roll back changed targets when a later update fails. Targets that are absent, including MCP entries and hooks, are shown as skipped and are never created. The audit records target names and the URL host only.
 
-Client settings show the local `mdb service` status and logs, permit install/start/stop/uninstall through the existing service manager, report local outbox status, and offer an explicit outbox drain when `ENGRAM_MCP_URL` and a protected token source are configured. Consent and workspace environment values are displayed read-only; changes remain in their existing validated CLI/configuration flows.
+**Connections** administers a remote server dashboard. Its Dashboard server URL and dashboard credential are separate from the capture server URL and token file configured by **Server**. Credentials remain in private local files and are never returned to the browser. See [client-daemon.md](client-daemon.md) for service lifecycle details.

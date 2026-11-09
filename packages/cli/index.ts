@@ -13,15 +13,17 @@ import { localSink, pathsFromHookPayload, reconcile, remoteSink, syncFile, syncR
 import { readBinding } from '../core/project-binding.js';
 import { isTrusted } from '../core/project-trust.js';
 import { captureForUser, insideProject, setUserPaused, setupUser, uninstallUser, userStatus } from '../memory/user-setup.js';
+import { manageInstructions, type InstructionHost } from '../memory/global-instructions.js';
 import { touchActivity } from '../adaptive/activity.js';
 import { mapCommand, remoteTarget, runRemote, usesServer } from './remote.js';
 import { findTrustedBinding } from '../core/project-trust.js';
-import { manageClientService, runClientDaemon } from './service.js';
+import { dashboardUrl, manageClientService, runClientDaemon } from './service.js';
 import { createHttpCredential, credentialAudit, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
 import { createRegistration, revokeRegistration } from '../memory/capture.js';
 import { drainRemoteCaptureSpool, queueRemoteCapture } from '../memory/remote-spool.js';
 import type { JobKind } from '../intelligence/index.js';
 import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, refreshRelevance, readRanking, clearRanking, relevanceStatus, showModel, setModel, testModel, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput, CHAT_PROVIDERS, importChatEvents, parseGenericJson, parseChatGptExport, parseChatGptZip, parseClaudeExport, parseClaudeZip, parseGeminiTakeoutActivity, parseGeminiTakeoutZip, parseGenericJsonl } from '../sdk/index.js';
+import { wikiImport } from './wiki-import.js';
 
 /** Builds the vault-configured built-in provider (openai, ollama, openai-compatible). Returns undefined, with a stderr note, when unavailable. */
 async function configuredProvider(root: string): Promise<ModelProvider | undefined> {
@@ -37,6 +39,7 @@ Usage: mdb COMMAND [arguments] [--root PATH] [--json]
 mcp-proxy --url URL --token-env VAR [--workspace ID] [--outbox DIR] [--transport-trust tailscale]   stdio proxy for an agent host; keeps task/note/handoff writes locally while the server is unreachable and sends them when it returns
 remote mode: any client runs these against the server instead of a local vault when --server URL [--token-env VAR] [--workspace ID] is given, ENGRAM_URL is set, or the current project is bound to a server (--root or --local forces a local vault)
 service install|uninstall|status|start|stop|logs [--platform macos|linux] [--url URL --token-file F] [--workspace ID] [--project-dir D] [--dry-run]   manage the per-user outbox delivery daemon
+service dashboard-url [--role client|server]   print the safe local dashboard URL and first-time setup state as JSON
     search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | chat account|project|import|list|get|search | insight search | capabilities
 chat account register|revoke|list --provider chatgpt|claude|gemini|generic --account ID [--label LABEL]
 chat client register --provider P --account A --principal ACTOR --consent   owner-consented Engram-controlled two-way chat capture
@@ -49,24 +52,26 @@ outbox [drain --url URL --token-env VAR [--workspace ID] | watch --url URL (--to
 dashboard [--host ADDR] [--port N] [--open] [--allow-remote] [--client] [--reset-password] | credential create|list|revoke  password dashboard; remote admin is opt-in with MDB_DASHBOARD_REMOTE_ADMIN=true
 storage status | breakdown | cleanup --dry-run   report logical storage paths/usage and preview only positively marked orphan scratch (nothing is deleted)
 wiki lint [--scope S ...] [--check CODE ...] [--min-severity error|warning|info] [--limit N] [--propose [--dry-run]]   deterministic ACL-safe wiki lint and pending proposal generation
+wiki import --from DIR [--raw DIR] --workspace ID [--wiki-collection ID] [--sources-collection ID] [--label TEXT] [--max-bytes N] [--dry-run] | wiki import verify --from DIR [--raw DIR] --workspace ID   owner-only, read-only source tree migration and hash verification
 wiki propose retire --page ID --revision REV --reason TEXT | restore --page ID --to-revision REV --revision CURRENT --reason TEXT | rename --page ID --revision REV --title NEW | merge --target ID --revision REV --source ID:REV ... --title T (--body T | --file F) --evidence URI:REV[:SPAN] ... --reason TEXT
 wiki proposals [--status pending|approved|rejected]   list visible reviewed wiki changes; trusted host reviews with intelligence approve|reject
-model show | test | set (--local-agent [claude|codex|auto] | --api URL [--model NAME] [--api-key-env VAR] [--allow-network]) [--allow-private-to-remote] [--no-check]
-    one vault-wide model switch for profile/insight collection, dream and project insight relevance; keys come from the environment only
+model show | test | set (--local-agent [claude|codex|auto] | --api URL [--model NAME] [--api-key-env VAR|--api-key-ref NAME] [--allow-network]) [--allow-private-to-remote] [--no-check]
+    one vault-wide model switch for profile/insight collection, dream and project insight relevance; keys come from private secret files or the environment
 
 init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
 init --project --host claude-code|codex [--no-local-mcp] [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
                                [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools]: writes .engram/project.json (gitignored), managed blocks, MCP config
-setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...] [--include PATTERN,...]
+setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...] [--include PATTERN,...] [--claude-instructions-path PATH] [--codex-instructions-path PATH]
                                One-time user-level capture for EVERY project (also --show --pause --resume --uninstall)
+instructions install|refresh|status|remove --host claude-code|codex|both [--dry-run] [--claude-instructions-path PATH] [--codex-instructions-path PATH] [--json]
 notes sync [--project-dir PATH] [--report]          Synchronize approved Markdown files (needs init --file-sync-consent)
 project trust-codex-hooks [--yes] [--project-dir PATH]   Codex runs project hooks only once trusted: show, then (with --yes) trust, this project's Engram hooks
 project refresh-context [--project-dir PATH] [--remote]   Rewrite the managed blocks from the current accepted profile
 doctor --project [--project-dir PATH] [--no-probe]        Per-feature PASS/INCOMPLETE/DISABLED/FAIL/NOT_RUN report for this project
 doctor | verify | recover | reconcile
-credential create --actor ID --permissions SCOPE:read,SCOPE:write | rotate ID [--permissions ...] | revoke ID | audit
+credential permissions-template --agent [--workspace ID[,ID...]] | create --actor ID --permissions SCOPE:read,SCOPE:write | rotate ID [--permissions ...] | revoke ID | audit
 workspace create ID | list | info ID | grant ID ACTOR --permissions read,write | revoke ID ACTOR
 collection create ID --workspace ID | list --workspace ID | info ID --workspace ID
 put --scope workspace:ID[:COLLECTION] --kind note --title TITLE --body TEXT [--file PATH]
@@ -89,7 +94,7 @@ dream rate ID --label useful|not_useful|duplicate|incorrect|needs_evidence --not
 jobs status | index status|rebuild|sync|verify
 query --json '{AST}' | --file F [--format table|json|jsonl|text] [--explain] | query save NAME --scope S --file F | query capabilities
 cat ID | grep PATTERN --path ID | head|tail -n N | cut -c R | sed SCRIPT | trim | split -d D | replace A B | uniq | distinct | sort --by f:desc | select|pluck|count|sum|avg|min|max   (stream aliases read JSONL from stdin)
-embed status | sync [--max-objects N] | clear     (optional semantic index; needs sqlite.enabled and embedding.* in mdb.yaml)
+embed status | sync [--max-objects N] | clear | model preview|download|status|remove|test [--yes] (explicit local bge-m3 management)
 memory recent|timeline|range|search|grep|get   (secondary recall; use your host's native memory first)
 memory adapter detect|install|status|uninstall --host claude-code|codex [--consent --principal P --workspace W]
   remote offline buffer: with --mcp-url add --offline-buffer so task/note/handoff writes made while the server is unreachable are kept on this machine, then merged into the server's version (like git) and deleted locally when it returns
@@ -111,7 +116,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password']);
+  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'no-instructions', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'agent', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'allow-network', 'allow-private-to-remote', 'no-check', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -127,6 +132,7 @@ function parse(argv: string[]): { args: string[]; flags: Flags } {
   return { args, flags };
 }
 function text(flags: Flags, name: string, fallback?: string): string | undefined { return typeof flags[name] === 'string' ? flags[name] as string : fallback; }
+function instructionOverrides(flags: Flags) { return { ...(text(flags, 'claude-instructions-path') ? { claudeInstructionsPath: text(flags, 'claude-instructions-path')! } : {}), ...(text(flags, 'codex-instructions-path') ? { codexInstructionsPath: text(flags, 'codex-instructions-path')! } : {}) }; }
 function required(value: string | undefined, name: string): string { if (!value) throw new MDBError('INVALID_ARGUMENT', `${name} is required`); return value; }
 /** Provenance of a feedback label; the default (real-user) applies when the flag is absent. */
 function origin(flags: Flags): 'real-user' | 'validated-evidence' | 'synthetic' | 'simulated-reviewer' { const value = text(flags, 'origin'); if (!['real-user', 'validated-evidence', 'synthetic', 'simulated-reviewer'].includes(value ?? '')) throw new MDBError('INVALID_ARGUMENT', '--origin must be real-user, validated-evidence, synthetic or simulated-reviewer'); return value as never; }
@@ -301,13 +307,40 @@ function summarizeRun(r: { cycle?: { id: string; state: string; watermark: numbe
 /** Commands that never change the vault: they must not record activity either (a read leaves the vault byte-identical). */
 const READ_ONLY_COMMANDS = new Set(['doctor', 'verify', 'get', 'history', 'diff', 'grep', 'search', 'context', 'links', 'backlinks', 'related', 'query', 'capabilities', 'insight', 'storage', 'dashboard']);
 const READ_ONLY_SUBCOMMANDS: Record<string, string[]> = { model: ['show', 'test'], wiki: ['lint', 'proposals'], intelligence: ['proposals'], workspace: ['list', 'info', 'daily', 'changes'], collection: ['list', 'info'], credential: ['audit'], profile: ['show', 'proposals'], jobs: ['status'], index: ['status', 'verify'], memory: ['recent', 'timeline', 'range', 'search', 'grep', 'get', 'status', 'capabilities', 'adapter'], embed: ['status'], skills: ['list', 'show'] };
-export function isReadOnlyCommand(command: string | undefined, sub: string | undefined, third?: string): boolean { if (!command) return true; if (command === 'query') return sub !== 'save'; if (command === 'memory' && sub === 'adapter') return true; if (command === 'chat') return ['list', 'get', 'search'].includes(sub ?? '') || (sub === 'project' && ['list', 'resolve'].includes(third ?? '')) || (sub === 'account' && third === 'list') || (sub === 'import' && ['preview', 'status'].includes(third ?? '')); return READ_ONLY_COMMANDS.has(command) || (READ_ONLY_SUBCOMMANDS[command]?.includes(sub ?? '') ?? false); }
+export function isReadOnlyCommand(command: string | undefined, sub: string | undefined, third?: string): boolean { if (!command) return true; if (command === 'wiki' && sub === 'import') return third === 'verify'; if (command === 'query') return sub !== 'save'; if (command === 'memory' && sub === 'adapter') return true; if (command === 'chat') return ['list', 'get', 'search'].includes(sub ?? '') || (sub === 'project' && ['list', 'resolve'].includes(third ?? '')) || (sub === 'account' && third === 'list') || (sub === 'import' && ['preview', 'status'].includes(third ?? '')); return READ_ONLY_COMMANDS.has(command) || (READ_ONLY_SUBCOMMANDS[command]?.includes(sub ?? '') ?? false); }
 export async function execute(argv: string[]): Promise<unknown> {
   const { args, flags } = parse(argv);
   const [command, sub, third, fourth] = args;
   if (!command || command === 'help' || flags.help) return HELP;
+  if (command === 'dashboard' && flags.client === true) {
+    const { dashboardEnabled } = await import('../dashboard/server.js');
+    if (!dashboardEnabled()) throw new MDBError('INVALID_ARGUMENT', 'Dashboard disabled by MDB_DASHBOARD_ENABLED=false');
+    const home = process.env.HOME ?? '';
+    const defaultState = process.platform === 'darwin' ? resolve(home, 'Library/Application Support/Engram/client-dashboard') : resolve(process.env.XDG_CONFIG_HOME ?? resolve(home, '.config'), 'engram/client-dashboard');
+    const stateDir = resolve(process.env.MDB_CLIENT_DASHBOARD_STATE_DIR ?? defaultState);
+    process.env.MDB_DASHBOARD_AUTH_FILE ??= resolve(stateDir, 'auth.json');
+    const portValue = text(flags, 'port') ?? process.env.ENGRAM_CLIENT_DASHBOARD_PORT ?? process.env.MDB_DASHBOARD_PORT ?? '4872';
+    const port = Number(portValue);
+    if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new MDBError('INVALID_ARGUMENT', '--port must be between 0 and 65535');
+    const { createDashboardServer } = await import('../dashboard/server.js');
+    const dashboard = await createDashboardServer({ engram: { vault: { root: stateDir }, search: { close: async () => {} } } as never, host: text(flags, 'host') ?? '127.0.0.1', port, clientMode: true });
+    const { passwordFilePath, passwordIsSet } = await import('../dashboard/password.js');
+    process.stderr.write(`Dashboard password file: ${await passwordFilePath(stateDir)}\n`);
+    const passwordSet = await passwordIsSet(stateDir);
+    if (process.env.MDB_DASHBOARD_TOKEN_NOTE) process.stdout.write(`Dashboard password: ${passwordSet ? 'set' : 'not set'}\n`);
+    else process.stderr.write(`Dashboard password: ${passwordSet ? 'set' : 'not set; use the printed one-time URL for first setup'}\n`);
+    const url = `http://127.0.0.1:${dashboard.port}/#t=${dashboard.token}`;
+    (await import('../dashboard/announce.js')).announceDashboard({ urls: [url], passwordSet });
+    return `${url}\n`;
+  }
   if (command === 'service') {
     if (sub === 'daemon') return runClientDaemon({ url: required(text(flags, 'url'), '--url'), tokenFile: resolve(required(text(flags, 'token-file'), '--token-file')), allowRoot: !!flags['allow-root'], ...(text(flags, 'log-file') ? { logFile: resolve(text(flags, 'log-file')!) } : {}), ...(text(flags, 'workspace') ? { workspace: text(flags, 'workspace') } : {}), ...(text(flags, 'outbox') ? { outbox: resolve(text(flags, 'outbox')!) } : {}), ...(text(flags, 'project-dir') ? { projectDir: resolve(text(flags, 'project-dir')!) } : {}) });
+    if (sub === 'dashboard-url') {
+      const role = text(flags, 'role'), platform = text(flags, 'platform');
+      if (role && !['client', 'server'].includes(role)) throw new MDBError('INVALID_ARGUMENT', '--role must be client or server');
+      if (platform && !['macos', 'linux'].includes(platform)) throw new MDBError('INVALID_ARGUMENT', '--platform must be macos or linux');
+      return dashboardUrl({ role: role === 'server' ? 'server' : 'client', ...(platform ? { platform: platform as 'macos' | 'linux' } : {}), ...(text(flags, 'home') ? { home: text(flags, 'home') } : {}), ...(text(flags, 'note-file') ? { noteFile: text(flags, 'note-file') } : {}) });
+    }
     return manageClientService({ action: sub ?? '', ...(text(flags, 'platform') ? { platform: text(flags, 'platform') as 'macos' | 'linux' } : {}), ...(text(flags, 'home') ? { home: text(flags, 'home') } : {}), ...(text(flags, 'url') ? { url: text(flags, 'url') } : {}), ...(text(flags, 'token-file') ? { tokenFile: text(flags, 'token-file') } : {}), ...(text(flags, 'workspace') ? { workspace: text(flags, 'workspace') } : {}), ...(text(flags, 'outbox') ? { outbox: text(flags, 'outbox') } : {}), ...(text(flags, 'project-dir') ? { projectDir: text(flags, 'project-dir') } : {}), dryRun: !!flags['dry-run'], allowRoot: !!flags['allow-root'] });
   }
   if (command === 'mcp-proxy') {
@@ -342,6 +375,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     return outboxStatus(directory);
   }
   // Remote mode: a client machine runs the same commands against the server (see cli/remote.ts). --root or --local keeps a command on a local vault.
+  if (command === 'wiki' && sub === 'import' && (flags.server || flags['token-env'] || (process.env.ENGRAM_URL && !flags.root && !flags.local))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'wiki import is owner-CLI only and requires a local vault');
   if (usesServer(command, sub)) { const target = await remoteTarget(flags); if (target) return runRemote(target, args, flags); }
   const root = resolveRoot(text(flags, 'root'));
   const client = new Engram(root, OWNER, (['intelligence', 'dream', 'profile'].includes(command) || (command === 'model' && sub === 'test') || (command === 'project' && sub === 'relevance' && third === 'refresh')) ? await configuredProvider(root) : undefined);
@@ -436,13 +470,21 @@ export async function execute(argv: string[]): Promise<unknown> {
     }
     case 'setup': {
       if (!flags.user) throw new MDBError('INVALID_ARGUMENT', 'usage: setup --user (--consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...]) | --show | --pause | --resume | --uninstall');
-      if (flags.show) return userStatus();
+      if (flags.show) return userStatus(instructionOverrides(flags));
       if (flags.pause) return setUserPaused(true);
       if (flags.resume) return setUserPaused(false);
-      if (flags.uninstall) return uninstallUser();
+      if (flags.uninstall) return uninstallUser(instructionOverrides(flags));
       const hostList = required(text(flags, 'hosts'), '--hosts').split(',').map(item => item.trim()).filter(Boolean) as Host[];
       for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--hosts must name claude-code and/or codex');
-      return setupUser({ hosts: hostList, mcpUrl: required(text(flags, 'mcp-url'), '--mcp-url'), tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')!, registrationId: required(text(flags, 'registration'), '--registration'), principalId: required(text(flags, 'principal'), '--principal'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(list(flags, 'exclude') ? { exclude: list(flags, 'exclude')! } : {}), ...(list(flags, 'include') ? { include: list(flags, 'include')! } : {}), consent: !!flags.consent });
+      return setupUser({ hosts: hostList, mcpUrl: required(text(flags, 'mcp-url'), '--mcp-url'), tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')!, registrationId: required(text(flags, 'registration'), '--registration'), principalId: required(text(flags, 'principal'), '--principal'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(list(flags, 'exclude') ? { exclude: list(flags, 'exclude')! } : {}), ...(list(flags, 'include') ? { include: list(flags, 'include')! } : {}), ...instructionOverrides(flags), noInstructions: !!flags['no-instructions'], consent: !!flags.consent });
+    }
+    case 'instructions': {
+      const action = required(sub, 'install|refresh|status|remove');
+      if (!['install', 'refresh', 'status', 'remove'].includes(action)) throw new MDBError('INVALID_ARGUMENT', 'usage: instructions install|refresh|status|remove --host claude-code|codex|both [--dry-run] [--json]');
+      const host = required(text(flags, 'host'), '--host') as InstructionHost;
+      if (!['claude-code', 'codex', 'both'].includes(host)) throw new MDBError('INVALID_ARGUMENT', '--host must be claude-code, codex, or both');
+      const overrides = instructionOverrides(flags);
+      return manageInstructions(action as 'install' | 'refresh' | 'status' | 'remove', host, { dryRun: !!flags['dry-run'], paths: { ...(overrides.claudeInstructionsPath ? { 'claude-code': overrides.claudeInstructionsPath } : {}), ...(overrides.codexInstructionsPath ? { codex: overrides.codexInstructionsPath } : {}) } });
     }
     case 'doctor': if (flags.project) return projectDoctor(resolve(text(flags, 'project-dir', process.cwd())!), { ...(flags['no-probe'] ? { probeRemote: false } : {}) }); return v.doctor();
     case 'project': {
@@ -503,7 +545,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub !== 'set') throw new MDBError('INVALID_INPUT', 'Usage: mdb model show | set | test');
       const bool = (name: string): boolean | undefined => flags[name] === undefined ? undefined : flags[name] === true || flags[name] === 'true';
       const localAgent = flags['local-agent'] === undefined ? undefined : flags['local-agent'] === true ? 'auto' : String(flags['local-agent']);
-      return setModel(v, { provider: text(flags, 'provider'), localAgent: localAgent as 'claude' | 'codex' | 'auto' | undefined, api: text(flags, 'api'), modelName: text(flags, 'model'), baseUrl: text(flags, 'base-url'), apiKeyEnv: text(flags, 'api-key-env'), command: text(flags, 'command'), allowNetwork: bool('allow-network'), allowPrivateContentToRemote: bool('allow-private-to-remote'), redactPiiForLocal: bool('redact-pii-for-local'), timeoutMs: number(flags, 'timeout-ms'), maxOutputTokens: number(flags, 'max-output-tokens'), maxInputTokens: number(flags, 'max-input-tokens'), locality: text(flags, 'locality') as 'local' | 'remote' | undefined, check: flags['no-check'] ? false : true });
+      return setModel(v, { provider: text(flags, 'provider'), localAgent: localAgent as 'claude' | 'codex' | 'auto' | undefined, api: text(flags, 'api'), modelName: text(flags, 'model'), baseUrl: text(flags, 'base-url'), apiKeyEnv: text(flags, 'api-key-env'), apiKeyRef: text(flags, 'api-key-ref'), command: text(flags, 'command'), allowNetwork: bool('allow-network'), allowPrivateContentToRemote: bool('allow-private-to-remote'), redactPiiForLocal: bool('redact-pii-for-local'), timeoutMs: number(flags, 'timeout-ms'), maxOutputTokens: number(flags, 'max-output-tokens'), maxInputTokens: number(flags, 'max-input-tokens'), locality: text(flags, 'locality') as 'local' | 'remote' | undefined, check: flags['no-check'] ? false : true });
     }
     case 'profile':
       if (sub === 'show') return (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] }));
@@ -561,6 +603,13 @@ export async function execute(argv: string[]): Promise<unknown> {
       return tool.execute(mapped.input);
     }
     case 'credential':
+      if (sub === 'permissions-template') {
+        if (!flags.agent) throw new MDBError('INVALID_ARGUMENT', 'Use `mdb credential permissions-template --agent`');
+        const workspaces = list(flags, 'workspace');
+        if (workspaces?.some(id => !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id))) throw new MDBError('INVALID_ARGUMENT', 'Workspace ids must be valid ids');
+        const permissions = [...(workspaces?.length ? workspaces.flatMap(id => [`workspace:${id}:read`, `workspace:${id}:write`]) : ['workspace:<ID>:read', 'workspace:<ID>:write']), 'global:profile:read', 'global:shared:read', 'global:wiki:read'];
+        return `Recommended owner-agent permissions (grant each workspace separately in the vault):\n${permissions.join(',')}\nOptional: workspace:create\nDo not grant: global:discoveries:read or any global write permission.\nWorkspace vault grants are also required. credential rotate issues a new id and token; update the consumer token file and restart its agents.`;
+      }
       if (sub === 'create') return createHttpCredential(v, required(text(flags, 'actor'), '--actor'), required(text(flags, 'permissions'), '--permissions').split(',').map(value => value.trim()).filter(Boolean));
       if (sub === 'rotate') return rotateHttpCredential(v, required(third, 'credential ID'), text(flags, 'permissions')?.split(',').map(value => value.trim()).filter(Boolean));
       if (sub === 'revoke') return { revoked: await revokeHttpCredential(v, required(third, 'credential ID')) };
@@ -568,6 +617,18 @@ export async function execute(argv: string[]): Promise<unknown> {
       break;
     case 'jobs': if (sub === 'status') return engine.jobs(); break;
     case 'embed': // optional semantic index: lives in the SQLite index, needs an embedding provider; keyword and grep never depend on it
+      if (sub === 'model') {
+        const modelCommand = third; const builtin = await import('../search-semantic/builtin-model.js');
+        if (modelCommand === 'preview') return builtin.previewBuiltinModel();
+        if (modelCommand === 'status' || !modelCommand) return builtin.builtinModelStatus();
+        if (modelCommand === 'download') {
+          const preview = await builtin.previewBuiltinModel(); if (!flags.yes) throw new MDBError('INVALID_ARGUMENT', `Review ${preview.totalBytes} bytes from ${preview.repo} @ ${preview.revision}, then rerun with --yes to download explicitly`);
+          return { destination: await builtin.startDownload({ onProgress: event => process.stderr.write(`\r${event.file}: ${event.bytes}/${event.totalBytes} bytes`) }) };
+        }
+        if (modelCommand === 'remove') { if (!flags.yes) throw new MDBError('INVALID_ARGUMENT', 'Review mdb embed model preview, then pass --yes to remove the cached model'); await builtin.removeBuiltinModel(); return { removed: true }; }
+        if (modelCommand === 'test') { const config = (await client.config()).embedding; if (!config?.provider) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Configure an embedding provider first'); return (await import('../search-semantic/embedder.js')).testEmbedding(config); }
+        throw new MDBError('INVALID_ARGUMENT', 'usage: mdb embed model preview|download|status|remove|test [--yes]');
+      }
       if (!sub || sub === 'status') return client.search.vectors.status();
       if (sub === 'sync') return client.search.embedSync({ signal: abort.signal, ...(number(flags, 'max-objects') ? { maxObjects: number(flags, 'max-objects')! } : {}) });
       if (sub === 'clear') return client.search.embedClear();
@@ -579,6 +640,11 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'verify') return v.verify();
       break;
     case 'wiki':
+      if (sub === 'import') {
+        const verifyImport = third === 'verify';
+        if (third && !verifyImport) throw new MDBError('INVALID_ARGUMENT', 'usage: wiki import --from DIR [--raw DIR] --workspace ID | wiki import verify --from DIR [--raw DIR] --workspace ID');
+        return wikiImport(v, { from: required(text(flags, 'from'), '--from'), ...(text(flags, 'raw') ? { raw: text(flags, 'raw')! } : {}), workspace: required(text(flags, 'workspace'), '--workspace'), ...(text(flags, 'wiki-collection') ? { wikiCollection: text(flags, 'wiki-collection')! } : {}), ...(text(flags, 'sources-collection') ? { sourcesCollection: text(flags, 'sources-collection')! } : {}), ...(text(flags, 'label') ? { label: text(flags, 'label')! } : {}), ...(number(flags, 'max-bytes') !== undefined ? { maxBytes: number(flags, 'max-bytes')! } : {}), dryRun: !!flags['dry-run'], verify: verifyImport, progress: message => process.stderr.write(`${message}\n`) });
+      }
       if (sub === 'proposals') return (await engine.proposals()).filter(p => p.input.kind === 'wiki_change' && (!text(flags, 'status') || p.status === text(flags, 'status')));
       if (sub === 'propose') {
         const action = third; if (!['retire', 'restore', 'rename', 'merge'].includes(action ?? '')) throw new MDBError('INVALID_ARGUMENT', 'wiki propose requires retire, restore, rename, or merge');
@@ -613,7 +679,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); return { root: restored.root }; } return v.backup(resolve(id()));
   }
   throw new MDBError('INVALID_ARGUMENT', 'Unknown command. Run mdb help.');
-  } finally { process.removeListener('SIGINT', interrupt); if (!['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); }
+  } finally { process.removeListener('SIGINT', interrupt); try { if (!['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); } finally { await client.close(); } }
 }
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const unix = detectUnix(argv); if (unix) { process.exitCode = await unixMain(unix.command, unix.rest, unix.root); process.stdin.destroy(); return; } // Unix-style text tools: own option parsing and exit codes (docs/unix.md)

@@ -92,8 +92,8 @@ test('cached context is bound to the credential identity: another credential, to
   await server.stop();
   assert.equal((await runContextHook({ host: 'claude-code', stdin: payload(repo), env, timeoutMs: 400 })).outcome, 'stale', 'the same credential may use its own cache during an outage');
   env.ENGRAM_CTX_TOKEN = server.creds[1]!.token; const other = await runContextHook({ host: 'claude-code', stdin: payload(repo), env, timeoutMs: 400 });
-  assert.equal(other.outcome, 'none'); assert.equal(other.output, ''); assert.match(other.reason ?? '', /different credential/); assert.equal((await readdir(path.join(env.ENGRAM_CACHE_DIR!, 'context'))).length, 0, 'and the cache is gone');
-  env.ENGRAM_CTX_TOKEN = server.creds[0]!.token; assert.equal((await runContextHook({ host: 'claude-code', stdin: payload(repo), env, timeoutMs: 400 })).outcome, 'none', 'even the original credential gets nothing from a deleted cache');
+  assert.equal(other.outcome, 'none'); assert.equal(other.output, ''); assert.match(other.reason ?? '', /server did not answer/); assert.equal((await readdir(path.join(env.ENGRAM_CACHE_DIR!, 'context'))).length, 1, 'the original credential cache remains isolated under its own key');
+  env.ENGRAM_CTX_TOKEN = server.creds[0]!.token; const original = await runContextHook({ host: 'claude-code', stdin: payload(repo), env, timeoutMs: 400 }); assert.equal(original.outcome, 'stale', 'the original credential may still use only its own stale cache'); assert.match(original.output, /Decision about the launch/);
   const logout = { ...env }; delete logout.ENGRAM_CTX_TOKEN; assert.equal((await runContextHook({ host: 'claude-code', stdin: payload(repo), env: logout })).output, '', 'logged out: nothing');
 });
 
@@ -128,8 +128,11 @@ test('sensitive insights never reach a file or the injected context; --no-profil
 
 test('narrow recording: with an allowlist only matching projects are recorded, exclusions still win, and nothing else reaches the spool; status shows the mode', async t => {
   const base = await temp(t, 'engram-allow-'); process.env.ENGRAM_USER_CONFIG = path.join(base, 'user.json'); process.env.ENGRAM_REMOTE_SPOOL = path.join(base, 'spool'); process.env.ENGRAM_TRUST_FILE = path.join(base, 'trust.json');
-  const paths = { claudeJsonPath: path.join(base, 'claude.json'), codexConfigPath: path.join(base, 'codex.toml'), settingsPaths: { 'claude-code': path.join(base, 'hooks.json'), codex: path.join(base, 'codex-hooks.json') } };
-  assert.deepEqual(await userStatus(), { configured: false });
+  const homeVars = ['HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME'] as const; const previousHome = Object.fromEntries(homeVars.map(key => [key, process.env[key]]));
+  process.env.HOME = path.join(base, 'home'); process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude'); process.env.CODEX_HOME = path.join(base, 'codex');
+  t.after(() => { for (const key of homeVars) { const value = previousHome[key]; if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  const paths = { claudeJsonPath: path.join(base, 'claude.json'), codexConfigPath: path.join(base, 'codex.toml'), settingsPaths: { 'claude-code': path.join(base, 'hooks.json'), codex: path.join(base, 'codex-hooks.json') }, claudeInstructionsPath: path.join(base, 'claude', 'CLAUDE.md'), codexInstructionsPath: path.join(base, 'codex', 'AGENTS.md') };
+  const initialStatus = await userStatus(); assert.equal(initialStatus.configured, false); assert.deepEqual(Object.values(initialStatus.instructions as Record<string, { status: string }>).map(item => item.status), ['absent', 'absent']);
   await setupUser({ hosts: ['claude-code'], mcpUrl: 'https://engram.example.com/mcp', tokenEnv: 'ENGRAM_X', registrationId: 'reg_a', principalId: 'me', include: ['/work/'], exclude: ['/work/private'], consent: true, ...paths });
   const status = await userStatus(); assert.equal(status.recording, 'ALLOWLISTED_PROJECTS_ONLY'); assert.deepEqual(status.includeProjects, ['/work/']); assert.deepEqual(status.excludeProjects, ['/work/private']); assert.equal(status.queuedLocally, 0);
   const ev = (cwd: string) => JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's', cwd, prompt: `note ${cwd}` });

@@ -29,7 +29,7 @@ const quoted = (doc: Document, span: string) => [{ uri: doc.uri, revisionId: doc
 const userWords = (vault: Vault, body: string) => vault.put({ scope: shared, kind: 'observation', title: 'User message', body, metadata: { speaker: 'user', evidenceClass: 'user_authored', eventType: 'user.message' } });
 function fake(generate: (input: ModelRequest) => ModelProposal | Promise<ModelProposal>, extra: Partial<ModelProvider> = {}): ModelProvider & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
-  return { id: 'fake-provider', calls, async generate(input) { calls.push(input); return generate(input); }, ...extra };
+  return { id: 'fake-provider', locality: 'local', calls, async generate(input) { calls.push(input); return generate(input); }, ...extra };
 }
 async function kinds(vault: Vault, kind: string) { return (await vault.listDocuments()).filter(doc => doc.kind === kind); }
 
@@ -230,6 +230,7 @@ test('critic: a model critic can reject or flag but never approve; critic outage
 
 test('privacy: remote providers never receive private workspace content unless the vault explicitly allows it', async t => {
   const vault = await fixture(t);
+  await configure(vault, c => { c.model.allowNetwork = true; });
   await vault.put({ scope: workspace, kind: 'source', title: 'Private', body: 'PRIVATE workspace evidence' });
   const wiki = await vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'source', title: 'Shared', body: 'Shared evidence' });
   const remote = fake(({ documents }) => ({ kind: 'wiki_page', title: 'Page', body: 'Derived.', evidence: refs(documents.slice(0, 1)) }), { locality: 'remote' });
@@ -238,7 +239,7 @@ test('privacy: remote providers never receive private workspace content unless t
   await engine.enqueue('wiki', { scope: workspace });
   const blocked = await engine.run({ job: 'wiki', limit: 1 });
   assert.equal(blocked[0]!.status, 'blocked');
-  assert.match(blocked[0]!.error!, /allowPrivateContentToRemote/);
+  assert.match(blocked[0]!.error!, /Remote model consent is required/);
   assert.equal(remote.calls.length, 0, 'provider was never invoked');
 
   await engine.enqueue('wiki', { scope: { type: 'global', area: 'wiki' }, objectIds: [wiki.id] });

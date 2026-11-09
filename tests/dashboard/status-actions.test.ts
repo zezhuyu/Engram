@@ -17,7 +17,10 @@ test('dashboard status summarizes an empty vault and excludes document content a
     const started = performance.now(), status = await readDashboardStatus(v.engram);
     assert.ok(performance.now() - started < 300, 'first aggregate response stays within the 300 ms status budget');
     const response = JSON.stringify(status);
-    for (const secret of ['DASHBOARD_TITLE_SENTINEL', 'DASHBOARD_BODY_SENTINEL', 'DASH_SECRET_SENTINEL', v.root]) assert.equal(response.includes(secret), false, `response disclosed ${secret}`);
+    for (const secret of ['DASHBOARD_TITLE_SENTINEL', 'DASHBOARD_BODY_SENTINEL', 'DASH_SECRET_SENTINEL']) assert.equal(response.includes(secret), false, `response disclosed ${secret}`);
+    // The owner sees the absolute vault path (and only that path) in the header; nothing else under the root is disclosed.
+    assert.equal(status.vaultPath, v.root);
+    assert.equal(response.split(v.root).length - 1, 1, 'the vault path appears exactly once, as vaultPath');
     assert.equal(response.includes('unavailable') || response.includes('doctor'), true);
     assert.equal((status.provider as { configured: boolean }).configured, false);
   } finally { delete process.env.DASH_FAKE_SECRET; }

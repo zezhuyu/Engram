@@ -26,6 +26,7 @@ export interface HarnessAdapter {
   installHandoff(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
   installFileSync(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
   removeFileSync(projectRoot: string): Promise<number>;
+  refreshRemoteUrl(url: string): Promise<{ changed: boolean; commands: number }>;
 }
 const MARKER = '# engram-mdb:';
 const REMOTE_MARKER = '# engram-mdb-remote:';
@@ -97,6 +98,25 @@ export class HookFileAdapter implements HarnessAdapter {
     const tmp = `${this.settingsPath}.engram-${process.pid}.tmp`; await fs.writeFile(tmp, JSON.stringify(settings, null, 2) + '\n', { mode }); await fs.rename(tmp, this.settingsPath);
   }
   private async mine(): Promise<Registration[]> { return (await listRegistrations(this.options.root)).filter(r => r.host === this.id && r.settingsPath === this.settingsPath); }
+
+  /** Refreshes only already-installed Engram remote capture commands; event arrays and all other arguments are preserved. */
+  async refreshRemoteUrl(url: string): Promise<{ changed: boolean; commands: number }> {
+    const endpoint = new URL(url);
+    if (!remoteUrlAllowed(endpoint) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new MDBError('INVALID_INPUT', 'Capture URL is not allowed');
+    const { settings, existed } = await this.read();
+    if (!existed || !settings.hooks) return { changed: false, commands: 0 };
+    let commands = 0, changed = false;
+    for (const entries of Object.values(settings.hooks)) for (const entry of entries ?? []) for (const hook of entry.hooks ?? []) {
+      if (hook.type !== 'command' || !hook.command.includes(REMOTE_MARKER) || !hook.command.includes('--remote-url')) continue;
+      const next = hook.command.replace(/(--remote-url\s+)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]+)/, (_whole, prefix: string, value: string) => {
+        commands++;
+        return `${prefix}${quote(endpoint.toString())}`;
+      });
+      if (next !== hook.command) { hook.command = next; changed = true; }
+    }
+    if (changed) await this.write(settings);
+    return { changed, commands };
+  }
 
   async install(options: InstallOptions) {
     if (options.consent !== true) throw new MDBError('INVALID_INPUT', 'Installing capture hooks requires explicit consent');

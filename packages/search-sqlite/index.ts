@@ -428,5 +428,5 @@ export class SearchEngine implements SearchIndexAdapter {
     const vector=await vectorPromise.catch(e => ({ ready: false, reason: (e as Error).message }));
     return { ...base, vector, manifest: { entries: manifest.entries.size, journalSequence: manifest.sequence, persisted: manifest.persisted, loadedFromDisk: manifest.loadedFromDisk }, ripgrep: ripgrepAvailable(), ...(config.postgres?.enabled || config.sqlite.enabled ? {} : { fsIndex: await fsIndexStatus(this.vault) }) };
   }
-  async close(): Promise<void> { await this.postgres.close(); }
+  async close(): Promise<void> { await Promise.all([this.postgres.close(), this.vectors.close()]); }
 }

@@ -12,5 +12,6 @@ export async function configureDreamEvalVault(vault: Vault, root: string): Promi
   config.dream.maxProposalsPerRun = 2;
   config.model.critic = true;
   config.model.allowPrivateContentToRemote = true;
+  config.model.allowNetwork = true;
   await fs.writeFile(path.join(root, 'mdb.yaml'), YAML.stringify(config));
 }

@@ -11,24 +11,24 @@ import YAML from 'yaml';
 import { Vault } from '../packages/core/vault.js';
 import { cleanupPreview } from '../packages/core/storage-lifecycle.js';
 import { IntelligenceEngine } from '../packages/intelligence/index.js';
-import { CliAgentProvider, cliArguments, createProviderFromConfig, describeModel, OpenAICompatibleProvider, type Document, type ModelRequest, type ModelConfig } from '../packages/sdk/index.js';
+import { CliAgentProvider, cliArguments, createProviderFromConfig, describeModel, findExecutable, OpenAICompatibleProvider, type Document, type ModelRequest, type ModelConfig } from '../packages/sdk/index.js';
 
 type T = { after(fn: () => void | Promise<void>): void };
 const doc: Document = { id: 'obj_1', revisionId: 'rev_1', revisionNumber: 1, scope: { type: 'global', area: 'wiki' }, kind: 'source', title: 'Src', body: 'Evidence: caches help. SECRET-PROMPT-BODY', tags: [], links: [], evidence: [], status: 'active', createdAt: '', updatedAt: '', createdBy: 'o', metadata: {}, path: 'p', uri: 'mdb://wiki/objects/obj_1' };
 const request: ModelRequest = { job: 'wiki', documents: [doc], goals: 'goal', instruction: 'be careful' };
 
 const FAKE = (name: string) => `#!/usr/bin/env node
-const fs=require('fs');let input='';const launches=process.env.FAKE_AGENT_LAUNCHES;if(launches)fs.appendFileSync(launches,process.pid+'\\n');process.on('uncaughtException',e=>{if(process.env.FAKE_AGENT_DIAGNOSTICS)fs.appendFileSync(process.env.FAKE_AGENT_DIAGNOSTICS,String(e.stack||e)+'\\n');process.exit(1)});process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
- const log=process.env.FAKE_AGENT_LOG;
+const fs=require('fs');let input='';const launches=process.env.XDG_ENGRAM_FAKE_AGENT_LAUNCHES;if(launches)fs.appendFileSync(launches,process.pid+'\\n');process.on('uncaughtException',e=>{if(process.env.XDG_ENGRAM_FAKE_AGENT_DIAGNOSTICS)fs.appendFileSync(process.env.XDG_ENGRAM_FAKE_AGENT_DIAGNOSTICS,String(e.stack||e)+'\\n');process.exit(1)});process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
+ const log=process.env.XDG_ENGRAM_FAKE_AGENT_LOG;
  if(log)fs.appendFileSync(log,JSON.stringify({name:${JSON.stringify(name)},pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),cwdReal:fs.realpathSync(process.cwd()),tmpdir:process.env.TMPDIR??null,tmpdirReal:fs.realpathSync(process.env.TMPDIR),tmp:process.env.TMP??null,temp:process.env.TEMP??null,stdin:input,dataDir:process.env.ENGRAM_DATA_DIR??null,mdbRoot:process.env.MDB_ROOT??null})+'\\n');
- const mode=process.env.FAKE_MODE||'ok';
+ const mode=process.env.XDG_ENGRAM_FAKE_MODE||'ok';
  const out=(t)=>{const i=process.argv.indexOf('-o');if(i>=0)fs.writeFileSync(process.argv[i+1],t);else process.stdout.write(t);};
  if(mode==='fail'){process.stderr.write('SECRET-STDERR '+input.slice(0,80));process.exit(3);}
  if(mode==='hang'){setInterval(()=>{},1000);return;}
  if(mode==='huge'){process.stdout.write('x'.repeat(3000000));return;}
  if(mode==='garbage'){out('I refuse to answer in JSON.');return;}
  if(mode==='empty'){return;}
- if(/strict critic/.test(input)){out(JSON.stringify({verdict:process.env.FAKE_VERDICT||'accept',rationale:'checked by '+${JSON.stringify(name)}}));return;}
+ if(/strict critic/.test(input)){out(JSON.stringify({verdict:process.env.XDG_ENGRAM_FAKE_VERDICT||'accept',rationale:'checked by '+${JSON.stringify(name)}}));return;}
  const m=/uri=(\\S+) revision=(\\S+) /.exec(input);
  out('\`\`\`json\\n'+JSON.stringify({kind:'wiki_page',title:'From '+${JSON.stringify(name)},body:'Derived by '+${JSON.stringify(name)}+' from the cited source [1].',evidence:[{uri:m[1],revisionId:m[2]}]})+'\\n\`\`\`');
 });
@@ -39,7 +39,7 @@ async function fakeAgents(t: T, names = ['claude', 'codex']) {
   const log = path.join(dir, 'calls.jsonl'); const launches = path.join(dir, 'launches.txt');
   const calls = async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l) as { name: string; pid: number; argv: string[]; cwd: string; cwdReal: string; tmpdir: string | null; tmpdirReal: string; tmp: string | null; temp: string | null; stdin: string; dataDir: string | null; mdbRoot: string | null });
   const launchCount = async () => (await fs.readFile(launches, 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
-  return { dir, log, calls, launchCount, env: (extra: Record<string, string> = {}) => ({ PATH: `${dir}:${process.env.PATH}`, HOME: process.env.HOME, FAKE_AGENT_LOG: log, FAKE_AGENT_LAUNCHES: launches, ...extra }) };
+  return { dir, log, calls, launchCount, env: (extra: Record<string, string> = {}) => ({ PATH: `${dir}:${process.env.PATH}`, HOME: process.env.HOME, XDG_ENGRAM_FAKE_AGENT_LOG: log, XDG_ENGRAM_FAKE_AGENT_LAUNCHES: launches, ...extra }) };
 }
 const base = (over: Partial<ModelConfig> = {}): ModelConfig => ({ provider: 'auto', allowNetwork: false, ...over });
 async function vaultWithSource(t: T, scope: 'global' | 'workspace' = 'global') {
@@ -92,7 +92,7 @@ test('SIGKILL during model scratch leaves a marked orphan that restart reports w
   t.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(externalTmp, { recursive: true, force: true }); });
   const sdkUrl = new URL('../packages/sdk/index.js', import.meta.url).href;
   const source = `import {createProviderFromConfig} from ${JSON.stringify(sdkUrl)};const p=createProviderFromConfig({provider:'claude-cli',allowNetwork:false,maxRetries:0,timeoutMs:30000,maxInputTokens:10000});await p.generate(${JSON.stringify(request)});`;
-  const harness = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...agents.env({ FAKE_MODE: 'hang' }), ENGRAM_DATA_DIR: root, TMPDIR: externalTmp }, stdio: 'ignore' });
+  const harness = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...agents.env({ XDG_ENGRAM_FAKE_MODE: 'hang' }), ENGRAM_DATA_DIR: root, TMPDIR: externalTmp }, stdio: 'ignore' });
   let fakePid: number | undefined; let operationDir: string | undefined;
   t.after(async () => {
     if (harness.exitCode === null && harness.signalCode === null) harness.kill('SIGKILL');
@@ -152,8 +152,8 @@ test('codex CLI adapter: read-only sandbox, ephemeral, last-message file, prompt
 
 test('agent CLI failures are sanitized, bounded and cancellable', async t => {
   const agents = await fakeAgents(t);
-  const make = (mode: string, extra: Partial<ModelConfig> = {}) => createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, ...extra }), agents.env({ FAKE_MODE: mode }));
-  await assert.rejects(make('fail').generate(request), (e: Error & { retryable?: boolean }) => { assert.match(e.message, /exited with status 3/); const text = `${e.message}${e.stack}${JSON.stringify(e)}`; assert.ok(!text.includes('SECRET-STDERR') && !text.includes('SECRET-PROMPT-BODY')); return true; });
+  const make = (mode: string, extra: Partial<ModelConfig> = {}) => createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, ...extra }), agents.env({ XDG_ENGRAM_FAKE_MODE: mode }));
+  await assert.rejects(make('fail').generate(request), (e: Error & { retryable?: boolean }) => { assert.match(e.message, /claude-cli command failed/); const text = `${e.message}${e.stack}${JSON.stringify(e)}`; assert.ok(!text.includes('SECRET-STDERR') && !text.includes('SECRET-PROMPT-BODY')); return true; });
   await assert.rejects(make('garbage').generate(request), { code: 'INVALID_MODEL_OUTPUT' });
   await assert.rejects(make('empty').generate(request), { code: 'INVALID_MODEL_OUTPUT' });
   await assert.rejects(make('huge').generate(request), /size limit/);
@@ -170,7 +170,7 @@ test('agent CLI failures are sanitized, bounded and cancellable', async t => {
   await assert.rejects(pending, { code: 'CANCELLED' });
   assert.equal(await agents.launchCount(), before + 1);
   await assert.rejects(make('ok').generate(request, { signal: AbortSignal.abort() }), { code: 'CANCELLED' });
-  const retrying = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 1, timeoutMs: 1200 }), agents.env({ FAKE_MODE: 'hang' }));
+  const retrying = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 1, timeoutMs: 1200 }), agents.env({ XDG_ENGRAM_FAKE_MODE: 'hang' }));
   const count = await agents.launchCount(); await assert.rejects(retrying.generate(request), /retries exhausted/); assert.equal((await agents.launchCount()) - count, 2, 'one retry after a timeout');
   const tiny = createProviderFromConfig(base({ provider: 'claude-cli', maxInputTokens: 500 }), agents.env());
   const calls = await agents.launchCount(); await assert.rejects(tiny.generate({ ...request, documents: [{ ...doc, body: 'x'.repeat(5000) }] }), { code: 'CAPABILITY_UNAVAILABLE' }); assert.equal(await agents.launchCount(), calls, 'over-budget input never reaches the CLI');
@@ -179,7 +179,7 @@ test('agent CLI failures are sanitized, bounded and cancellable', async t => {
 test('CLI cancellation cannot be lost during setup, immediately after launch, or after settlement', async t => {
   const agents = await fakeAgents(t);
   const diagnostics = path.join(agents.dir, 'diagnostics.log');
-  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, timeoutMs: 15_000 }), agents.env({ FAKE_MODE: 'hang', FAKE_AGENT_DIAGNOSTICS: diagnostics }));
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, timeoutMs: 15_000 }), agents.env({ XDG_ENGRAM_FAKE_MODE: 'hang', XDG_ENGRAM_FAKE_AGENT_DIAGNOSTICS: diagnostics }));
   const waitForLaunch = async (previous: number, controller: AbortController, pending: Promise<unknown>) => {
     const until = Date.now() + 5_000;
     while (!(await agents.calls()).length && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
@@ -224,7 +224,7 @@ test('CLI cancellation remains prompt under CPU contention and preserves unrelat
   const diagnostics = path.join(agents.dir, 'diagnostics.log');
   const burners = Array.from({ length: 3 }, () => spawn('yes', [], { stdio: 'ignore' }));
   t.after(() => { for (const burner of burners) if (burner.exitCode === null) burner.kill('SIGKILL'); });
-  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, timeoutMs: 15_000 }), agents.env({ FAKE_MODE: 'hang', FAKE_AGENT_DIAGNOSTICS: diagnostics }));
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 0, timeoutMs: 15_000 }), agents.env({ XDG_ENGRAM_FAKE_MODE: 'hang', XDG_ENGRAM_FAKE_AGENT_DIAGNOSTICS: diagnostics }));
   const sentinel = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
   t.after(() => { if (sentinel.exitCode === null) sentinel.kill('SIGKILL'); });
   const before = await agents.launchCount(), controller = new AbortController(), started = Date.now();
@@ -244,7 +244,7 @@ test('CLI cancellation remains prompt under CPU contention and preserves unrelat
 
 test('CLI abort during retry delay does not launch another process or retain its listener', async t => {
   const agents = await fakeAgents(t);
-  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 2, timeoutMs: 5_000 }), agents.env({ FAKE_MODE: 'fail' }));
+  const provider = createProviderFromConfig(base({ provider: 'claude-cli', maxRetries: 2, timeoutMs: 5_000 }), agents.env({ XDG_ENGRAM_FAKE_MODE: 'fail' }));
   const controller = new AbortController(), before = await agents.launchCount(), started = Date.now();
   const pending = provider.generate(request, { signal: controller.signal });
   const until = Date.now() + 5_000;
@@ -263,14 +263,14 @@ test('CLI abort during retry delay does not launch another process or retain its
 test('backend selection: auto prefers claude then codex; env and config swap it; missing CLIs are reported, never executed by doctor', async t => {
   const both = await fakeAgents(t), onlyCodex = await fakeAgents(t, ['codex']), none = await fakeAgents(t, []);
   assert.equal(createProviderFromConfig(base(), both.env()).id, 'claude-cli');
-  assert.equal(createProviderFromConfig(base(), onlyCodex.env({ PATH: onlyCodex.dir })).id, 'codex-cli');
-  assert.throws(() => createProviderFromConfig(base(), { PATH: none.dir }), { code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal(createProviderFromConfig(base(), onlyCodex.env({ PATH: onlyCodex.dir })).id, findExecutable('claude', { PATH: onlyCodex.dir }) ? 'claude-cli' : 'codex-cli');
+  if (!findExecutable('claude', { PATH: none.dir }) && !findExecutable('codex', { PATH: none.dir })) assert.throws(() => createProviderFromConfig(base(), { PATH: none.dir }), { code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal(createProviderFromConfig(base({ provider: 'claude-cli' }), both.env({ ENGRAM_MODEL_PROVIDER: 'codex-cli' })).id, 'codex-cli', 'environment overrides mdb.yaml');
-  assert.equal(createProviderFromConfig(base({ provider: 'claude-cli', locality: 'local' }), both.env()).locality, 'local');
+  assert.equal(createProviderFromConfig(base({ provider: 'claude-cli', locality: 'local' }), both.env()).locality, 'remote', 'vendor CLIs remain remote regardless of a config locality override');
   assert.throws(() => createProviderFromConfig(base({ provider: 'claude-cli', command: '/no/such/agent' }), both.env()), /not found/);
   const custom = path.join(both.dir, 'codex'); assert.equal(createProviderFromConfig(base({ provider: 'codex-cli', command: custom }), both.env()).id, 'codex-cli');
   const described = describeModel(base({ provider: 'claude-cli' }), both.env()); assert.equal(described.available, true); assert.equal(described.locality, 'remote');
-  assert.equal(describeModel(base({ provider: 'claude-cli' }), { PATH: none.dir }).available, false);
+  assert.equal(describeModel(base({ provider: 'claude-cli' }), { PATH: none.dir }).available, !!findExecutable('claude', { PATH: none.dir }));
   assert.equal(describeModel(base({ provider: null }), both.env()).available, false);
   assert.equal(describeModel(base({ provider: 'ollama', modelName: 'm' }), both.env()).locality, 'local');
   assert.deepEqual(await both.calls(), [], 'doctor and factory never run the agent');
@@ -280,6 +280,7 @@ test('backend selection: auto prefers claude then codex; env and config swap it;
 test('jobs run through the agent CLI; private workspace content is blocked unless the owner opts in', async t => {
   const agents = await fakeAgents(t);
   const { root, vault, source } = await vaultWithSource(t, 'global');
+  await vault.setConfig(config => { config.model.allowNetwork = true; config.model.allowPrivateContentToRemote = true; });
   const engine = new IntelligenceEngine(vault, createProviderFromConfig(base({ provider: 'claude-cli' }), agents.env()));
   await engine.enqueue('wiki', { scope: { type: 'global', area: 'wiki' }, objectIds: [source.id] });
   assert.equal((await engine.run({ job: 'wiki', limit: 1 }))[0]!.status, 'complete');
@@ -288,11 +289,12 @@ test('jobs run through the agent CLI; private workspace content is blocked unles
   assert.equal((await engine.review(proposal!.id, true)).status, 'approved');
 
   const priv = await vaultWithSource(t, 'workspace');
+  await priv.vault.setConfig(config => { config.model.allowNetwork = true; });
   const privateEngine = new IntelligenceEngine(priv.vault, createProviderFromConfig(base({ provider: 'codex-cli' }), agents.env()));
   await privateEngine.enqueue('wiki', { scope: priv.where, objectIds: [priv.source.id] });
   const calls = (await agents.calls()).length;
   const blocked = await privateEngine.run({ job: 'wiki', limit: 1 });
-  assert.equal(blocked[0]!.status, 'blocked'); assert.match(blocked[0]!.error!, /allowPrivateContentToRemote/);
+  assert.equal(blocked[0]!.status, 'blocked'); assert.match(blocked[0]!.error!, /Remote model consent is required/);
   assert.equal((await agents.calls()).length, calls, 'agent CLI was never started for private content');
   await setConfig(priv.root, c => { c.model.allowPrivateContentToRemote = true; });
   assert.equal((await privateEngine.run({ job: 'wiki', limit: 1 }))[0]!.status, 'complete');
@@ -311,7 +313,7 @@ test('swapping the backend in mdb.yaml or by environment changes which agent ser
   const titles = async () => (await vault.listDocuments()).concat([]).length && JSON.parse((await run([mdb, 'intelligence', 'proposals', '--root', root, '--json'], env())).stdout) as { input: { title: string; metadata: { modelProvider: string } }; status: string }[];
   const addSource = (title: string) => vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'source', title, body: `${title} body text differs` });
 
-  await setConfig(root, c => { c.model.provider = 'claude-cli'; });
+  await setConfig(root, c => { c.model.provider = 'claude-cli'; c.model.allowNetwork = true; c.model.allowPrivateContentToRemote = true; });
   let result = await run([mdb, 'intelligence', 'run', '--job', 'wiki', '--root', root, '--json'], env()); assert.equal(result.code, 0, result.stderr);
   await addSource('Second source');
   await setConfig(root, c => { c.model.provider = 'codex-cli'; });
@@ -329,7 +331,7 @@ test('swapping the backend in mdb.yaml or by environment changes which agent ser
   assert.ok(calls.every(c => c.dataDir === null && c.mdbRoot === null));
 });
 
-test('default configuration uses a local agent CLI when one exists, and is deterministic-only when none does', async t => {
+test('default configuration detects CLIs outside a minimal PATH and remains deterministic when disabled', async t => {
   const agents = await fakeAgents(t), empty = await fakeAgents(t, []);
   const { root } = await vaultWithSource(t, 'global');
   const mdb = path.resolve('bin/mdb.js');
@@ -337,9 +339,12 @@ test('default configuration uses a local agent CLI when one exists, and is deter
   const withAgent = JSON.parse((await run([mdb, 'doctor', '--root', root, '--json'], agents.env())).stdout).capabilities.model;
   assert.equal(withAgent.available, true); assert.match(withAgent.provider, /^claude-cli/);
   const without = JSON.parse((await run([mdb, 'doctor', '--root', root, '--json'], { PATH: empty.dir, HOME: process.env.HOME })).stdout).capabilities.model;
-  assert.equal(without.available, false); assert.match(without.reason, /No local agent CLI/);
+  assert.equal(without.available, !!findExecutable('claude', { PATH: empty.dir, HOME: process.env.HOME }) || !!findExecutable('codex', { PATH: empty.dir, HOME: process.env.HOME }));
   const job = await run([mdb, 'intelligence', 'run', '--job', 'wiki', '--root', root, '--json'], { PATH: `${empty.dir}:/usr/bin:/bin`, HOME: process.env.HOME });
   assert.equal(job.code, 0, job.stderr); assert.match(job.stdout, /blocked/);
+  await new Vault(root).setConfig(config => { config.model.provider = null; });
+  const disabled = JSON.parse((await run([mdb, 'doctor', '--root', root, '--json'], agents.env())).stdout).capabilities.model;
+  assert.equal(disabled.available, false); assert.match(disabled.reason, /No model provider configured/);
 });
 
 test('OpenAI-compatible API: path, headers, body, content-part arrays and response_format fallback all behave', async t => {

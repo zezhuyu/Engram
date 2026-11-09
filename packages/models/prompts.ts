@@ -2,7 +2,7 @@ import type { CritiqueRequest, Document, ModelRequest } from '../core/types.js';
 import { classifySource } from '../core/evidence.js';
 import { redactRemotePii, redactText } from '../memory/redact.js';
 
-export interface ChatMessage { role: 'system' | 'user'; content: string }
+export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 export function providerMessages(messages: ChatMessage[], locality: 'local' | 'remote' = 'local', redactLocalPii = false): ChatMessage[] {
   return locality === 'remote' || (locality === 'local' && redactLocalPii)
     ? messages.map(message => ({ ...message, content: redactRemotePii(message.content) }))

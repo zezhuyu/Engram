@@ -26,6 +26,9 @@ function minimized(payload: Record<string, unknown>): Record<string, unknown> {
   return scrub(result) as Record<string, unknown>;
 }
 export const defaultRemoteSpoolDirectory = (env: NodeJS.ProcessEnv = process.env) => resolveStoragePath('remote-spool', env);
+export async function remoteCaptureSpoolStatus(directory = defaultRemoteSpoolDirectory()): Promise<{ queued: number }> {
+  return { queued: (await fs.readdir(directory).catch(() => [] as string[])).filter(name => name.endsWith('.json')).length };
+}
 async function persist(directory: string, capture: RemoteCapture): Promise<void> {
   await assertAvailableStorage(directory, process.env, Buffer.byteLength(JSON.stringify(capture)) + 4096);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });

@@ -14,13 +14,18 @@ export function dashboardBanner({ urls, passwordSet }: DashboardAnnouncement): s
 }
 
 /** macOS shows a native alert (the text travels as argv, never inside the script); every other platform prints a banner to stderr. */
-export function announceDashboard(announcement: DashboardAnnouncement, platform: NodeJS.Platform = process.platform): void {
-  if (platform === 'darwin' && process.env.MDB_DASHBOARD_ALERT !== 'false' && process.env.NODE_ENV !== 'test') {
+export function announceDashboard(announcement: DashboardAnnouncement, platform: NodeJS.Platform = process.platform, spawnProcess: typeof spawn = spawn): void {
+  // Supervised client dashboards write the one-time URL to a dedicated private note file.
+  // The wrapper captures stdout there; never repeat the token in the supervisor's shared log.
+  const privateNote = !!process.env.MDB_DASHBOARD_TOKEN_NOTE;
+  const injectedSpawn = spawnProcess !== spawn;
+  if (platform === 'darwin' && process.env.MDB_DASHBOARD_ALERT !== 'false' && (process.env.NODE_ENV !== 'test' || injectedSpawn)) {
     const message = `${announcement.urls.join('\n')}\n\n${announcement.passwordSet ? 'Sign in with your dashboard password.' : 'First run: open this URL to set your password.'}\nThe #t=… part is a private token.`;
     try {
-      spawn('osascript', ['-e', ALERT_SCRIPT, 'Engram dashboard', message], { detached: true, stdio: 'ignore' }).on('error', () => undefined).unref();
+      spawnProcess('osascript', ['-e', ALERT_SCRIPT, 'Engram dashboard', message], { detached: true, stdio: 'ignore' }).on('error', () => undefined).unref();
     } catch { /* the stdout URL list remains */ }
     return;
   }
+  if (privateNote) return;
   process.stderr.write(dashboardBanner(announcement));
 }

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import { disposableVault } from '../helpers/disposable-vault.js';
@@ -10,6 +11,7 @@ import { run } from '../helpers/host.js';
 import { recordCase } from '../helpers/report.js';
 import { CancelledError } from '../../packages/models/errors.js';
 import { createEmbedder, describeEmbedding, OpenAICompatibleEmbedder } from '../../packages/search-semantic/embedder.js';
+import { writeSecret, deleteSecret } from '../../packages/core/secret-store.js';
 import type { Scope } from '../../packages/core/types.js';
 
 const rec = (name: string) => recordCase({ suite: 'embedder', name, status: 'PASS' });
@@ -53,6 +55,19 @@ test('createEmbedder / describeEmbedding: validation, defaults and key handling;
   assert.throws(() => createEmbedder({ provider: 'ollama', model: 'm', timeoutMs: 5 }), /timeoutMs/); assert.throws(() => createEmbedder({ provider: 'ollama', model: 'm', batchSize: 0 }), /batchSize/);
   const d = describeEmbedding({ provider: 'openai', model: 'm', allowNetwork: true }, {}); assert.equal(d.available, false); assert.ok(!JSON.stringify(d).includes('sk-'));
   rec('embedder-config');
+});
+
+test('embedding key resolution prefers its private secret reference and never puts key material in config or diagnostics', async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-embedding-secret-')); t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const env = { HOME: home, XDG_CONFIG_HOME: home } as NodeJS.ProcessEnv;
+  writeSecret('embedding-provider', 'sk-embedding-secret', { env, home });
+  let authorization = '';
+  const embedder = createEmbedder({ provider: 'openai-compatible', baseUrl: 'http://127.0.0.1:9/v1', model: 'custom', apiKeyRef: 'embedding-provider', apiKeyEnv: 'EMBED_KEY', batchSize: 1 }, { ...env, EMBED_KEY: 'env-fallback' }, async (_url, init) => { authorization = new Headers(init?.headers).get('authorization') ?? ''; return json(vectorsFor(['synthetic'])); });
+  await embedder.embed(['synthetic']); assert.equal(authorization, 'Bearer sk-embedding-secret');
+  assert.doesNotMatch(JSON.stringify(describeEmbedding({ provider: 'openai-compatible', model: 'custom', baseUrl: 'https://example.test/v1', allowNetwork: true }, {})), /sk-embedding-secret/);
+  deleteSecret('embedding-provider', { env, home });
+  const fallback = createEmbedder({ provider: 'openai-compatible', baseUrl: 'http://127.0.0.1:9/v1', model: 'custom', apiKeyRef: 'embedding-provider', apiKeyEnv: 'EMBED_KEY' }, { ...env, EMBED_KEY: 'env-fallback' }, async (_url, init) => { authorization = new Headers(init?.headers).get('authorization') ?? ''; return json(vectorsFor(['synthetic'])); });
+  await fallback.embed(['synthetic']); assert.equal(authorization, 'Bearer env-fallback');
 });
 
 test('end to end over real HTTP and the CLI: embed sync, semantic search, auto becomes hybrid, status and capabilities, keyword unaffected', async t => {

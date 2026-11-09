@@ -48,11 +48,12 @@ Built-in HTTP backends (`packages/models/`) speak OpenAI chat-completions and ar
 
 ```yaml
 model:
-  provider: ollama            # ollama | openai | openai-compatible | null
+  provider: ollama            # ollama | openai | openai-compatible | claude-cli | codex-cli | auto | null
   modelName: llama3.1
   allowNetwork: false         # required true for any non-loopback endpoint
   baseUrl: http://127.0.0.1:11434/v1   # optional; defaults per provider
   apiKeyEnv: OPENAI_API_KEY   # NAME of an env var; keys are never stored in the vault
+  apiKeyRef: model-provider   # optional secret-store name; secret values never enter mdb.yaml
   timeoutMs: 60000            # 100..600000
   maxRetries: 2               # 0..6, transient failures only (network, 408, 429, 5xx)
   maxInputTokens: 12000       # documents are trimmed to fit; estimate is chars/4
@@ -67,7 +68,7 @@ Guarantees, each covered by `tests/models.test.ts` or `tests/pipelines.test.ts`:
 
 - **Strict schema.** Output must be one JSON object with only `kind,title,body,evidence,status,metadata`; unknown fields, prototype keys, oversize or truncated output, and missing evidence are `INVALID_MODEL_OUTPUT` and dead-letter the job. `null`/`""` optional fields are treated as absent (observed from a real model).
 - **No direct writes.** Output becomes a staged proposal in `.mdb/intelligence/`. Only `review(approve)` commits, and it re-validates evidence and re-runs the deterministic critic. Evidence must cite documents that were actually sent.
-- **Privacy.** A `remote` provider is blocked (job `blocked`, provider never called) for any job whose scope is a workspace or whose documents include workspace content, unless `allowPrivateContentToRemote: true`. Secrets matching the redaction patterns are removed from every prompt. Non-loopback endpoints must be https and need `allowNetwork`.
+- **Privacy.** Remote requests need `allowNetwork: true`; any request containing vault content also needs `allowPrivateContentToRemote: true`. Secrets matching the redaction patterns are removed from prompts. Non-loopback endpoints must be https.
 - **Errors.** Provider errors carry fixed messages; response bodies, prompts, headers and keys are never stored or logged. Credential/404 failures block the job; transient ones retry with exponential backoff (honoring `Retry-After`, capped 30 s); unknown exceptions become a generic message.
 - **Cancellation.** `run({signal})` and Ctrl-C in the CLI abort in-flight requests; the job returns to `pending` without consuming an attempt.
 
@@ -84,7 +85,9 @@ mdb model set --provider none                    # deterministic maintenance onl
 mdb model test                                   # explicit: one synthetic prompt (no vault content), reports latency
 ```
 
-`set` validates the candidate (builds the provider, no call) and refuses to save an invalid one unless `--no-check`. Switching between a local agent and an API drops the other kind's fields (`baseUrl`, `apiKeyEnv`, `command`, `modelName`). Keys are read from the named environment variable only. `ENGRAM_MODEL_PROVIDER` still overrides the file and `show` says so. Remote providers (agent CLIs by default, non-loopback APIs) receive no private workspace content unless `--allow-private-to-remote`.
+`set` validates the candidate (builds the provider, no call) and refuses to save an invalid one unless `--no-check`. Switching provider kinds drops only incompatible command fields; optional base URL and key-source overrides remain available to either provider kind. Keys resolve from `model.apiKeyRef` first and then `apiKeyEnv`; `show` reports only the source and set/unset state. `ENGRAM_MODEL_PROVIDER` still overrides the file and `show` says so. Remote requests need network consent, and requests containing vault content need both network and private-content consent.
+
+The dashboard uses the same settings model. Claude Code URL/key overrides are optional and become child-only `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`; Codex overrides are optional and become `OPENAI_API_KEY` plus the verified `-c openai_base_url="<url>"` option. With no override the CLI's own login remains in use. Ollama defaults to loopback, and an OpenAI-compatible provider requires its endpoint URL. The UI's secret route writes only through the shared secret store under `${XDG_CONFIG_HOME:-$HOME/.config}/engram/secrets/`, with a 0700 directory and 0600 secret file; GET settings exposes only `apiKeySet` and `apiKeySource`. Saving and removing a key require an authenticated CSRF-protected dashboard session and password re-authentication. The dashboard's typed remote confirmation sets both `model.allowNetwork` and `model.allowPrivateContentToRemote`; local endpoints need neither. Revoking consent clears those gates, and no secret value is written to the vault config, audit, response, or log.
 
 ### Project-specific insight injection
 
@@ -96,7 +99,7 @@ mdb project relevance show --workspace my-project      # none | model | stale
 mdb project relevance clear --workspace my-project     # back to the deterministic order
 ```
 
-Only accepted, non-sensitive insights (global and this project's) are sent, plus up to 20 open task titles. The model returns ids only (`relevant` in order, `irrelevant`); unknown, repeated or overlapping ids reject the whole answer, and claim text always comes from the vault. A stored ranking applies only while the accepted set is unchanged (hash); otherwise injection is exactly the deterministic output. A fresh ranking can drop *global* insights marked irrelevant and reorders the rest; project-labelled insights are never dropped. With a remote provider and `allowPrivateContentToRemote: false` nothing is sent (`skipped_private`). Remote clients read the ranking through the read-only `mdb_insight_relevance` tool; they never compute it.
+Only accepted, non-sensitive insights (global and this project's) are sent, plus up to 20 open task titles. The model returns ids only (`relevant` in order, `irrelevant`); unknown, repeated or overlapping ids reject the whole answer, and claim text always comes from the vault. A stored ranking applies only while the accepted set is unchanged (hash); otherwise injection is exactly the deterministic output. A fresh ranking can drop *global* insights marked irrelevant and reorders the rest; project-labelled insights are never dropped. With a remote provider and incomplete remote/content consent nothing is sent (`skipped_private`). Remote clients read the ranking through the read-only `mdb_insight_relevance` tool; they never compute it.
 
 ## Critic and profile rules
 
@@ -112,14 +115,18 @@ Deterministic critic (`packages/intelligence/critic.ts`), always run first: reje
 
 | Value | Backend | Notes |
 |---|---|---|
-| `auto` (default) | first of `claude`, then `codex` found on PATH | unavailable, with a clear reason, when neither is installed; jobs then block instead of faking output |
+| `auto` (default) | first of `claude`, then `codex` found on PATH or the fixed user install directories | unavailable, with a clear reason, when neither is installed; jobs then block instead of faking output |
 | `claude-cli` | `claude -p --output-format text --tools "" --no-session-persistence --disable-slash-commands --strict-mcp-config --setting-sources ""` | prompt on stdin; no tools, hooks, MCP or session files |
 | `codex-cli` | `codex exec --sandbox read-only --ephemeral --skip-git-repo-check -C <tmp> -o <file> -` | prompt on stdin, answer read from the last-message file |
-| `openai`, `ollama`, `openai-compatible` | OpenAI chat-completions HTTP API | see above; `baseUrl`, `modelName`, `apiKeyEnv` |
+| `openai`, `ollama`, `openai-compatible` | OpenAI chat-completions HTTP API | see above; `baseUrl`, `modelName`, `apiKeyEnv` or `apiKeyRef` |
 | `null` | none | deterministic maintenance only |
 
-Agent CLI specifics: each call runs in a throwaway directory, with `ENGRAM_DATA_DIR`/`MDB_ROOT` removed from its environment, stderr discarded, stdout capped at 2 MB, a timeout (default 180 s) that kills the process, cancellation that kills it, and one retry after a timeout or signal. `model.command` overrides the executable path, `model.modelName` is passed as `--model`/`-m`.
+Agent CLI specifics: each call runs the resolved absolute executable in a throwaway directory, with an allowlisted environment (PATH is rebuilt from that executable's directory, the active Node runtime, fixed system directories and common install directories), stderr discarded, stdout capped at 2 MB, a timeout (default 180 s) that kills the process, cancellation that kills it, and one retry after a timeout or signal. `model.command` overrides the executable, `model.modelName` is passed as `--model`/`-m`. `model.baseUrl` and the resolved API key are optional child-only overrides: Claude receives `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`; Codex receives `OPENAI_API_KEY` and `-c openai_base_url="<url>"`. Codex CLI 0.166.0 was run against a loopback fake server using the `-c` base-URL setting; the server recorded `POST /v1/responses`, confirming URL routing. The probe stopped after recording the request because the fake server did not implement Codex's streaming response protocol, so successful completion and Codex request authentication were not verified. `OPENAI_API_KEY` injection was verified with a fake CLI script that captured its child environment; `OPENAI_BASE_URL` was not separately tested and is not used. A missing override leaves the CLI's saved login/configuration in use. The dashboard's `GET /api/models/detect` lists only the two supported CLIs, their absolute path/version when found, Ollama model names from a two-second loopback probe, provider ids, and whether `ENGRAM_MODEL_PROVIDER` is set; it does not report credentials or authentication status.
 
-Privacy: `claude` and `codex` send prompts to their vendor, so they count as **remote**. Jobs over private workspace content are blocked unless `model.allowPrivateContentToRemote: true`; global content (wiki, shared, profile) is sent on an explicit `mdb intelligence run`. Set `model.locality: local` only for a wrapper that keeps data on this machine. Output from every backend takes the same path: strict schema, evidence check, critic, staged proposal, human review.
+Privacy: `claude`, `codex`, and OpenAI count as **remote**; an Ollama or OpenAI-compatible endpoint is local only when its host is loopback. Remote model requests need `model.allowNetwork: true`; any request that includes vault content also needs `model.allowPrivateContentToRemote: true`. Loopback model endpoints need neither flag. Built-in provider identity and endpoint host determine locality; an explicit locality setting cannot make a vendor CLI or non-loopback URL local. SDK-supplied providers use their declared locality. Output from every backend takes the same path: strict schema, evidence check, critic, staged proposal, human review.
+
+API keys are never stored in `mdb.yaml`. `model.apiKeyRef` names a secret in `${XDG_CONFIG_HOME:-$HOME/.config}/engram/secrets/`; the name must match `[a-z0-9][a-z0-9._-]{0,63}`. The secret directory and files are mode 0700 and 0600, writes use a synced temporary file and atomic rename, and readers reject symlinks, foreign ownership, or loose modes. `apiKeyRef` takes precedence over `apiKeyEnv`; model status reports only the source and set/unset state. Embeddings have the matching `embedding.apiKeyRef` field for later provider work.
 
 OpenAI-compatible API behavior covered by tests: trailing-slash base URLs, bearer auth only when a key exists, `stream:false`, output-token cap, `response_format` retried once without it when a server rejects it with 400/422, array-style `content` parts, bounded retries with `Retry-After`, timeouts, cancellation, sanitized errors.
+
+Embedding provider settings (`embedding.*`) are independent of `model.*`. They support Ollama, OpenAI, OpenAI-compatible endpoints and the explicitly downloaded local bge-m3 model. API keys use the independent `embedding-provider` secret reference and are never stored in vault configuration.

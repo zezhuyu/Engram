@@ -82,7 +82,7 @@ test('Linux launchers retain client scope, hide token from argv and default serv
   const f = await fixture();
   try {
     for (const role of ['client', 'server']) {
-      const env = { ...f.env }; delete env.MDB_MCP_HTTP_HOST; delete env.MDB_MCP_TRANSPORT;
+      const env = { ...f.env, ENGRAM_DASHBOARD: 'off' }; delete env.MDB_MCP_HTTP_HOST; delete env.MDB_MCP_TRANSPORT;
       const result = spawnSync(join(f.options(role).bundle, `engram-${role}`), [], { env, encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
       const args = await readFile(env.CAPTURE, 'utf8');

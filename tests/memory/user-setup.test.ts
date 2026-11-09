@@ -22,10 +22,11 @@ const MCP = resolve('bin/mdb-mcp.js');
 async function temp(t: Cleanup, prefix: string): Promise<string> { const d = await mkdtemp(path.join(tmpdir(), prefix)); t.after(() => rm(d, { recursive: true, force: true })); return d; }
 /** Redirects every user-level file into a temp dir; the real home is never touched. */
 async function sandbox(t: Cleanup) {
-  const base = await temp(t, 'engram-user-'), dataRoot = path.join(base, 'data'); const saved = { data: process.env.ENGRAM_DATA_DIR, cfg: process.env.ENGRAM_USER_CONFIG, spool: process.env.ENGRAM_REMOTE_SPOOL, tok: process.env.ENGRAM_USER_TOKEN };
+  const base = await temp(t, 'engram-user-'), dataRoot = path.join(base, 'data'); const saved = { home: process.env.HOME, claude: process.env.CLAUDE_CONFIG_DIR, codex: process.env.CODEX_HOME, data: process.env.ENGRAM_DATA_DIR, cfg: process.env.ENGRAM_USER_CONFIG, spool: process.env.ENGRAM_REMOTE_SPOOL, tok: process.env.ENGRAM_USER_TOKEN };
+  process.env.HOME = base; delete process.env.CLAUDE_CONFIG_DIR; delete process.env.CODEX_HOME;
   process.env.ENGRAM_DATA_DIR = dataRoot; delete process.env.ENGRAM_USER_CONFIG; delete process.env.ENGRAM_REMOTE_SPOOL;
-  t.after(() => { for (const [k, v] of [['ENGRAM_DATA_DIR', saved.data], ['ENGRAM_USER_CONFIG', saved.cfg], ['ENGRAM_REMOTE_SPOOL', saved.spool], ['ENGRAM_USER_TOKEN', saved.tok]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
-  return { base, dataRoot, paths: { claudeJsonPath: path.join(base, 'claude.json'), codexConfigPath: path.join(base, 'codex', 'config.toml'), settingsPaths: { 'claude-code': path.join(base, 'claude-settings.json'), codex: path.join(base, 'codex-hooks.json') } } };
+  t.after(() => { for (const [k, v] of [['HOME', saved.home], ['CLAUDE_CONFIG_DIR', saved.claude], ['CODEX_HOME', saved.codex], ['ENGRAM_DATA_DIR', saved.data], ['ENGRAM_USER_CONFIG', saved.cfg], ['ENGRAM_REMOTE_SPOOL', saved.spool], ['ENGRAM_USER_TOKEN', saved.tok]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  return { base, dataRoot, paths: { claudeJsonPath: path.join(base, 'claude.json'), codexConfigPath: path.join(base, 'codex', 'config.toml'), settingsPaths: { 'claude-code': path.join(base, 'claude-settings.json'), codex: path.join(base, 'codex-hooks.json') }, claudeInstructionsPath: path.join(base, '.claude', 'CLAUDE.md'), codexInstructionsPath: path.join(base, '.codex', 'AGENTS.md') } };
 }
 async function server(t: Cleanup) {
   const { root } = await disposableVault(t); const owner = new Engram(root); await owner.createWorkspace('personal');
@@ -50,7 +51,7 @@ test('setup --user needs explicit consent, a permitted server URL, and records n
   const base = { hosts: ['claude-code' as const], mcpUrl: 'https://engram.example.com/mcp', tokenEnv: 'ENGRAM_USER_TOKEN', registrationId: 'reg_u1', principalId: 'me', ...paths };
   await assert.rejects(setupUser({ ...base }), (e: unknown) => e instanceof MDBError && /explicit consent/.test(e.message));
   await assert.rejects(setupUser({ ...base, consent: true, mcpUrl: 'http://203.0.113.9:3333/mcp' }), (e: unknown) => e instanceof MDBError);
-  assert.deepEqual(await userStatus(), { configured: false });
+  const status = await userStatus(); assert.equal(status.configured, false); assert.deepEqual(Object.values(status.instructions as Record<string, { status: string }>).map(item => item.status), ['absent', 'absent']);
   await assert.rejects(readFile(paths.settingsPaths['claude-code']), 'nothing was written before consent');
 });
 
@@ -61,23 +62,36 @@ test('setup --user installs hooks and MCP for both hosts without touching other 
   await mkdir(path.dirname(paths.codexConfigPath), { recursive: true }); await writeFile(paths.codexConfigPath, '[features]\nhooks = true\n');
   const options = { hosts: ['claude-code' as const, 'codex' as const], mcpUrl: 'https://engram.example.com/mcp', tokenEnv: 'ENGRAM_USER_TOKEN', registrationId: 'reg_u1', principalId: 'me', exclude: ['secret-client'], consent: true, ...paths };
   const first = await setupUser(options); assert.equal(first.workspaceId, 'personal');
+  assert.equal((first.instructions as Record<string, { changed?: boolean }>)['claude-code']?.changed, true, 'setup reports per-host edit results');
+  assert.match(await readFile(path.join(base, '.claude', 'CLAUDE.md'), 'utf8'), /engram:user:start/);
   assert.ok(first.configPath.startsWith(dataRoot + path.sep), 'Engram config stays under the configured data root');
   for (const hostPath of [paths.claudeJsonPath, paths.codexConfigPath, ...Object.values(paths.settingsPaths)]) assert.equal(path.relative(dataRoot, hostPath).startsWith('..'), true, 'host settings are an explicitly selected external integration destination');
   const configText = await readFile(first.configPath, 'utf8'); assert.equal((await stat(first.configPath)).mode & 0o777, 0o600); assert.doesNotMatch(configText, /token":|Bearer|secret":/i); assert.deepEqual(JSON.parse(configText).excludeProjects, ['secret-client']);
   const claude = JSON.parse(await readFile(paths.claudeJsonPath, 'utf8')); assert.equal(claude.numStartups, 7); assert.ok(claude.mcpServers.other, 'unrelated MCP server kept'); assert.equal(claude.mcpServers.engram.headers['X-Engram-Workspace'], 'personal');
   assert.match(await readFile(paths.codexConfigPath, 'utf8'), /\[features\]\nhooks = true/); assert.match(await readFile(paths.codexConfigPath, 'utf8'), /"X-Engram-Workspace" = "personal"/);
+  const codexHooks = JSON.parse(await readFile(paths.settingsPaths.codex, 'utf8')) as { hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> } };
+  assert.ok(codexHooks.hooks?.SessionStart?.some(event => event.hooks?.some(hook => hook.command?.includes('memory context --host codex --user'))), 'user-level Codex SessionStart context hook is installed with no bound project');
   const settings = JSON.parse(await readFile(paths.settingsPaths['claude-code'], 'utf8')); assert.deepEqual(settings.permissions.allow, ['Read']);
   const commands = (name: string) => (settings.hooks[name] as Array<{ hooks: Array<{ command: string }> }>).flatMap(e => e.hooks.map(h => h.command));
   assert.ok(commands('UserPromptSubmit').includes('echo mine')); assert.ok(commands('UserPromptSubmit').some(c => / memory capture --user --host claude-code /.test(c) && !c.includes('--registration') && !/Bearer|token=/i.test(c)));
   assert.ok(((settings.hooks.SessionStart ?? []) as Array<{ hooks: Array<{ command: string }> }>).some(e => / memory context --host claude-code --user /.test(e.hooks[0]!.command)), 'the user-level SessionStart context hook is installed');
+  const instructionBytes = await readFile(path.join(base, '.claude', 'CLAUDE.md'), 'utf8'); await setUserPaused(true); assert.equal(await readFile(path.join(base, '.claude', 'CLAUDE.md'), 'utf8'), instructionBytes); await setUserPaused(false);
   const settingsBytes = await readFile(paths.settingsPaths['claude-code'], 'utf8'); const claudeBytes = await readFile(paths.claudeJsonPath, 'utf8'); const tomlBytes = await readFile(paths.codexConfigPath, 'utf8');
   await setupUser(options); assert.equal(await readFile(paths.settingsPaths['claude-code'], 'utf8'), settingsBytes); assert.equal(await readFile(paths.claudeJsonPath, 'utf8'), claudeBytes); assert.equal(await readFile(paths.codexConfigPath, 'utf8'), tomlBytes, 'a second run changes nothing');
-  assert.equal((await userStatus()).configured, true);
+  assert.equal((await userStatus()).configured, true); assert.equal(((await userStatus()).instructions['claude-code'] as { status: string }).status, 'installed');
   const removed = await uninstallUser(paths); assert.ok(removed.hooksRemoved >= 2); assert.deepEqual(removed.mcpRemoved.sort(), ['claude-code', 'codex']); assert.equal(removed.configRemoved, true);
   const after = JSON.parse(await readFile(paths.settingsPaths['claude-code'], 'utf8'));
   assert.doesNotMatch(JSON.stringify(after), /engram-mdb/, 'no Engram hook of any kind remains'); assert.deepEqual(after.hooks.UserPromptSubmit, [{ hooks: [{ type: 'command', command: 'echo mine' }] }], 'only our entries were removed');
   assert.ok(JSON.parse(await readFile(paths.claudeJsonPath, 'utf8')).mcpServers.other); assert.doesNotMatch(await readFile(paths.codexConfigPath, 'utf8'), /engram/); assert.equal((await userStatus()).configured, false);
+  assert.equal(((await userStatus()).instructions['claude-code'] as { status: string }).status, 'absent');
   void base; recordCase({ suite: 'memory', name: 'user-setup-install-uninstall', status: 'PASS' });
+});
+
+test('setup --user --no-instructions leaves global host files alone', async t => {
+  const { base, paths } = await sandbox(t);
+  const custom = path.join(base, '.claude', 'CLAUDE.md'); await mkdir(path.dirname(custom), { recursive: true }); await writeFile(custom, '# User instructions\n');
+  await setupUser({ hosts: ['claude-code'], mcpUrl: 'https://engram.example.com/mcp', tokenEnv: 'ENGRAM_USER_TOKEN', registrationId: 'reg_u2', principalId: 'me', consent: true, noInstructions: true, ...paths });
+  assert.equal(await readFile(custom, 'utf8'), '# User instructions\n');
 });
 
 test('a conflicting hand-written engram MCP entry is never overwritten', async t => {

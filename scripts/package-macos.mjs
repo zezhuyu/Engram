@@ -12,14 +12,37 @@ function run(executable, args) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${executable} exited with status ${result.status}`);
 }
+/** Server worker body: the MCP gateway plus, unless ENGRAM_DASHBOARD=off, the owner dashboard on loopback.
+ *  The dashboard prints a one-time setup token, so its output goes to a private file, never the shared log. */
+function serverLauncherBody() {
+  return [
+    'export MDB_MCP_TRANSPORT=http',
+    'export MDB_MCP_TOOLSET="${MDB_MCP_TOOLSET:-remote-web}"',
+    'export MDB_MCP_HTTP_HOST="${MDB_MCP_HTTP_HOST:-127.0.0.1}"',
+    'NODE="$BACKEND/runtime/bin/node"',
+    'case "${ENGRAM_DASHBOARD:-on}" in off|0|false|no) exec "$NODE" "$BACKEND/app/bin/mdb-mcp.js" ;; esac',
+    'DASHBOARD_NOTE="${ENGRAM_DASHBOARD_NOTE:-$HOME/.config/engram/dashboard.txt}"',
+    '( umask 077; while :; do mkdir -p "$(dirname "$DASHBOARD_NOTE")"; : > "$DASHBOARD_NOTE"; chmod 600 "$DASHBOARD_NOTE"; "$NODE" "$BACKEND/app/bin/mdb.js" dashboard --host "${ENGRAM_DASHBOARD_HOST:-127.0.0.1}" --port "${ENGRAM_DASHBOARD_PORT:-4871}" > "$DASHBOARD_NOTE" 2>&1; sleep 10; done ) &',
+    'DASH=$!',
+    'MCP=""',
+    // set -e is active: every step must tolerate an already-exited process or the dashboard loop is left running.
+    'cleanup() { kill "$DASH" 2>/dev/null || true; pkill -P "$DASH" 2>/dev/null || true; if [ -n "$MCP" ]; then kill "$MCP" 2>/dev/null || true; fi; }',
+    "trap 'cleanup; exit 0' TERM INT",
+    'trap cleanup EXIT',
+    '"$NODE" "$BACKEND/app/bin/mdb-mcp.js" &',
+    'MCP=$!',
+    'wait "$MCP"',
+    ''
+  ].join('\n');
+}
 export function workerLauncher(role, os = 'darwin') {
   if (!['client', 'server'].includes(role)) throw new Error('Unknown app role');
   if (!['darwin', 'linux'].includes(os)) throw new Error('Unknown worker platform');
   const backend = os === 'linux' ? '$HERE/backend' : '$HERE/../Resources/backend';
   const stat = os === 'linux' ? '/usr/bin/stat -c %a' : '/usr/bin/stat -f %Lp';
   const common = `#!/bin/sh\nset -eu\nHERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nBACKEND="${backend}"\nCONFIG="$HOME/.config/engram/${role}.env"\nload_env() {\n  if [ -f "$1" ]; then\n    mode="$(${stat} "$1")"\n    case "$mode" in 600|400) ;; *) echo "Configuration must have mode 600 or 400" >&2; exit 1 ;; esac\n    set -a; . "$1"; set +a\n  fi\n}\nload_env "$HOME/.config/engram/engram.env"\nload_env "$CONFIG"\n`;
-  if (role === 'server') return common + `export MDB_MCP_TRANSPORT=http\nexport MDB_MCP_TOOLSET="\${MDB_MCP_TOOLSET:-remote-web}"\nexport MDB_MCP_HTTP_HOST="\${MDB_MCP_HTTP_HOST:-127.0.0.1}"\nexec "$BACKEND/runtime/bin/node" "$BACKEND/app/bin/mdb-mcp.js"\n`;
-  return common + `: "\${ENGRAM_MCP_URL:?Set ENGRAM_MCP_URL in client.env}"\n: "\${ENGRAM_MCP_TOKEN:?Set ENGRAM_MCP_TOKEN in client.env}"\nset -- outbox watch --url "$ENGRAM_MCP_URL" --token-env ENGRAM_MCP_TOKEN\nif [ -n "\${ENGRAM_WORKSPACE:-}" ]; then set -- "$@" --workspace "$ENGRAM_WORKSPACE"; fi\nif [ -n "\${ENGRAM_PROJECT_DIR:-}" ]; then set -- "$@" --project-dir "$ENGRAM_PROJECT_DIR"; fi\nif [ -n "\${ENGRAM_OUTBOX:-}" ]; then set -- "$@" --outbox "$ENGRAM_OUTBOX"; fi\nexec "$BACKEND/runtime/bin/node" "$BACKEND/app/bin/mdb.js" "$@"\n`;
+  if (role === 'server') return common + serverLauncherBody();
+  return common + `: "\${ENGRAM_MCP_URL:?Set ENGRAM_MCP_URL in client.env}"\n: "\${ENGRAM_MCP_TOKEN:?Set ENGRAM_MCP_TOKEN in client.env}"\nset -- outbox watch --url "$ENGRAM_MCP_URL" --token-env ENGRAM_MCP_TOKEN\nif [ -n "\${ENGRAM_WORKSPACE:-}" ]; then set -- "$@" --workspace "$ENGRAM_WORKSPACE"; fi\nif [ -n "\${ENGRAM_PROJECT_DIR:-}" ]; then set -- "$@" --project-dir "$ENGRAM_PROJECT_DIR"; fi\nif [ -n "\${ENGRAM_OUTBOX:-}" ]; then set -- "$@" --outbox "$ENGRAM_OUTBOX"; fi\nNODE="$BACKEND/runtime/bin/node"\ncase "\${ENGRAM_DASHBOARD:-on}" in off|0|false|no) exec "$NODE" "$BACKEND/app/bin/mdb.js" "$@" ;; esac\nDASHBOARD_NOTE="\${ENGRAM_DASHBOARD_NOTE:-$HOME/.config/engram/client-dashboard.txt}"\nDASHBOARD_LOG="\${ENGRAM_CLIENT_DASHBOARD_LOG:-$HOME/Library/Logs/Engram/client-dashboard.log}"\n( umask 077; while :; do mkdir -p "$(dirname "$DASHBOARD_NOTE")" "$(dirname "$DASHBOARD_LOG")"; : > "$DASHBOARD_NOTE"; chmod 600 "$DASHBOARD_NOTE"; MDB_DASHBOARD_TOKEN_NOTE="$DASHBOARD_NOTE" "$NODE" "$BACKEND/app/bin/mdb.js" dashboard --client --host 127.0.0.1 --port "\${ENGRAM_CLIENT_DASHBOARD_PORT:-4872}" > "$DASHBOARD_NOTE" 2>> "$DASHBOARD_LOG"; sleep 10; done ) &\nDASH=$!\nOUTBOX=""\ncleanup() { kill "$DASH" 2>/dev/null || true; pkill -P "$DASH" 2>/dev/null || true; if [ -n "$OUTBOX" ]; then kill "$OUTBOX" 2>/dev/null || true; fi; }\ntrap 'cleanup; exit 0' TERM INT\ntrap cleanup EXIT\n"$NODE" "$BACKEND/app/bin/mdb.js" "$@" &\nOUTBOX=$!\nSTATUS=0\nwait "$OUTBOX" || STATUS=$?\nexit "$STATUS"\n`;
 }
 export async function packageMacApps(destination, backend) {
   if (platform() !== 'darwin') throw new Error('Build macOS apps on macOS');
@@ -34,7 +57,7 @@ export async function packageMacApps(destination, backend) {
       for (const scale of [1, 2]) {
         const pixels = size * scale;
         const file = join(iconset, `icon_${size}x${size}${scale === 2 ? '@2x' : ''}.png`);
-        run('sips', ['--resampleHeightWidthMax', String(pixels), join(root, 'macos/assets/icon.png'), '--out', file]);
+        run('sips', ['--resampleHeightWidthMax', String(pixels), join(root, 'macos/assets/icon-white.png'), '--out', file]);
         run('sips', ['--padToHeightWidth', String(pixels), String(pixels), '--padColor', '000000', file]);
       }
     }

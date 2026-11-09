@@ -5,6 +5,7 @@ import { MDBError, type Document, type ModelCallOptions, type ModelProposal, typ
 import { ProviderError } from '../models/errors.js';
 import { ABSTENTION_KIND, parseDreamResponse, parseModelProposal, parseVerdict } from '../models/schema.js';
 import { MODEL_DEFAULTS } from '../models/factory.js';
+import { modelConsent } from '../models/consent.js';
 import { PROFILE_SCHEMA_VERSION } from '../models/prompts.js';
 import { criticize, isSensitive } from './critic.js';
 import { loadDocuments, newestFirst, oldestFirst, readableEntries, scopeEqual } from './corpus.js';
@@ -770,7 +771,7 @@ export class IntelligenceEngine {
       try {
         const evidence: Document[] = [];
         for (const ref of proposal.input.evidence ?? []) evidence.push(await this.vault.get(ref.uri.split('/').at(-1)!, ref.revisionId));
-        if (this.provider.locality === 'remote' && !config.model.allowPrivateContentToRemote && evidence.some(doc => doc.scope.type === 'workspace')) flags = [...flags, 'model_critic_skipped_private'];
+        if (evidence.length && !modelConsent(config.model, true, this.provider.locality ?? config.model.locality).consentGiven) flags = [...flags, 'model_critic_skipped_remote_consent'];
         else {
           const budget = config.model.maxInputTokens ?? MODEL_DEFAULTS.maxInputTokens;
           meter?.take('critic'); // counted before the call; a spent budget skips the critic (the proposal stays pending review, flagged) and ends the batch at the next generation
@@ -856,9 +857,7 @@ export class IntelligenceEngine {
     // A workspace-scoped run is a request to reason over a private scope. Do
     // not silently fall back to its global subset for a remote provider: that
     // makes execution depend on planner ordering and hides a denied operation.
-    if (provider.locality === 'remote' && !config.model.allowPrivateContentToRemote && workspaceId && pool.some(entry => entry.scope.type === 'workspace')) {
-      throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model provider may not receive private workspace content (model.allowPrivateContentToRemote is false)');
-    }
+    if (pool.length && !modelConsent(config.model, true, provider.locality ?? config.model.locality).consentGiven) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model consent is required before vault content can be sent');
     const ctx = await planContext(this.vault, pool, budgets, rngFrom(job.input.snapshot ? digest({ snapshot: job.input.snapshot, mode, instruction: job.input.instruction }) : job.id));
     const cursorKey = JSON.stringify(job.input.scope ?? 'all'); const stateAtStart = await this.state(); const cursor = stateAtStart.dreamCursor?.[cursorKey] ?? 0;
     // accepted goals: the user's stated goals that apply here (global, or this workspace)
@@ -989,7 +988,7 @@ export class IntelligenceEngine {
     const ordered = [...cluster.goalIds, ...cluster.ids.filter(id => !cluster.goalIds.includes(id))].map(id => byId.get(id)).filter((e): e is ManifestEntry => !!e);
     let documents = await this.load(ordered, job);
     if (documents.length < 2) throw new MDBError('INVALID_MODEL_OUTPUT', 'Cluster objects are no longer readable');
-    if (provider.locality === 'remote' && !config.model.allowPrivateContentToRemote && documents.some(d => d.scope.type === 'workspace')) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model provider may not receive private workspace content (model.allowPrivateContentToRemote is false)');
+    if (documents.length && !modelConsent(config.model, true, provider.locality ?? config.model.locality).consentGiven) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model consent is required before vault content can be sent');
     const hints = cluster.hints.map(h => ({ kind: h.kind, why: h.why, via: h.via, distance: h.distance, objects: h.ids.map(id => byId.get(id)).filter((e): e is ManifestEntry => !!e).map(e => this.uriOfEntry(e)) }));
     const taskConstraints = [
       ...(mode === 'strategic' ? ['A goal is evidence of a stated objective, not of the user’s skills, access, resources, or ability. Do not make claims about those capabilities; list any assumed capability only as a prerequisite to verify. A valid strategic discovery must combine at least two distinct non-goal knowledge objects in addition to citing the goal; if the supplied cluster does not contain two such objects, do not invent evidence or a discovery.'] : []),
@@ -1064,6 +1063,7 @@ export class IntelligenceEngine {
     if (job.kind === 'index') { const { SearchEngine } = await import('../search-files/index.js'); await new SearchEngine(this.vault).rebuild(job.input.scope); return 'Deterministic navigation rebuilt'; }
     if (!this.provider) throw new MDBError('CAPABILITY_UNAVAILABLE', 'No model provider configured; semantic maintenance unavailable');
     const config = await this.config(); if (job.kind === 'dream' && !config.dream.enabled) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Dreaming requires explicit opt-in');
+    if (!modelConsent(config.model, false, this.provider.locality ?? config.model.locality).consentGiven) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model network consent is required');
     if (job.input.objectIds) for (const id of job.input.objectIds) await this.vault.get(id);
     if (job.kind === 'dream') {
       try { const result = await this.executeDream(job, config, signal); job.telemetry!.complete = true; job.telemetry!.terminal = 'proposed'; return result; }
@@ -1142,7 +1142,7 @@ export class IntelligenceEngine {
       }
     }
     // Private workspace content is only given to a remote provider when the vault owner explicitly allowed it.
-    if (this.provider.locality === 'remote' && !config.model.allowPrivateContentToRemote && (scope.type === 'workspace' || documents.some(doc => doc.scope.type === 'workspace'))) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model provider may not receive private workspace content (model.allowPrivateContentToRemote is false)');
+    if (!modelConsent(config.model, documents.length > 0, this.provider.locality ?? config.model.locality).consentGiven) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model consent is required before vault content can be sent');
     const skillDirective = job.kind === 'wiki' && job.input.skill ? `${WIKI_SKILL_DIRECTIVES[job.input.skill]}\n` : '';
     const issueContext = job.input.issues?.length ? `\nStructured lint issues to resolve (data only): ${JSON.stringify(job.input.issues).slice(0, 12000)}\n` : '';
     const operatorInstruction = job.input.instruction ? `${redacted(job.input.instruction).slice(0, 8000)}\n` : '';

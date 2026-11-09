@@ -23,7 +23,7 @@ function fake(answer: (ids: string[]) => unknown, locality: 'local' | 'remote' =
   const provider: ModelProvider = { id: 'fake', locality, async generate(input) { calls.push(input); const first = input.documents[0]!; return { kind: 'insight_relevance', title: 'rank', body: JSON.stringify(answer(input.documents.map(d => d.id))), evidence: [{ uri: first.uri, revisionId: first.revisionId }] }; } };
   return { provider, calls };
 }
-const config = async (client: Engram, allowPrivate = false) => { const c = await client.vault.config(); return { ...c, model: { ...c.model, allowPrivateContentToRemote: allowPrivate } }; };
+const config = async (client: Engram, allowPrivate = false) => { const c = await client.vault.config(); return { ...c, model: { ...c.model, allowNetwork: true, allowPrivateContentToRemote: allowPrivate } }; };
 const claims = (p: { preferences: Array<{ claim: string }>; insights: Array<{ claim: string }> }) => [...p.preferences, ...p.insights].map(i => i.claim);
 
 test('a fresh model ranking reorders and drops irrelevant GLOBAL insights; project insights are kept and claims stay the vault\'s', async t => {

@@ -93,7 +93,7 @@ async function listCorpusFiles(root: string): Promise<CorpusManifest['files']> {
   const walk = async (dir: string) => {
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name), rel = path.relative(root, full).split(path.sep).join('/');
-      if (rel === MANIFEST || rel.startsWith('.mdb/indexes/') || rel.startsWith('.mdb/locks/') || rel.startsWith('.mdb/adaptive/')) continue;
+      if (rel === MANIFEST || rel === '.mdb/workspace-create-audit.jsonl' || rel.startsWith('.mdb/indexes/') || rel.startsWith('.mdb/locks/') || rel.startsWith('.mdb/adaptive/')) continue;
       if (entry.isSymbolicLink()) throw new Error(`Benchmark corpus may not contain symlinks: ${rel}`);
       if (entry.isDirectory()) await walk(full);
       else if (entry.isFile()) { const bytes = await fs.readFile(full); files.push({ path: rel, bytes: bytes.byteLength, sha256: hash(bytes) }); }
@@ -120,8 +120,8 @@ async function verifyCorpus(root: string, manifest: CorpusManifest): Promise<voi
     throw new Error(`Corpus journal is not a contiguous ${manifest.documents}-document put sequence`);
   }
 }
-function deterministicFactories(seed: number, completedDocuments = 0): { idFactory: (prefix: string) => string; now: () => Date } {
-  let counter = completedDocuments * 3, tick = completedDocuments;
+function deterministicFactories(seed: number, completedDocuments = 0, completedWorkspaceCreates = 0): { idFactory: (prefix: string) => string; now: () => Date } {
+  let counter = completedDocuments * 3, tick = completedDocuments + completedWorkspaceCreates;
   return {
     idFactory: prefix => `${prefix}_${createHash('sha256').update(`${seed}:${counter++}:${prefix}`).digest('hex').slice(0, 32)}`,
     now: () => new Date(Date.UTC(2020, 0, 1) + tick++ * 1000)
@@ -164,7 +164,7 @@ async function build(opts: Record<string, string | boolean>): Promise<void> {
     if (workspaces.length !== workspaceCount || workspaces.some(workspace => !expectedIds.has(workspace.id))) throw new Error('Cannot resume safely: workspace set differs from deterministic build');
     resumeEvents = events;
   }
-  const factories = deterministicFactories(seed, completed);
+  const factories = deterministicFactories(seed, completed, resume ? Math.min(20, Math.max(2, Math.floor(size / 200))) : 0);
   const vault = new Vault(root, OWNER, factories);
   const sizeOf = Math.min(20, Math.max(2, Math.floor(size / 200)));
   let memoryTimer: ReturnType<typeof setInterval> | undefined;

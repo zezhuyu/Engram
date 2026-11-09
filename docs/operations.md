@@ -43,6 +43,8 @@ The HTTP MCP server stops accepting requests on SIGINT/SIGTERM and gives active 
 
 ## Sessions and reviewed work
 
+For owner-run, resumable migration of a Markdown wiki and its raw source files, see [Wiki import](wiki-import.md). Use fixture trees for validation; the importer reads source trees and leaves them unchanged.
+
 ```bash
 node bin/mdb.js session start --scope workspace:research:task --root ./my-vault
 node bin/mdb.js session observe --session SESSION_ID --body 'Explicit authored observation' --root ./my-vault

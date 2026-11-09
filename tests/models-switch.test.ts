@@ -16,7 +16,8 @@ test('one switch: local agent <-> OpenAI-compatible API round-trips and drops th
   assert.equal(api.provider, 'ollama'); assert.equal(api.baseUrl, 'http://127.0.0.1:11434/v1'); assert.equal(api.apiKeyEnv, 'MY_KEY');
   const cli = applyModelSet(api, { localAgent: 'claude' });
   assert.equal(cli.provider, 'claude-cli');
-  for (const key of ['baseUrl', 'apiKeyEnv', 'maxOutputTokens', 'modelName'] as const) assert.equal(cli[key], undefined, `${key} must not leak into a local-agent config`);
+  for (const key of ['baseUrl', 'apiKeyEnv', 'maxOutputTokens'] as const) assert.equal(cli[key], api[key], `${key} remains available as an optional CLI override`);
+  assert.equal(cli.modelName, undefined, 'switching provider clears a provider-specific model name');
   const back = applyModelSet({ ...cli, command: '/usr/bin/claude' }, { api: 'http://127.0.0.1:1234/v1', modelName: 'm' });
   assert.equal(back.provider, 'openai-compatible'); assert.equal(back.command, undefined);
   assert.equal(applyModelSet(back, { provider: 'none' }).provider, null);
@@ -26,7 +27,8 @@ test('invalid combinations and key values are refused', async t => {
   assert.throws(() => applyModelSet({ ...base }, { provider: 'bogus' }), /Unknown provider/);
   assert.throws(() => applyModelSet({ ...base }, { localAgent: 'claude', api: 'http://x/v1' }), /mutually exclusive/);
   assert.throws(() => applyModelSet({ ...base }, { apiKeyEnv: 'sk-live-abcdef123456' }), /NAME/);
-  assert.throws(() => applyModelSet({ ...base }, { localAgent: 'codex', baseUrl: 'http://127.0.0.1:1/v1' }), /OpenAI-compatible API/);
+  const cliOverride = applyModelSet({ ...base }, { localAgent: 'codex', baseUrl: 'http://127.0.0.1:1/v1', apiKeyEnv: 'CODEX_KEY' });
+  assert.equal(cliOverride.baseUrl, 'http://127.0.0.1:1/v1'); assert.equal(cliOverride.apiKeyEnv, 'CODEX_KEY');
   const client = await fresh(t); const before = (await client.vault.config()).model;
   await assert.rejects(setModel(client.vault, { api: 'https://llm.example.com/v1', modelName: 'm' }, {}), /allowNetwork/);
   await assert.rejects(setModel(client.vault, { api: 'http://127.0.0.1:9/v1' }, {}), /modelName/);

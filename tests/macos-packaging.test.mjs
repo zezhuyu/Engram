@@ -1,10 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, writeFile, readFile, rm, access, stat } from 'node:fs/promises';
 import { tmpdir, platform } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { workerLauncher, packageMacApps } from '../scripts/package-macos.mjs';
+
+test('standalone runtime copies the keyed gateway into its private app bundle', async () => {
+  const source = await readFile(new URL('../scripts/standalone.mjs', import.meta.url), 'utf8');
+  assert.match(source, /scripts\/hosted\/keyed-gateway\.mjs/);
+  const gateway = await readFile(new URL('../scripts/hosted/keyed-gateway.mjs', import.meta.url), 'utf8');
+  assert.match(gateway, /req\.url === '\/health'/);
+  assert.match(gateway, /127\.0\.0\.1/);
+});
 
 async function fixture(role, config, mode = 0o600) {
   const root = await mkdtemp(join(tmpdir(), 'engram mac test '));
@@ -23,13 +31,32 @@ const macOnly = { skip: platform() !== 'darwin' };
 test('client worker passes quoted scope paths and keeps credential out of arguments', macOnly, async () => {
   const f = await fixture('client', 'ENGRAM_MCP_URL=https://memory.example/mcp\nENGRAM_MCP_TOKEN=fake-test-token\nENGRAM_WORKSPACE="project one"\nENGRAM_PROJECT_DIR="/a path/project"\n');
   try {
-    const run = spawnSync('/bin/sh', [f.launch], { env: f.env, encoding: 'utf8' });
+    const run = spawnSync('/bin/sh', [f.launch], { env: { ...f.env, ENGRAM_DASHBOARD: 'off' }, encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr);
     const args = await readFile(f.env.CAPTURE, 'utf8');
     assert.match(args, /outbox\nwatch\n--url\nhttps:\/\/memory.example\/mcp/);
     assert.match(args, /--workspace\nproject one\n/);
     assert.match(args, /--project-dir\n\/a path\/project\n/);
     assert.doesNotMatch(args, /fake-test-token/);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+test('client worker supervises its dashboard with private setup-token output and set-e-safe cleanup', macOnly, async () => {
+  const f = await fixture('client', 'ENGRAM_MCP_URL=https://memory.example/mcp\nENGRAM_MCP_TOKEN=fake-test-token\n');
+  try {
+    const node = join(f.root, 'App/Contents/Resources/backend/runtime/bin/node');
+    await writeFile(node, '#!/bin/sh\nprintf "ARGS:%s\\n" "$*" >> "$CAPTURE"\ncase "$*" in *dashboard*) printf "setup-token-line\\n"; sleep 3;; esac\n', { mode: 0o755 });
+    const note = join(f.root, 'client-dashboard.txt'); const log = join(f.root, 'client-dashboard.log');
+    const env = { ...f.env, ENGRAM_DASHBOARD_NOTE: note, ENGRAM_CLIENT_DASHBOARD_LOG: log, ENGRAM_CLIENT_DASHBOARD_PORT: '4896' };
+    const run = spawnSync('/bin/sh', [f.launch], { env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(run.status, 0, run.stderr);
+    const seen = await readFile(f.env.CAPTURE, 'utf8');
+    assert.match(seen, /dashboard --client --host 127\.0\.0\.1 --port 4896/);
+    assert.match(seen, /outbox watch --url https:\/\/memory\.example\/mcp/);
+    assert.equal((await stat(note)).mode & 0o777, 0o600);
+    assert.match(await readFile(note, 'utf8'), /setup-token-line/);
+    assert.doesNotMatch(await readFile(log, 'utf8').catch(() => ''), /setup-token-line/);
+    assert.match(workerLauncher('client'), /ENGRAM_DASHBOARD:-on/);
+    assert.match(workerLauncher('client'), /trap cleanup EXIT/);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 test('client worker rejects missing configuration and public-readable secret files', macOnly, async () => {
@@ -42,10 +69,25 @@ test('client worker rejects missing configuration and public-readable secret fil
 test('server worker runs the bundled server with HTTP and loopback defaults', macOnly, async () => {
   const f = await fixture('server', '');
   try {
-    const env = { ...f.env }; delete env.MDB_MCP_TRANSPORT; delete env.MDB_MCP_HTTP_HOST;
+    const env = { ...f.env, ENGRAM_DASHBOARD: 'off' }; delete env.MDB_MCP_TRANSPORT; delete env.MDB_MCP_HTTP_HOST;
     assert.equal(spawnSync('/bin/sh', [f.launch], { env }).status, 0);
     assert.match(await readFile(f.env.CAPTURE, 'utf8'), /app\/bin\/mdb-mcp.js/);
     assert.equal(await readFile(f.env.STATE, 'utf8'), 'http|127.0.0.1');
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+test('server worker also starts the dashboard on loopback by default and keeps its setup token out of shared logs', macOnly, async () => {
+  const f = await fixture('server', '');
+  try {
+    const node = join(f.root, 'App/Contents/Resources/backend/runtime/bin/node');
+    await writeFile(node, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CAPTURE"\nprintf "setup-token-line\\n"\ncase "$1" in *mdb-mcp.js) sleep 2;; *mdb.js) sleep 6;; esac\n', { mode: 0o755 });
+    const note = join(f.root, 'dashboard.txt');
+    const env = { ...f.env, ENGRAM_DASHBOARD_NOTE: note, ENGRAM_DASHBOARD_PORT: '4999' }; delete env.ENGRAM_DASHBOARD;
+    assert.equal(spawnSync('/bin/sh', [f.launch], { env }).status, 0);
+    const seen = await readFile(f.env.CAPTURE, 'utf8');
+    assert.match(seen, /app\/bin\/mdb-mcp\.js/);
+    assert.match(seen, /app\/bin\/mdb\.js dashboard --host 127\.0\.0\.1 --port 4999/);
+    assert.equal((await stat(note)).mode & 0o777, 0o600);
+    assert.match(await readFile(note, 'utf8'), /setup-token-line/);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 test('native packaging fixture creates both signed app bundles and directly mountable app installers', macOnly, async () => {

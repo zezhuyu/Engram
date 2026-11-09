@@ -86,6 +86,11 @@ async function packageBundle() {
   for (const path of ['dist/packages', 'dist/integrations', 'bin', 'skills', 'package.json', 'package-lock.json']) {
     run('cp', ['-R', join(root, path), join(out, 'app', path)]);
   }
+  // The dashboard imports this dependency-free parser from the build-script tree; ship that one file, not the scripts.
+  await mkdir(join(out, 'app', 'dist', 'scripts', 'lib'), { recursive: true });
+  run('cp', [join(root, 'dist/scripts/lib/strict-json.js'), join(out, 'app', 'dist', 'scripts', 'lib', 'strict-json.js')]);
+  await mkdir(join(out, 'app', 'scripts', 'hosted'), { recursive: true });
+  run('cp', [join(root, 'scripts/hosted/keyed-gateway.mjs'), join(out, 'app', 'scripts', 'hosted', 'keyed-gateway.mjs')]);
   await removeSourceMaps(join(out, 'app', 'dist'));
   // These are upstream reference corpora, not runtime skill instructions.
   await rm(join(out, 'app', 'skills', 'upstream-kb'), { recursive: true, force: true });

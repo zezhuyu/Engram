@@ -12,7 +12,7 @@ export interface DreamerOptions { override?: (out: ModelProposal, req: ModelRequ
  */
 export function dreamer(options: DreamerOptions = {}): ModelProvider & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
-  return { id: 'fake-dreamer', calls, async generate(req) {
+  return { id: 'fake-dreamer', locality: 'local', calls, async generate(req) {
     calls.push(req); const err = options.throws?.(req); if (err) throw err;
     const mode = modeOf(req); const hint = hintsOf(req)[0]; const goal = req.documents.find(d => d.kind === 'user_insight');
     // Retrieval ties can differ across independently-created crash-test vaults.

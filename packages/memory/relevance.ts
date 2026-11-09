@@ -6,6 +6,7 @@ import { redactText } from './redact.js';
 import { upsertNote } from './workspace-ops.js';
 import { insightCurrentlyAccessible } from './insight-access.js';
 import { isSensitive } from '../core/sensitivity.js';
+import { modelConsent } from '../models/consent.js';
 
 /**
  * Model-assisted relevance of already-accepted, non-sensitive user insights for ONE project (workspace).
@@ -84,7 +85,8 @@ export async function relevanceStatus(client: Engram, workspaceId: string): Prom
  */
 export async function refreshRelevance(client: Engram, workspaceId: string, provider: ModelProvider | undefined, config: VaultConfig, signal?: AbortSignal): Promise<RefreshResult> {
   if (!provider) return { status: 'unavailable', workspaceId, reason: 'No usable model provider; injection stays deterministic' };
-  if (provider.locality === 'remote' && !config.model.allowPrivateContentToRemote) return { status: 'skipped_private', workspaceId, provider: provider.id, reason: 'Remote provider and model.allowPrivateContentToRemote is false; nothing was sent' };
+  const consent = modelConsent(config.model, true, provider.locality);
+  if (!consent.consentGiven) return { status: 'skipped_private', workspaceId, provider: provider.id, reason: 'Remote provider consent is incomplete; nothing was sent' };
   const all = await relevanceRows(client, workspaceId), rows = all.slice(0, MAX_INSIGHTS);
   if (!rows.length) return { status: 'no_insights', workspaceId, provider: provider.id };
   const supplied = new Set(rows.map(row => row.id)), inputHash = relevanceInputHash(all); // the hash covers the whole accepted set, the model sees at most MAX_INSIGHTS of it

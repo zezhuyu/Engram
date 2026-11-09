@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { readFileSync } from 'node:fs';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 import { disposableVault } from './helpers.js';
 import { assets, deriveAttention, deriveCards, extractHttpUrl, formatKeyPointLines, parseKeyPointLines } from '../../packages/dashboard/ui/view-model.js';
@@ -30,14 +31,18 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/']!.body, /<script type="module" src="\/assets\/app\.js"><\/script>/);
   assert.doesNotMatch(assets['/']!.body, /<script(?! type="module" src=)|<style\b|\son[a-z]+=/i);
   assert.doesNotMatch(assets['/assets/app.js']!.body, /\beval\s*\(|\.innerHTML\b|\.outerHTML\b/);
+  assert.match(assets['/assets/app.js']!.body, /Retrieved context \(not individually cited\)/);
+  assert.match(assets['/assets/app.js']!.body, /chat-context-source/);
+  assert.match(assets['/assets/app.css']!.body, /\.chat-context-heading/);
   assert.match(assets['/assets/app.js']!.body, /location\.hash/);
   assert.match(assets['/assets/app.js']!.body, /history\.replaceState/);
-  assert.match(assets['/assets/app.js']!.body, /sessionStorage\.getItem\('engram-chat-use-model'\)/);
+  assert.doesNotMatch(assets['/assets/app.js']!.body, /engram-chat-use-model|useModel/);
   assert.doesNotMatch(assets['/assets/app.js']!.body, /localStorage/);
   assert.match(assets['/assets/app.js']!.body, /Welcome back/);
   assert.doesNotMatch(assets['/assets/app.js']!.body, /Sign-in link needed/);
   assert.match(assets['/assets/app.js']!.body, /Sign-in temporarily locked/);
   assert.match(assets['/assets/app.js']!.body, /token changes on every restart/i);
+  assert.match(assets['/assets/app.js']!.body, /Open the Engram Client menu and choose Open dashboard, or Copy first-time sign-in link/);
   assert.match(assets['/assets/app.js']!.body, /Your session ended. Enter your dashboard password to continue/);
   assert.match(assets['/assets/app.js']!.body, /password-strength/);
   assert.match(assets['/assets/app.js']!.body, /password-reveal/);
@@ -46,18 +51,58 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /knowledge-filters/);
   assert.match(assets['/assets/app.js']!.body, /workspace-create-row/);
   assert.match(assets['/assets/app.js']!.body, /Scheduler cycles/);
-  assert.match(assets['/assets/app.js']!.body, /connector-steps/);
   assert.match(assets['/assets/app.js']!.body, /Set/);
-  assert.match(assets['/assets/app.js']!.body, /clear-secret/);
-  assert.match(assets['/assets/app.js']!.body, /switchLabel\(clear,'Clear '\+label/);
-  assert.match(assets['/assets/app.js']!.body, /querySelector\('\.clear-secret input'\)\?\.checked/);
   assert.match(assets['/assets/app.js']!.body, /X-Engram-Dashboard/);
   assert.match(assets['/assets/app.js']!.body, /autocomplete='current-password'/);
   assert.match(assets['/assets/app.js']!.body, /autocomplete='new-password'/);
-  assert.match(assets['/assets/app.js']!.body, /OpenAI \/ ChatGPT \(Secure MCP Tunnel\)/);
-  assert.match(assets['/assets/app.js']!.body, /claude mcp add --transport http engram/);
-  assert.match(assets['/assets/app.js']!.body, /Unsafe: permits a manually requested connection test/);
+  assert.match(assets['/assets/app.js']!.body, /OpenAI \/ ChatGPT/);
+  assert.match(assets['/assets/app.js']!.body, /Workspace access/);
+  assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/status/);
+  assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/workspaces/);
+  assert.match(assets['/assets/app.js']!.body, /apiKeySet/);
+  assert.match(assets['/assets/app.js']!.body, /Remove saved API key/);
+  assert.match(assets['/assets/app.js']!.body, /cfg\.tunnelId\|\|''/);
+  assert.match(assets['/assets/app.js']!.body, /cfg\.organizationId\|\|''/);
+  assert.doesNotMatch(assets['/assets/app.js']!.body, /authentication:'OAuth'|memory\.example\.com\/mcp/);
+  assert.match(assets['/assets/app.js']!.body, /Claude Code \/ Claude Desktop/);
+  assert.match(assets['/assets/app.js']!.body, /Add to Claude Code/);
+  assert.match(assets['/assets/app.js']!.body, /claude.ai custom connector/);
+  assert.match(assets['/assets/app.js']!.body, /public HTTPS MCP URL that you operate/);
+  assert.match(assets['/assets/app.js']!.body, /Check configured URL reachability/);
+  assert.match(assets['/assets/app.js']!.body, /Anthropic MCP Tunnels/);
+  assert.match(assets['/assets/app.js']!.body, /NOT available as a claude.ai custom connector/);
+  assert.match(assets['/assets/app.js']!.body, /not verified live/i);
+  assert.match(assets['/assets/app.js']!.body, /PULL AND START/);
+  assert.match(assets['/assets/app.js']!.body, /GATEWAY_BIND/);
+  assert.match(assets['/assets/app.js']!.body, /Copy reachability test command/);
+  assert.doesNotMatch(assets['/assets/app.js']!.body, /claude.ai requires OAuth|Save Claude connector|Test Claude endpoint/);
   assert.match(assets['/assets/app.js']!.body, /Remote dashboard credentials/);
+  const appScript = assets['/assets/app.js']!.body;
+  assert.match(appScript, /modelSettingsPanel/);
+  assert.match(appScript, /Model name/);
+  assert.match(appScript, /model-name-select/);
+  assert.match(appScript, /Provider default \(recommended\)/);
+  assert.match(appScript, /Custom…/);
+  assert.match(appScript, /This model name was chosen for a different provider/);
+  assert.match(appScript, /api\/models\/list/);
+  assert.match(appScript, /Refresh list/);
+  assert.match(appScript, /embedding-model-select/);
+  assert.match(appScript, /api\/embedding\/models/);
+  assert.match(appScript, /name\.id='model-name'/);
+  assert.match(appScript, /base\.id='model-base-url'/);
+  assert.match(appScript, /Optional\. Overrides the CLI/);
+  assert.match(appScript, /Key saved/);
+  assert.match(appScript, /No key/);
+  assert.match(appScript, /Test model/);
+  assert.match(appScript, /Your questions, retrieved wiki excerpts and Dream\/profile content go to this vendor or host/);
+  assert.match(appScript, /model-secret/);
+  assert.doesNotMatch(appScript, /keyInput\.value\s*=\s*(?:settings|value)/);
+  const source = readFileSync(new URL('../../../packages/dashboard/ui/view-model.ts', import.meta.url), 'utf8');
+  const templateStart = source.indexOf('export const js = String.raw`${browserModels}');
+  const templateBodyStart = templateStart + 'export const js = String.raw`${browserModels}'.length;
+  const templateEnd = source.indexOf('`;', templateBodyStart);
+  assert.ok(templateStart >= 0 && templateEnd > templateBodyStart, 'dashboard served script remains one String.raw template');
+  assert.doesNotMatch(source.slice(templateBodyStart, templateEnd), /`|\$\{/);
   assert.match(assets['/assets/app.js']!.body, /No credentials yet/);
   assert.match(assets['/assets/app.js']!.body, /Access level/);
   assert.ok(assets['/assets/app.js']!.body.includes('Remote administration: '));
@@ -263,6 +308,8 @@ test('settings navigation loads effective settings and has an actionable failure
 test('served dashboard script completes its first refresh and renders every screen', async () => {
   class Element {
     children: Element[] = [];
+    nodeType = 1;
+    tagName = 'DIV';
     textContent = '';
     className = '';
     hidden = false;
@@ -276,6 +323,9 @@ test('served dashboard script completes its first refresh and renders every scre
     replaceChildren(...items: Element[]) { this.children = items; }
     addEventListener(name: string, fn: Function) { this.listeners.set(name, fn); }
     setAttribute(_name: string, _value: string) {}
+    getAttribute(_name: string) { return null; }
+    get attributes() { return []; }
+    get childNodes() { return this.children; }
     focus() {}
     appendChild(item: Element) { this.append(item); return item; }
     querySelectorAll(_selector: string) { return []; }
@@ -283,10 +333,11 @@ test('served dashboard script completes its first refresh and renders every scre
     get firstChild(): Element | null { return this.children[0] ?? null; }
     get innerText(): string { return this.textContent + this.children.map(item => item.innerText).join(''); }
   }
-  const screens = ['overview','storage','jobs','dream','capture','connections','client-settings','settings','audit','knowledge','chat','workspaces','wiki-review','settings-error'];
+  const screens = ['overview','storage','jobs','dream','capture','connections','client-settings','settings','audit','knowledge','chat','workspaces','wiki-review','settings-error','client-first-setup'];
   for (const screen of screens) {
     const elements = new Map<string, Element>();
     const document = {
+      body: new Element(),
       hidden: false,
       querySelector(selector: string) { if (!elements.has(selector)) elements.set(selector, new Element()); return elements.get(selector)!; },
       createElement(_tag: string) { return new Element(); },
@@ -295,12 +346,15 @@ test('served dashboard script completes its first refresh and renders every scre
     };
     const response = (body: any, status = 200) => ({ ok: status < 400, status, headers: { get: () => null }, json: async () => body });
     const fetch = async (path: string) => {
-      if (path === '/api/auth/status') return response({ passwordSet: true });
+      if (path === '/api/auth/status') return response({ passwordSet: screen !== 'client-first-setup', clientMode: screen === 'client-first-setup' });
       if (path === '/api/status') return response({ generatedAt: new Date().toISOString(), doctor:{state:'ok',checks:[]}, index:{available:true,journalSequence:1,manifest:{entries:0}}, jobs:{}, scheduler:{}, capture:{}, storage:{}, dream:{}, wiki:{}, proposals:{} });
-      if (path === '/api/connectors') return response({connectors:{openai:Object.fromEntries(['publicUrl','tunnelName','tunnelId','tunnelToken','oauthClientId','oauthClientSecret'].map(key=>[key,{set:false,value:null}])),claude:Object.fromEntries(['publicUrl','tunnelName','tunnelId','tunnelToken','oauthClientId','oauthClientSecret'].map(key=>[key,{set:false,value:null}]))},credentials:[],authMode:'scoped MCP credentials'});
+      if (path === '/api/connectors/openai/status') return response({config:{profileName:'engram-keyed',apiKeySet:false,workspaces:[]},status:{gateway:{healthy:false},tunnelClient:{loaded:false},binaryFound:false,profilePresent:false}});
+      if (path === '/api/connectors/claude/local') return response({node:'/usr/bin/node',mdbMcp:'/app/mdb-mcp.js',root:'/tmp/vault',claudeCode:{state:{engramPresent:false}},desktop:{file:'/tmp/Claude/claude_desktop_config.json',state:{engramPresent:false}},entry:{command:'/usr/bin/node',args:['/app/mdb-mcp.js','--root','/tmp/vault'],env:{MDB_ACTOR_ID:'local-dashboard'}},command:'claude mcp add',snippets:{desktopJson:'{}',remote:'{}'}});
+      if (path === '/api/connectors/claude/web') return response({config:{url:'',mode:'authless',headerName:'x-api-key',keySet:false}});
+      if (path === '/api/connectors') return response({connectors:{claude:Object.fromEntries(['publicUrl','tunnelName','tunnelId','tunnelToken','oauthClientId','oauthClientSecret'].map(key=>[key,{set:false,value:null}]))},credentials:[],authMode:'scoped MCP credentials'});
       if (path === '/api/settings') return response({ etag:'test', settings:{}, security:{passwordSet:true}, server:{host:'127.0.0.1',port:1} }, screen === 'settings-error' ? 500 : 200);
       if (path === '/api/url-notes/settings') return response({ enabled:false, readiness:{claude:{found:false},codex:{found:false}} });
-      if (path === '/api/chat/capabilities') return response({ available:false, reason:'Unavailable' });
+      if (path === '/api/chat/capabilities') return response({ modelConfigured:false, ready:false, remote:false, consentGiven:false });
       if (path.startsWith('/api/documents')) return response({ items:[], cursor:null });
       if (path === '/api/proposals' || path === '/api/audit' || path === '/api/workspaces') return response([]);
       return response({});
@@ -309,6 +363,10 @@ test('served dashboard script completes its first refresh and renders every scre
     new vm.Script(assets['/assets/app.js']!.body).runInNewContext(sandbox);
     await new Promise(resolve => setImmediate(resolve));
     await new Promise(resolve => setImmediate(resolve));
+    if (screen === 'client-first-setup') {
+      assert.match(document.body.innerText, /Open the Engram Client menu and choose Open dashboard, or Copy first-time sign-in link/);
+      continue;
+    }
     const rendered = document.querySelector('#content').innerText;
     assert.notEqual(rendered, 'Waiting for first refresh', `${screen} should refresh`);
     assert.doesNotMatch(rendered, /Loading effective settings…/, `${screen} should not remain in a loading state`);
@@ -317,15 +375,120 @@ test('served dashboard script completes its first refresh and renders every scre
   }
 });
 
+test('client refresh uses client status and leaves Connecting on success or failure', async t => {
+  const vault = await disposableVault();
+  const client = await createDashboardServer({ engram: vault.engram, clientMode: true, host: '127.0.0.1', port: 0, authLocation: { env: {}, homeDir: vault.root, platform: 'linux' } });
+  t.after(async () => { await client.close(); await vault.cleanup(); });
+  const script = await fetch(`http://127.0.0.1:${client.port}/assets/app.js`).then(response => response.text());
+  assert.match(script, /api\('\/api\/client\/status'\)/);
+  assert.match(script, /textContent='DEVICE'/);
+  assert.match(script, /This device'\+\(result\.captureHost/);
+  const start = script.indexOf('async function refresh(){'), end = script.indexOf('\npause.addEventListener', start);
+  assert.ok(start >= 0 && end > start, 'client script contains the rewritten refresh implementation');
+  const fields = new Map<string, any>();
+  const document = { hidden: false, querySelector(selector: string) { if (!fields.has(selector)) fields.set(selector, { hidden: false, textContent: '', title: '', className: '', replaceChildren() {} }); return fields.get(selector); } };
+  let response: any = { state: 'ok', generatedAt: '2026-01-01T00:00:00Z', checks: [{ id: 'server', state: 'ok', text: 'Syncing to studio.example' }], captureHost: 'studio.example' };
+  const requested: string[] = []; let rendered = 0, notified = '';
+  const context: any = {
+    timer: 0, paused: false, backoff: 10000, status: null, health: document.querySelector('#health'), updated: document.querySelector('#updated'), disconnect: document.querySelector('#disconnect'),
+    document, clearTimeout() {}, setHealth() { context.health.textContent = context.status?.doctor?.state ?? 'unknown'; },
+    api: async (route: string) => { requested.push(route); if (route !== '/api/client/status') throw Object.assign(new Error('Not found'), { status: 404 }); if (response instanceof Error) throw response; return response; },
+    render: async () => { rendered++; }, schedulePoll() {}, notify(message: string) { notified = message; }, Math, Date,
+  };
+  const refresh = new vm.Script(`${script.slice(start, end)}; refresh`).runInNewContext(context) as () => Promise<void>;
+  await refresh();
+  assert.deepEqual(requested, ['/api/client/status']); assert.equal(context.health.textContent, 'ok');
+  assert.equal(context.updated.textContent.startsWith('Updated '), true); assert.equal(rendered, 1);
+  assert.match(context.health.title, /Syncing to studio.example/); assert.equal(document.querySelector('.eyebrow').textContent, 'DEVICE');
+  assert.equal(document.querySelector('#vault-path').textContent, 'This device · studio.example');
+  response = { state: 'attention', generatedAt: '2026-01-01T00:00:01Z', checks: [{ id: 'server', state: 'attention', text: 'Cannot reach the server: events are queued on this Mac' }], captureHost: 'studio.example' };
+  await refresh(); assert.equal(context.health.textContent, 'attention'); assert.equal(rendered, 2);
+  response = new Error('client status route failed'); await refresh();
+  assert.equal(context.health.textContent, 'problem'); assert.match(context.health.title, /client status route failed/);
+  assert.match(notified, /Client status unavailable/); assert.equal(rendered, 2);
+});
+
 test('dashboard boolean settings use accessible switch markup and persistent hover fill rules', () => {
   const js = assets['/assets/app.js']!.body, css = assets['/assets/app.css']!.body;
   assert.match(js, /function switchLabel\(input,label,description='',className=''\)/);
   assert.match(js, /input\.setAttribute\('role','switch'\)/);
-  assert.match(assets['/']!.body, /Allow the model to read your wiki excerpts/);
+  assert.doesNotMatch(assets['/']!.body, /Allow the model to read your wiki excerpts/);
   assert.match(js, /model\.allowNetwork/);
-  assert.match(js, /The whole vault, unrelated pages, other files, and the replies Engram wrote without the model are not sent/);
-  assert.match(js, /Answer mode: Deterministic retrieval/);
+  assert.match(js, /Local model: your question, recent chat, and retrieved excerpts stay on this machine/); assert.match(js, /Vendor-hosted CLI\/API: your question, recent chat, and retrieved excerpts are sent to that vendor/);
+  assert.match(js, /Answered by/); assert.match(js, /The model was not used:/); assert.match(js, /Open Settings/);
   assert.match(css, /\.switch input:checked\+\.track\{[^}]*background-image:var\(--accent-grad\)/);
   assert.match(css, /\.switch:hover \.track\{filter:brightness\(1\.08\)/);
   assert.match(css, /\.switch input:focus-visible\+\.track/);
+});
+
+// Poll-driven refresh must update only what changed and never discard what the user is typing.
+class FakeText { nodeType = 3; parent: FakeEl | null = null; constructor(public data: string) {} replaceWith(next: FakeText | FakeEl) { const siblings = this.parent!.childNodes; next.parent = this.parent; siblings[siblings.indexOf(this)] = next; } }
+class FakeEl {
+  nodeType = 1; parent: FakeEl | null = null; childNodes: Array<FakeEl | FakeText> = []; attrs = new Map<string, string>(); value = ''; type = 'text'; files: unknown[] = [];
+  constructor(public tagName: string) {}
+  get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })); }
+  setAttribute(name: string, value: string) { this.attrs.set(name, String(value)); }
+  getAttribute(name: string) { return this.attrs.get(name) ?? null; }
+  append(...items: Array<FakeEl | FakeText>) { for (const item of items) { item.parent = this; this.childNodes.push(item); } }
+  replaceChildren(...items: Array<FakeEl | FakeText>) { this.childNodes = []; this.append(...items); }
+  replaceWith(next: FakeEl | FakeText) { const siblings = this.parent!.childNodes; next.parent = this.parent; siblings[siblings.indexOf(this)] = next; }
+  querySelectorAll(): FakeEl[] { const found: FakeEl[] = []; const walk = (el: FakeEl) => { for (const child of el.childNodes) if (child.nodeType === 1) { if (['INPUT', 'TEXTAREA', 'SELECT'].includes((child as FakeEl).tagName)) found.push(child as FakeEl); walk(child as FakeEl); } }; walk(this); return found; }
+}
+const h = (tag: string, attrs: Record<string, string>, ...kids: Array<FakeEl | string>) => { const el = new FakeEl(tag.toUpperCase()); for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v); el.append(...kids.map(kid => typeof kid === 'string' ? new FakeText(kid) : kid)); return el; };
+function patchHarness() {
+  const content = new FakeEl('MAIN'), document = { activeElement: null as FakeEl | null };
+  const app = assets['/assets/app.js']!.body;
+  const start = app.indexOf('function isFormControl(el){'), end = app.indexOf('\nasync function render(force=false,poll=false)', start);
+  assert.ok(start >= 0 && end > start, 'patch helpers are available in served app');
+  const code = app.slice(start, end).replace(/content\.addEventListener\([^;]*;/g, '');
+  const api = vm.runInNewContext(`${code}; ({ patchContent, markTouched })`, { document, content }) as { patchContent: (view: FakeEl) => void; markTouched: (event: { target: FakeEl }) => void };
+  return { content, document, ...api };
+}
+
+test('poll refresh updates changed sections and keeps text typed into an input', () => {
+  const t = patchHarness();
+  const stats = h('p', { class: 'stat' }, 'Jobs: 1'), field = h('input', { id: 'note' }), form = h('section', {}, h('label', {}, 'Note'), field), same = h('p', {}, 'unchanged');
+  const page = h('div', {}, stats, form, same);
+  t.content.append(page);
+  field.value = 'my draft'; t.markTouched({ target: field });
+  t.patchContent(h('div', {}, h('p', { class: 'stat' }, 'Jobs: 2'), h('section', {}, h('label', {}, 'Note'), h('input', { id: 'note' })), h('p', {}, 'unchanged')));
+  assert.equal(t.content.childNodes[0], page, 'the page wrapper is kept');
+  assert.equal(page.childNodes[0] === stats, false, 'the changed section is replaced');
+  assert.equal(((page.childNodes[0] as FakeEl).childNodes[0] as FakeText).data, 'Jobs: 2');
+  assert.equal(page.childNodes[1], form, 'the section holding the draft is not replaced');
+  assert.equal(field.value, 'my draft', 'the typed text survives the refresh');
+  assert.equal(page.childNodes[2], same, 'unchanged sections keep their elements');
+});
+
+test('poll refresh protects a focused input and still refreshes changed text beside it', () => {
+  const t = patchHarness();
+  const status = h('p', {}, 'idle'), field = h('textarea', {}), page = h('div', {}, h('section', {}, status, field));
+  t.content.append(page);
+  field.value = 'typing'; t.document.activeElement = field;
+  t.patchContent(h('div', {}, h('section', {}, h('p', {}, 'running'), h('textarea', {}))));
+  const section = page.childNodes[0] as FakeEl;
+  assert.equal(section.childNodes[1], field, 'the focused field is the same element');
+  assert.equal(field.value, 'typing');
+  assert.equal((section.childNodes[0] as FakeEl).childNodes.map(n => (n as FakeText).data).join(''), 'running', 'text next to it still refreshes');
+});
+
+test('poll refresh keeps typed model name and base URL fields', () => {
+  const t = patchHarness();
+  const modelName = h('input', { id: 'model-name' }), baseUrl = h('input', { id: 'model-base-url' }), page = h('div', {}, h('section', {}, modelName, baseUrl));
+  t.content.append(page);
+  modelName.value = 'typed-model'; baseUrl.value = 'http://127.0.0.1:1234/v1'; t.markTouched({ target: modelName }); t.markTouched({ target: baseUrl });
+  t.patchContent(h('div', {}, h('section', {}, h('input', { id: 'model-name' }), h('input', { id: 'model-base-url' }))));
+  assert.equal((t.content.childNodes[0] as FakeEl).childNodes[0], page.childNodes[0]);
+  assert.equal(modelName.value, 'typed-model'); assert.equal(baseUrl.value, 'http://127.0.0.1:1234/v1');
+});
+
+test('poll refresh replaces everything that changed when nothing has been typed', () => {
+  const t = patchHarness();
+  const field = h('input', {}), page = h('div', {}, h('p', {}, 'a'), h('section', {}, field));
+  t.content.append(page);
+  t.patchContent(h('div', {}, h('p', {}, 'b'), h('section', {}, h('input', {}), h('p', {}, 'extra'))));
+  const current = t.content.childNodes[0] as FakeEl;
+  assert.notEqual(current, page, 'with nothing typed the changed page is replaced as a whole');
+  assert.equal(((current.childNodes[0] as FakeEl).childNodes[0] as FakeText).data, 'b');
+  assert.equal(((current.childNodes[1] as FakeEl).childNodes.length), 2, 'new structure is applied when no input is dirty');
 });

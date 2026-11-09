@@ -2,6 +2,8 @@
 
 Status: configuration proposal only. No tunnels or services activated. No network exposure changed. Engram remains BETA. This supersedes the public-HTTPS-first proposal; historical reports remain intact.
 
+**Step 7 update (2026-11-08):** The dashboard's OpenAI/ChatGPT setup now follows the tested no-public-URL, no-OAuth topology: `tunnel-client → 127.0.0.1:3335` keyed gateway → `127.0.0.1:3333/mcp`. The gateway selects a server-held least-privilege Engram credential by the required workspace name. The older OAuth/DCR commands and OAuth acceptance criteria below describe the previous hosted proposal and are superseded for this dashboard-managed OpenAI path; they remain historical evidence and are not rewritten as completed tests. Claude's external HTTPS connector remains a separate path.
+
 ## Architecture
 
 ```text

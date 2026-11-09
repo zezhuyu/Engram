@@ -8,7 +8,8 @@ import { lineOffset, mapBodyLines, scopeMatches, type SearchVault } from '../sea
 import { manifestFor, type ManifestEntry } from '../search-files/manifest.js';
 import { metadataMatches } from '../search-files/retrieve.js';
 import { CHUNKER_VERSION, chunkDocument } from './chunk.js';
-import { createEmbedder, describeEmbedding } from './embedder.js';
+import { createBuiltinEmbedder, createEmbedder, describeEmbedding } from './embedder.js';
+import { builtinModelStatus } from './builtin-model.js';
 import { ensureVectorSchema, normalize, readVecState, scanBest, scanBestVec, toBlob, writeVecState, type VecRow } from './store.js';
 
 export interface VectorStatus { ready: boolean; reason?: string; model?: string; dimensions?: number; backend?: string; sqlite: boolean; embedding: { configured: boolean; available: boolean; model?: string; locality?: string; reason?: string }; buckets: number; embeddedBuckets: number }
@@ -22,9 +23,11 @@ const EXT_ENV = 'ENGRAM_SQLITE_VEC';
  */
 export class VectorBackend {
   private vecLoaded?: boolean;
+  private builtinEmbedder?: Awaited<ReturnType<typeof createBuiltinEmbedder>>;
   constructor(private readonly vault: SearchVault, private readonly options: { embedder?: EmbeddingProvider; env?: Record<string, string | undefined>; ensureFresh?: () => Promise<unknown> } = {}) {}
   private env() { return this.options.env ?? process.env; }
-  private async embedder(): Promise<EmbeddingProvider> { if (this.options.embedder) return this.options.embedder; return createEmbedder((await this.vault.config()).embedding, this.env()); }
+  private async embedder(): Promise<EmbeddingProvider> { if (this.options.embedder) return this.options.embedder; const config = (await this.vault.config()).embedding; if (config?.provider === 'builtin') return this.builtinEmbedder ??= await createBuiltinEmbedder(config, { env: this.env() }); return createEmbedder(config, this.env()); }
+  async close(): Promise<void> { const embedder = this.builtinEmbedder; this.builtinEmbedder = undefined; await embedder?.close(); }
   bucketPath(scope: ManifestEntry['scope']): string { return path.join(this.vault.root, '.mdb', 'indexes', scope.type === 'workspace' ? `workspace-${scope.workspaceId}.sqlite` : 'global.sqlite'); }
 
   private async open(file: string, write: boolean): Promise<DatabaseSync> {
@@ -44,7 +47,7 @@ export class VectorBackend {
 
   /** Readiness without any network call. */
   async status(): Promise<VectorStatus> {
-    const config = await this.vault.config(); const embedding = this.options.embedder ? { configured: true, available: true, model: this.options.embedder.modelId, locality: this.options.embedder.locality ?? 'local' } : describeEmbedding(config.embedding, this.env());
+    const config = await this.vault.config(); const testWorker = process.env.NODE_ENV === 'test' && !!process.env.ENGRAM_BUILTIN_WORKER_PATH; const builtin = config.embedding?.provider === 'builtin' ? testWorker ? { state: 'ready' as const } : await builtinModelStatus({ env: this.env() }) : undefined; const embedding = this.options.embedder ? { configured: true, available: true, model: this.options.embedder.modelId, locality: this.options.embedder.locality ?? 'local' } : config.embedding?.provider === 'builtin' ? { configured: true, available: builtin?.state === 'ready', model: `builtin:bge-m3@4de13258303883538bd53b696b452bf8099f0858`, locality: 'local', ...(builtin?.state === 'ready' ? {} : { reason: 'Built-in bge-m3 is not installed' }) } : describeEmbedding(config.embedding, this.env());
     const base = { sqlite: !!config.sqlite.enabled, embedding, buckets: 0, embeddedBuckets: 0 };
     if (!config.sqlite.enabled) return { ready: false, reason: 'Semantic and hybrid search need the SQLite index (sqlite.enabled: true); keyword, grep and regex are unaffected', ...base };
     if (!embedding.configured) return { ready: false, reason: embedding.reason!, ...base };

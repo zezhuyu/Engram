@@ -1,4 +1,4 @@
-import { MDBError, type CriticVerdict, type CritiqueRequest, type ModelCallOptions, type ModelProposal, type ModelProvider, type ModelRequest } from '../core/types.js';
+import { MDBError, type ConverseRequest, type CriticVerdict, type CritiqueRequest, type ModelCallOptions, type ModelProposal, type ModelProvider, type ModelRequest } from '../core/types.js';
 import { CancelledError, ProviderError } from './errors.js';
 import { critiqueMessages, estimateTokens, generationMessages, providerMessages, type ChatMessage } from './prompts.js';
 import { extractJson, parseModelProposal, parseVerdict } from './schema.js';
@@ -54,13 +54,20 @@ export class OpenAICompatibleProvider implements ModelProvider {
   async critique(input: CritiqueRequest, options: ModelCallOptions = {}): Promise<CriticVerdict> {
     return parseVerdict(extractJson(redactText(await this.complete(providerMessages(critiqueMessages(input), this.locality, this.options.redactPiiForLocal), options))));
   }
+  async converse(input: ConverseRequest, options: ModelCallOptions = {}): Promise<string> {
+    if (input.turns.length > 14 || input.system.length > 12_000 || input.turns.some(turn => turn.content.length > 8_000)) throw new MDBError('INVALID_INPUT', 'Conversation exceeds the configured history limit');
+    const messages = providerMessages([{ role: 'system', content: input.system }, ...input.turns.map(turn => ({ role: turn.role, content: turn.content }))], this.locality, this.options.redactPiiForLocal);
+    const response = redactText(await this.complete(messages, options, false)).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '').trim();
+    if (!response) throw new MDBError('INVALID_MODEL_OUTPUT', 'The model returned an empty reply');
+    return response.slice(0, 12_000);
+  }
 
-  private async complete(messages: ChatMessage[], call: ModelCallOptions): Promise<string> {
+  private async complete(messages: ChatMessage[], call: ModelCallOptions, jsonMode = this.jsonMode): Promise<string> {
     let requests = 0; let usage: { inputTokens?: number; outputTokens?: number } | undefined; // every HTTP request counts, including retries and the fallback without JSON mode
     const send = async (payload: string): Promise<string> => { requests++; const answer = await this.once(payload, call.signal); usage = answer.usage ?? usage; return answer.content; };
-    try { return await this.completeWith(messages, call, send); } finally { call.onUsage?.({ ...(usage ?? {}), retries: Math.max(0, requests - 1) }); }
+    try { return await this.completeWith(messages, call, send, jsonMode); } finally { call.onUsage?.({ ...(usage ?? {}), retries: Math.max(0, requests - 1) }); }
   }
-  private async completeWith(messages: ChatMessage[], call: ModelCallOptions, send: (payload: string) => Promise<string>): Promise<string> {
+  private async completeWith(messages: ChatMessage[], call: ModelCallOptions, send: (payload: string) => Promise<string>, jsonMode: boolean): Promise<string> {
     if (call.signal?.aborted) throw new CancelledError();
     if (estimateTokens(messages.map(m => m.content).join('\n')) > this.options.maxInputTokens) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Input exceeds the configured model token budget');
     const maxTokens = Math.max(1, Math.min(call.maxOutputTokens ?? this.options.maxOutputTokens, this.options.maxOutputTokens));
@@ -69,10 +76,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
     let last: ProviderError | undefined;
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt++) {
       if (attempt > 0) await sleep(this.delay(attempt, last), call.signal);
-      try { return await send(body(this.jsonMode)); }
+    try { return await send(body(jsonMode)); }
       catch (error) {
         // Some OpenAI-compatible servers reject response_format; remember that and retry once without it.
-        if (error instanceof ProviderError && this.jsonMode && (error.status === 400 || error.status === 422)) { this.jsonMode = false; try { return await send(body(false)); } catch (second) { error = second as ProviderError; } }
+        if (error instanceof ProviderError && jsonMode && this.jsonMode && (error.status === 400 || error.status === 422)) { this.jsonMode = false; try { return await send(body(false)); } catch (second) { error = second as ProviderError; } }
         if (!(error instanceof ProviderError) || !error.retryable) throw error;
         last = error;
       }

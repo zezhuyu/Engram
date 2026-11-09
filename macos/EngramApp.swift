@@ -6,6 +6,10 @@ final class EngramApp: NSObject, NSApplicationDelegate {
     var item: NSStatusItem!
     var startupItem: NSMenuItem!
     var stateItem: NSMenuItem!
+    var dashboardStateItem: NSMenuItem?
+    var dashboardLinkItem: NSMenuItem?
+    var dashboardSetupURL: URL?
+    var dashboardFirstTimeSetup = false
     var timer: Timer?
     var version = "Engram (offline)"
     var serverURL: URL?
@@ -14,6 +18,8 @@ final class EngramApp: NSObject, NSApplicationDelegate {
     var projectDir: String?
     var outbox: String?
     var dashboardURL: URL?
+    var dashboardPort = 4872
+    var clientServiceError: String?
     let files = FileManager.default
     var home: URL { files.homeDirectoryForCurrentUser }
     var label: String { "org.engram.\(role).worker" }
@@ -43,9 +49,13 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: role == "client" ? version : "Engram \(role.capitalized)", action: nil, keyEquivalent: ""))
         stateItem = NSMenuItem(title: "Background service", action: nil, keyEquivalent: "")
         menu.addItem(stateItem)
+        dashboardStateItem = NSMenuItem(title: "Dashboard: checking…", action: nil, keyEquivalent: "")
+        menu.addItem(dashboardStateItem!)
         menu.addItem(.separator())
         if role == "client" {
             add(menu, "Open dashboard", #selector(openDashboard))
+            dashboardLinkItem = add(menu, "Copy first-time sign-in link", #selector(copyDashboardSetupLink))
+            dashboardLinkItem?.isHidden = true
             add(menu, "Start daemon", #selector(startWorker))
             add(menu, "Stop daemon", #selector(stopWorker))
             add(menu, "Show logs", #selector(showLog))
@@ -57,11 +67,16 @@ final class EngramApp: NSObject, NSApplicationDelegate {
                 if startup { try installAppAgent() }
                 loadClientConfig()
                 if clientReady { try startClientDaemon() } else { stateItem.title = "Configure client endpoint and token file" }
-            } catch { showError(error) }
+            } catch { clientServiceError = error.localizedDescription; stateItem.title = "Service error: \(error.localizedDescription)"; showError(error) }
             refreshVersion()
-            timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refreshVersion() }
+            refreshClientServiceStatus()
+            timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refreshVersion(); self?.refreshClientServiceStatus() }
             return
         }
+        add(menu, "Open dashboard", #selector(openDashboard))
+        dashboardLinkItem = add(menu, "Copy first-time sign-in link", #selector(copyDashboardSetupLink))
+        dashboardLinkItem?.isHidden = true
+        menu.addItem(.separator())
         add(menu, "Start Background Service", #selector(startWorker))
         add(menu, "Stop Background Service", #selector(stopWorker))
         add(menu, "Edit Configuration…", #selector(editConfiguration))
@@ -76,7 +91,8 @@ final class EngramApp: NSObject, NSApplicationDelegate {
             try startService()
         } catch { showError(error) }
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
+        refreshServerDashboardStatus()
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh(); self?.refreshServerDashboardStatus() }
     }
     @discardableResult func add(_ menu: NSMenu, _ title: String, _ action: Selector) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -112,14 +128,16 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         projectDir = values["ENGRAM_PROJECT_DIR"]
         outbox = values["ENGRAM_OUTBOX"]
         dashboardURL = values["ENGRAM_DASHBOARD_URL"].flatMap(URL.init(string:))
+        if let value = values["ENGRAM_CLIENT_DASHBOARD_PORT"], let port = Int(value), (1...65535).contains(port) { dashboardPort = port }
     }
-    func mdb(_ action: String) throws -> String {
+    func mdb(_ action: String, extraArguments: [String] = []) throws -> String {
         guard let backend = Bundle.main.resourceURL?.appendingPathComponent("backend"),
               let executable = Bundle.main.resourceURL?.appendingPathComponent("backend/runtime/bin/node"),
               files.fileExists(atPath: executable.path) else { throw NSError(domain: "Engram", code: 2, userInfo: [NSLocalizedDescriptionKey: "Bundled Engram runtime is unavailable"]) }
         let script = backend.appendingPathComponent("app/bin/mdb.js")
         let process = Process(); process.executableURL = executable
         process.arguments = [script.path, "service", action, "--platform", "macos"]
+        process.arguments?.append(contentsOf: extraArguments)
         if action == "install" {
             guard let url = serverURL?.absoluteString, let tokenFile else { throw NSError(domain: "Engram", code: 3, userInfo: [NSLocalizedDescriptionKey: "Set ENGRAM_MCP_URL and ENGRAM_TOKEN_FILE in client.env"]) }
             process.arguments = (process.arguments ?? []) + ["--url", url, "--token-file", tokenFile]
@@ -133,7 +151,7 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         if process.terminationStatus != 0 { throw NSError(domain: "Engram", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text.isEmpty ? "mdb service \(action) failed" : text]) }
         return text
     }
-    func startClientDaemon() throws { _ = try mdb("install") }
+    func startClientDaemon() throws { _ = try mdb("install"); _ = try mdb("start"); clientServiceError = nil }
     var clientReady: Bool {
         guard serverURL != nil, let tokenFile, let attributes = try? files.attributesOfItem(atPath: tokenFile),
               let permissions = attributes[.posixPermissions] as? NSNumber else { return false }
@@ -162,7 +180,59 @@ final class EngramApp: NSObject, NSApplicationDelegate {
     }
     func setClientOffline() {
         version = "Engram (offline)"; item.button?.title = version; item.button?.toolTip = version
-        item.menu?.items.first?.title = version; stateItem.title = "Server unavailable"
+        item.menu?.items.first?.title = version
+    }
+    func refreshClientServiceStatus() {
+        guard role == "client", let dashboardStateItem else { return }
+        do {
+            let urlInfo = try dashboardUrlInfo()
+            dashboardSetupURL = urlInfo.url
+            dashboardFirstTimeSetup = urlInfo.firstTimeSetup
+            dashboardLinkItem?.isHidden = !dashboardFirstTimeSetup
+            dashboardLinkItem?.isEnabled = dashboardFirstTimeSetup
+            let text = try mdb("status")
+            guard let data = text.data(using: .utf8),
+                  let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dashboard = root["clientDashboard"] as? [String: Any] else { dashboardStateItem.title = "Dashboard: unavailable"; return }
+            let running = dashboard["running"] as? Bool == true
+            let port = dashboard["port"] as? Int ?? dashboardPort
+            dashboardStateItem.title = dashboardFirstTimeSetup
+                ? (running ? "Dashboard: running · first-time setup pending" : "Dashboard: stopped · first-time setup pending")
+                : (running ? "Dashboard: running on 127.0.0.1:\(port)" : "Dashboard: stopped on 127.0.0.1:\(port)")
+            if let clientServiceError { dashboardStateItem.title = "Service error: \(clientServiceError)" }
+        } catch {
+            dashboardSetupURL = URL(string: "http://127.0.0.1:\(dashboardPort)/")
+            dashboardFirstTimeSetup = false
+            dashboardLinkItem?.isHidden = true
+            dashboardLinkItem?.isEnabled = false
+            dashboardStateItem.title = "Dashboard: \(error.localizedDescription)"
+        }
+    }
+    func dashboardUrlInfo() throws -> (url: URL?, firstTimeSetup: Bool) {
+        let arguments = role == "server" ? ["--role", "server"] : []
+        let text = try mdb("dashboard-url", extraArguments: arguments)
+        guard let data = text.data(using: .utf8), let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = result["url"] as? String, let url = URL(string: value) else {
+            throw NSError(domain: "Engram", code: 5, userInfo: [NSLocalizedDescriptionKey: "mdb service dashboard-url returned an invalid response"])
+        }
+        return (url, result["firstTimeSetup"] as? Bool == true)
+    }
+    func refreshServerDashboardStatus() {
+        guard role == "server", let dashboardStateItem else { return }
+        do {
+            let info = try dashboardUrlInfo()
+            dashboardSetupURL = info.url
+            dashboardFirstTimeSetup = info.firstTimeSetup
+            dashboardLinkItem?.isHidden = !info.firstTimeSetup
+            dashboardLinkItem?.isEnabled = info.firstTimeSetup
+            dashboardStateItem.title = info.firstTimeSetup ? "Dashboard: first-time setup pending" : "Dashboard: available on 127.0.0.1:\(info.url?.port ?? 4871)"
+        } catch {
+            dashboardSetupURL = URL(string: "http://127.0.0.1:4871/")
+            dashboardFirstTimeSetup = false
+            dashboardLinkItem?.isHidden = true
+            dashboardLinkItem?.isEnabled = false
+            dashboardStateItem.title = "Dashboard: \(error.localizedDescription)"
+        }
     }
     @discardableResult func launchctl(_ arguments: [String]) -> (Int32, String) {
         let process = Process()
@@ -215,9 +285,9 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         alert.informativeText = error.localizedDescription
         alert.runModal()
     }
-    @objc func startWorker() { do { if role == "client" { loadClientConfig(); guard clientReady else { throw NSError(domain: "Engram", code: 4, userInfo: [NSLocalizedDescriptionKey: "Set ENGRAM_MCP_URL and a mode-0600 ENGRAM_TOKEN_FILE in client.env"]) }; _ = try mdb("start") } else { try prepare(); try startService() } } catch { showError(error) }; if role == "client" { refreshVersion() } else { refresh() } }
+    @objc func startWorker() { do { if role == "client" { loadClientConfig(); guard clientReady else { throw NSError(domain: "Engram", code: 4, userInfo: [NSLocalizedDescriptionKey: "Set ENGRAM_MCP_URL and a mode-0600 ENGRAM_TOKEN_FILE in client.env"]) }; _ = try mdb("start"); clientServiceError = nil } else { try prepare(); try startService() } } catch { if role == "client" { clientServiceError = error.localizedDescription }; showError(error) }; if role == "client" { refreshVersion(); refreshClientServiceStatus() } else { refresh() } }
     @objc func stopWorker() {
-        if role == "client" { do { _ = try mdb("stop") } catch { showError(error) }; stateItem.title = "Daemon stopped"; return }
+        if role == "client" { do { _ = try mdb("stop") } catch { showError(error) }; stateItem.title = "Daemon stopped"; refreshClientServiceStatus(); return }
         if bootService { showError(NSError(domain: "Engram", code: 1, userInfo: [NSLocalizedDescriptionKey: "This service starts at system boot. Stop it with the supplied install-macos-boot.mjs uninstall command using sudo."])); return }
         launchctl(["bootout", "\(domain)/\(label)"])
         if files.fileExists(atPath: workerPlist.path) { try? files.removeItem(at: workerPlist) }
@@ -236,8 +306,24 @@ final class EngramApp: NSObject, NSApplicationDelegate {
     @objc func editConfiguration() { NSWorkspace.shared.open(config) }
     @objc func showLog() { NSWorkspace.shared.open(log) }
     @objc func openDashboard() {
-        if let dashboardURL { NSWorkspace.shared.open(dashboardURL); return }
-        if let serverURL { var parts = URLComponents(url: serverURL, resolvingAgainstBaseURL: false); parts?.path = "/dashboard"; if let url = parts?.url { NSWorkspace.shared.open(url) } }
+        if role == "client", let dashboardURL { NSWorkspace.shared.open(dashboardURL); return }
+        do {
+            let info = try dashboardUrlInfo()
+            dashboardSetupURL = info.url
+            dashboardFirstTimeSetup = info.firstTimeSetup
+            dashboardLinkItem?.isHidden = !info.firstTimeSetup
+            dashboardLinkItem?.isEnabled = info.firstTimeSetup
+            if let url = info.url { NSWorkspace.shared.open(url) }
+        } catch {
+            dashboardStateItem?.title = "Dashboard: \(error.localizedDescription)"
+            let port = role == "server" ? 4871 : dashboardPort
+            if let url = URL(string: "http://127.0.0.1:\(port)/") { NSWorkspace.shared.open(url) }
+        }
+    }
+    @objc func copyDashboardSetupLink() {
+        guard dashboardFirstTimeSetup, let url = dashboardSetupURL else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
     @objc func quit() { NSApp.terminate(nil) }
 }

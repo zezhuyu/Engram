@@ -18,7 +18,7 @@ export async function openRemoteSession(options: { url: string; token: string; w
   };
   const init = await post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'engram-setup', version: '1' } } }, options.workspaceId ? { 'X-Engram-Workspace': options.workspaceId } : {});
   if (init.status === 401) throw new RemoteError('auth', 'The server rejected the credential (401)');
-  if (init.status === 403) throw new RemoteError(options.workspaceId ? 'workspace' : 'auth', 'The credential cannot use this workspace or was refused (403)');
+  if (init.status === 403) throw new RemoteError(options.workspaceId ? 'workspace' : 'auth', `The credential cannot use workspace ${options.workspaceId ?? ''} or was refused (403)`.trim());
   const sessionId = init.headers.get('mcp-session-id');
   if (init.status !== 200 || !sessionId) throw new RemoteError('protocol', `Unexpected initialize response (${init.status})`);
   let id = 10;

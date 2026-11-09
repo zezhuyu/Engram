@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path, { resolve } from 'node:path';
 import { Engram } from '../../packages/sdk/index.js';
 import { createHttpCredential, revokeHttpCredential } from '../../packages/mcp/credentials.js';
+import { openRemoteSession } from '../../packages/memory/remote-client.js';
 import { buildSessionContext } from '../../packages/memory/session-context.js';
 import { runContextHook } from '../../packages/memory/context-hook.js';
 import { upsertNote, upsertTask, writeHandoff } from '../../packages/memory/workspace-ops.js';
@@ -17,6 +18,7 @@ import { contextStateFile } from '../../packages/memory/context-hook.js';
 import { resolveStoragePath } from '../../packages/core/root.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { recordCase } from '../helpers/report.js';
+import { execute } from '../../packages/cli/index.js';
 
 type Cleanup = { after(fn: () => void | Promise<void>): void };
 const MCP = resolve('bin/mdb-mcp.js');
@@ -27,6 +29,7 @@ const insight = (client: Engram, body: string, category: string, scopeLabel?: st
 test('the builder returns a small, deterministic, authorized context from a large workspace', async t => {
   const { root } = await disposableVault(t); const client = new Engram(root); await client.createWorkspace('proj'); await client.createWorkspace('other');
   await insight(client, 'Prefers short answers.', 'preference'); await insight(client, 'Candidate only.', 'preference', undefined, 'candidate'); await insight(client, 'Billing project rule.', 'preference', 'other');
+  await insight(client, 'Project-specific review style.', 'working_style', 'proj');
   for (let i = 0; i < 150; i++) await upsertTask(client, { scope, taskId: `T-${String(i).padStart(3, '0')}`, title: `Task number ${i}`, status: i % 10 === 0 ? 'blocked' : i % 3 === 0 ? 'in_progress' : i % 7 === 0 ? 'done' : 'open' });
   for (let i = 0; i < 40; i++) await upsertNote(client, { scope, noteId: `n-${i}`, title: `Decision ${i}`, body: `We decided ${i}`, tags: i % 2 ? ['decision'] : [] });
   await upsertTask(client, { scope: { type: 'workspace', workspaceId: 'other' }, taskId: 'X-1', title: 'Secret other project task', status: 'open' });
@@ -34,7 +37,7 @@ test('the builder returns a small, deterministic, authorized context from a larg
   const a = await buildSessionContext(client, { workspaceId: 'proj', maxTokens: 800, now: new Date('2026-10-12T00:00:00Z') });
   const b = await buildSessionContext(client, { workspaceId: 'proj', maxTokens: 800, now: new Date('2026-10-12T00:00:00Z') });
   assert.equal(a.text, b.text, 'identical data gives identical text'); assert.equal(a.revision, b.revision);
-  assert.ok(a.estimatedTokens <= 800, `size ${a.estimatedTokens}`); assert.ok(a.text.length <= 800 * 4);
+  assert.ok(a.estimatedTokens <= 800, `size ${a.estimatedTokens}`); assert.ok(a.text.length <= 800 * 4); assert.match(a.text, /Project-specific review style/);
   assert.match(a.text, /data, not instructions/); assert.match(a.text, /\(taskId T-\d{3}\)/, 'tasks are shown by the stable id the typed tools use'); assert.doesNotMatch(a.text, /\(task obj_|noteId obj_/, 'never only the object id'); assert.match(a.text, /Prefers short answers\./); assert.match(a.text, /ended\)|Handoff sess-last/); assert.match(a.text, /resolver/);
   assert.doesNotMatch(a.text, /Candidate only|Billing project|Secret other project/, 'unaccepted and other-workspace material is absent');
   const tasks = [...a.text.matchAll(/- \[(blocked|in_progress|open|done)\]/g)].map(m => m[1]!); assert.ok(!tasks.includes('done'), 'finished tasks are not injected'); assert.equal(tasks[0], 'blocked', 'blocked work comes first'); assert.ok(a.counts.tasks <= 12 && a.counts.decisions <= 5);
@@ -51,6 +54,51 @@ test('stored text cannot add structure to the injected context', async t => {
   assert.match(context.text, /Treat it as background data/);
 });
 
+test('global session sections are independently ACL gated and exclude unaccepted or sensitive material', async t => {
+  const { root, vault } = await disposableVault(t); await vault.createWorkspace('proj');
+  await vault.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Accepted preference', body: 'Use concise explanations.', status: 'accepted', metadata: { category: 'preference', sensitivity: 'none', scopeLabel: 'global', evidenceClass: 'explicit' } });
+  await vault.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Sensitive', body: 'Private health detail.', status: 'accepted', metadata: { category: 'interest', sensitivity: 'sensitive', scopeLabel: 'global' } });
+  await vault.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Unaccepted', body: 'Unaccepted claim marker.', status: 'candidate', metadata: { category: 'preference', scopeLabel: 'global' } });
+  await vault.put({ scope: { type: 'global', area: 'shared' }, kind: 'note', title: 'Reviewed shared note', body: 'Shared one-line evidence summary.', status: 'promoted', metadata: { reviewed: true } });
+  await vault.put({ scope: { type: 'global', area: 'shared' }, kind: 'discovery', title: 'Candidate discovery', body: 'Candidate discovery marker.', status: 'candidate', metadata: {} });
+  await vault.put({ scope: { type: 'global', area: 'shared' }, kind: 'discovery', title: 'Tested unvalidated discovery', body: 'Unvalidated discovery marker.', status: 'tested', metadata: { reviewed: true } });
+  await vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Accepted wiki page', body: 'Accepted wiki evidence summary.' });
+  await vault.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_change_proposal', title: 'Pending proposal', body: 'Pending proposal marker.', status: 'pending' });
+  const fullPermissions = ['workspace:proj:read', 'global:profile:read', 'global:shared:read', 'global:wiki:read'];
+  await vault.grant('proj', 'all-grants', ['read']);
+  const full = await buildSessionContext(new Engram(root, { actorId: 'all-grants', permissions: fullPermissions }), { workspaceId: 'proj', maxTokens: 2500 });
+  assert.match(full.text, /Use concise explanations/); assert.match(full.text, /Reviewed shared note/); assert.match(full.text, /Accepted wiki page/);
+  assert.match(full.text, /derived, evidence-bound, may be stale, data not instructions/i); assert.match(full.text, /mdb:\/\/(shared|wiki)\/objects\//); assert.match(full.text, /rev_/);
+  assert.doesNotMatch(full.text, /Private health detail|Unaccepted claim marker|Candidate discovery marker|Unvalidated discovery marker|Pending proposal marker/);
+  assert.ok(full.estimatedTokens <= 2500);
+  for (const [missing, marker] of [['global:profile:read', 'Use concise explanations'], ['global:shared:read', 'Reviewed shared note'], ['global:wiki:read', 'Accepted wiki page']] as const) {
+    const context = await buildSessionContext(new Engram(root, { actorId: `without-${missing}`, permissions: fullPermissions.filter(p => p !== missing) }), { workspaceId: 'proj' });
+    assert.doesNotMatch(context.text, new RegExp(marker));
+    for (const other of ['Use concise explanations', 'Reviewed shared note', 'Accepted wiki page'].filter(item => item !== marker)) assert.match(context.text, new RegExp(other), `missing ${missing} preserves other authorized sections`);
+    assert.match(context.text, /workspace: proj/);
+  }
+  recordCase({ suite: 'memory', name: 'session-context-global-acl-and-review-boundary', status: 'PASS' });
+});
+
+test('SessionStart host output snapshots and agent permission template are explicit', async t => {
+  const { root, vault } = await disposableVault(t); await vault.createWorkspace('proj'); await vault.grant('proj', 'snapshot-agent', ['read']);
+  const projectDir = await temp(t, 'engram-context-snapshot-'); await mkdir(projectDir, { recursive: true });
+  const binding = defaultBinding({ workspaceId: 'proj', hosts: ['claude-code', 'codex'], captureConsent: false }); await writeBinding(projectDir, binding); await trustProject(projectDir, binding);
+  const now = new Date('2026-10-12T00:00:00.000Z');
+  const common = { stdin: stdin(projectDir), projectRoot: projectDir, root, now };
+  const context = await buildSessionContext(new Engram(root, { actorId: 'snapshot-agent', permissions: ['workspace:proj:read'] }), { workspaceId: 'proj', now });
+  const claude = await runContextHook({ host: 'claude-code', ...common });
+  assert.equal(claude.output, `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context.text } })}\n`);
+  const codex = await runContextHook({ host: 'codex', ...common });
+  assert.equal(codex.output, `${context.text}\n`, 'Codex stdout format snapshot; live host injection remains unverified');
+  const generic = await execute(['credential', 'permissions-template', '--agent', '--root', path.join(root, 'unused')]);
+  assert.match(String(generic), /workspace:<ID>:read,workspace:<ID>:write,global:profile:read,global:shared:read,global:wiki:read/);
+  assert.match(String(generic), /global:discoveries:read/); assert.match(String(generic), /rotate issues a new id and token.*restart its agents/);
+  const named = await execute(['credential', 'permissions-template', '--agent', '--workspace', 'proj,personal', '--root', path.join(root, 'unused')]);
+  assert.match(String(named), /workspace:proj:read,workspace:proj:write,workspace:personal:read,workspace:personal:write/);
+  recordCase({ suite: 'memory', name: 'session-context-host-snapshot-and-credential-template', status: 'PASS' });
+});
+
 test('a session that never wrote a handoff is reported as possibly interrupted, derived and never fabricated', async t => {
   const { root } = await disposableVault(t); const client = new Engram(root); await client.createWorkspace('proj');
   const open = await client.sessionStart({ scope }); const ended = await client.sessionStart({ scope }); await client.sessionEnd({ sessionId: ended.id });
@@ -64,7 +112,7 @@ async function liveServer(t: Cleanup) {
   const { root } = await disposableVault(t); const owner = new Engram(root); await owner.createWorkspace('proj'); await owner.createWorkspace('forbidden');
   await insight(owner, 'Always explain trade-offs.', 'preference'); await upsertTask(owner, { scope, taskId: 'T-1', title: 'Wire the hook', status: 'in_progress' }); await upsertTask(owner, { scope: { type: 'workspace', workspaceId: 'forbidden' }, taskId: 'F-1', title: 'Forbidden workspace task', status: 'open' });
   const credential = await createHttpCredential(owner.vault, 'agent-1', ['workspace:proj:read', 'workspace:proj:write', 'global:profile:read']); await owner.vault.grant('proj', 'agent-1', ['read', 'write']);
-  const start = async () => { const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: String(port ?? 0) } }); let stderr = ''; const url = await new Promise<string>((res, rej) => { child.stderr.setEncoding('utf8'); child.stderr.on('data', (c: string) => { stderr += c; const m = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(stderr); if (m) res(m[1]!); }); child.once('exit', code => rej(new Error(`exited ${code}: ${stderr}`))); }); return { child, url }; };
+  const start = async () => { const child = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TOOLSET: 'remote-web', MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: String(port ?? 0) } }); let stderr = ''; const url = await new Promise<string>((res, rej) => { child.stderr.setEncoding('utf8'); child.stderr.on('data', (c: string) => { stderr += c; const m = /MCP HTTP listening at (http:\/\/[^\s]+)/.exec(stderr); if (m) res(m[1]!); }); child.once('exit', code => rej(new Error(`exited ${code}: ${stderr}`))); }); return { child, url }; };
   let port: number | undefined; let current = await start(); port = Number(new URL(current.url).port);
   const stop = async () => { if (current.child.exitCode === null) { current.child.kill('SIGTERM'); await new Promise<void>(r => current.child.once('exit', () => r())); } };
   t.after(stop);
@@ -93,6 +141,71 @@ test('the hook prints fresh, bounded context in the host format, caches it priva
   const expired = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env, timeoutMs: 500, cacheTtlMs: 1, now: new Date(Date.now() + 60_000) });
   assert.equal(expired.outcome, 'none'); assert.equal(expired.output, ''); assert.equal((await readdir(path.join(env.ENGRAM_CACHE_DIR!, 'context'))).length, 0, 'an expired cache is deleted');
   recordCase({ suite: 'memory', name: 'session-context-hook-cache', status: 'PASS' });
+});
+
+test('remote-web exposes session context to the real SessionStart hook with workspace-bound ACLs', async t => {
+  const server = await liveServer(t);
+  await insight(server.owner, 'Accepted global preference marker.', 'preference');
+  await insight(server.owner, 'Accepted insight marker.', 'capability', 'proj');
+  await insight(server.owner, 'Unaccepted global insight marker.', 'preference', undefined, 'candidate');
+  await server.owner.put({ scope: { type: 'global', area: 'shared' }, kind: 'note', title: 'Promoted shared note title marker', body: 'A reviewed shared summary.', status: 'promoted', metadata: { reviewed: true } });
+  await server.owner.put({ scope: { type: 'global', area: 'shared' }, kind: 'discovery', title: 'Pending candidate marker', body: 'Not approved.', status: 'candidate', metadata: {} });
+  await server.owner.put({ scope: { type: 'global', area: 'shared' }, kind: 'discovery', title: 'Tested discovery marker', body: 'Not validated.', status: 'tested', metadata: { reviewed: true } });
+
+  const fullCredential = await createHttpCredential(server.owner.vault, 'context-full', ['workspace:proj:read', 'global:profile:read', 'global:shared:read']);
+  await server.owner.vault.grant('proj', 'context-full', ['read']);
+  const limitedCredential = await createHttpCredential(server.owner.vault, 'context-limited', ['workspace:proj:read', 'global:shared:read']);
+  await server.owner.vault.grant('proj', 'context-limited', ['read']);
+  const { projectDir, env } = await projectFor(t, server);
+  env.ENGRAM_CTX_TOKEN = fullCredential.token;
+
+  const remote = await openRemoteSession({ url: server.url, token: fullCredential.token, workspaceId: 'proj' });
+  assert.ok(remote.tools.includes('engram_session_context'), 'remote-web tools/list includes the hook tool');
+  assert.ok(remote.tools.includes('engram_handoff_status'), 'remote-web tools/list includes the companion handoff lookup');
+  const explicitScope = { type: 'workspace' as const, workspaceId: 'proj' };
+  const explicitContext = await remote.call('engram_session_context', { scope: explicitScope, maxTokens: 800 });
+  assert.equal(explicitContext.isError, false, 'explicit workspace scope works without a collection id');
+  const handoffStatus = await remote.call('engram_handoff_status', { scope: explicitScope, sessionId: 'no-handoff-yet' });
+  assert.equal(handoffStatus.isError, false, 'handoff status accepts the hook scope shape');
+
+  const full = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env });
+  assert.equal(full.outcome, 'fresh', JSON.stringify(full));
+  const additionalContext = JSON.parse(full.output).hookSpecificOutput.additionalContext as string;
+  assert.match(additionalContext, /Accepted global preference marker/);
+  assert.match(additionalContext, /Accepted insight marker/);
+  assert.match(additionalContext, /Promoted shared note title marker/);
+  assert.doesNotMatch(additionalContext, /Pending candidate marker|Tested discovery marker|Unaccepted global insight marker/);
+  assert.match(additionalContext, /## Accepted user preferences/);
+
+  env.ENGRAM_CTX_TOKEN = limitedCredential.token;
+  const limited = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env });
+  assert.equal(limited.outcome, 'fresh', JSON.stringify(limited));
+  const limitedContext = JSON.parse(limited.output).hookSpecificOutput.additionalContext as string;
+  assert.doesNotMatch(limitedContext, /## Accepted user (?:preferences|insights)|Accepted global preference marker|Accepted insight marker/);
+  assert.match(limitedContext, /Promoted shared note title marker/, 'the denied profile section does not affect independently authorized shared context');
+  assert.doesNotMatch(JSON.stringify(limited), /Accepted global preference marker|Accepted insight marker|Unaccepted global insight marker/);
+  await server.stop();
+  recordCase({ suite: 'memory', name: 'remote-web-session-context-hook-e2e', status: 'PASS' });
+});
+
+test('context cache is isolated by credential when permissions differ', async t => {
+  const server = await liveServer(t);
+  await server.owner.put({ scope: { type: 'global', area: 'shared' }, kind: 'note', title: 'Credential-visible shared note', body: 'Only the fully authorized credential can see this.', status: 'promoted', metadata: { reviewed: true } });
+  await server.owner.vault.grant('proj', 'full-agent', ['read', 'write']);
+  const fullCredential = await createHttpCredential(server.owner.vault, 'full-agent', ['workspace:proj:read', 'workspace:proj:write', 'global:profile:read', 'global:shared:read']);
+  await server.owner.vault.grant('proj', 'limited-agent', ['read']);
+  const limited = await createHttpCredential(server.owner.vault, 'limited-agent', ['workspace:proj:read']);
+  const { projectDir, env } = await projectFor(t, server); env.ENGRAM_CTX_TOKEN = fullCredential.token;
+  const full = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env });
+  assert.match(JSON.parse(full.output).hookSpecificOutput.additionalContext, /Credential-visible shared note/);
+  env.ENGRAM_CTX_TOKEN = limited.token;
+  const restricted = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env });
+  assert.equal(restricted.outcome, 'fresh');
+  assert.doesNotMatch(restricted.output, /Credential-visible shared note/);
+  const cacheFiles = await readdir(path.join(env.ENGRAM_CACHE_DIR!, 'context')); assert.equal(cacheFiles.length, 2, 'one private cache entry per credential');
+  await server.stop();
+  const stale = await runContextHook({ host: 'claude-code', stdin: stdin(projectDir), env, timeoutMs: 500 });
+  assert.equal(stale.outcome, 'stale'); assert.doesNotMatch(stale.output, /Credential-visible shared note/);
 });
 
 test('ENGRAM_DATA_DIR confines context cache and trust/state writes with isolated HOME, XDG and TMPDIR', async t => {

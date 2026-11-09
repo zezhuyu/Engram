@@ -1,6 +1,6 @@
 # Engram macOS client and server apps
 
-The release contains `Engram Client.app` and `Engram Server.app`. Both use `macos/assets/icon.png` as their main app icon and `macos/assets/menu_bar.png` as a template menu bar icon. They run as menu bar apps without a Dock window. The client runs Engram's existing outbox delivery worker; the server runs the existing authenticated HTTP MCP gateway. Local agents still connect using their native MCP settings and hooks.
+The release contains `Engram Client.app` and `Engram Server.app`. Both use `macos/assets/icon-white.png` (the logo on a white rounded plate; `icon.png` is the transparent original) as their main app icon and `macos/assets/menu_bar.png` as a template menu bar icon. They run as menu bar apps without a Dock window. The Client app supervises the outbox delivery worker and its own loopback-only dashboard; the Server app runs the existing authenticated HTTP MCP gateway. Local agents still connect using their native MCP settings and hooks.
 
 ## Build and release
 
@@ -25,12 +25,18 @@ Move the app to a stable location such as `/Applications` before first opening i
 
 | Role | Configuration | Background job | Log |
 | --- | --- | --- | --- |
-| Client | `~/.config/engram/client.env` | `org.engram.client.worker` | `~/Library/Logs/Engram/client.log` |
+| Client | `~/.config/engram/client.env` | `dev.engram.outbox-watch`, `dev.engram.client-dashboard` | `~/Library/Logs/Engram/client-daemon.log`, `client-dashboard.log` |
 | Server | `~/.config/engram/server.env` | `org.engram.server.worker` | `~/Library/Logs/Engram/server.log` |
 
 Both load the existing `~/.config/engram/engram.env` first, if present, then the role-specific file. These are local shell environment files and must have mode 600 or 400. Never copy them into a release artifact.
 
-For the client, set `ENGRAM_MCP_URL` to the authorized server endpoint and `ENGRAM_TOKEN_FILE` to a separate mode-0600 file containing the scoped bearer token. Optional settings are `ENGRAM_WORKSPACE`, `ENGRAM_PROJECT_DIR`, `ENGRAM_OUTBOX`, and `ENGRAM_DASHBOARD_URL`. The Client app shows the connected server version from `/version`, or `Engram (offline)` when unreachable. Its menu controls the daemon with `mdb service start|stop`, opens the dashboard and daemon log, and quits independently of the daemon. See `docs/client-daemon.md` for setup and CLI details.
+For the client, set `ENGRAM_MCP_URL` to the authorized server endpoint and `ENGRAM_TOKEN_FILE` to a separate mode-0600 file containing the scoped bearer token. Optional settings are `ENGRAM_WORKSPACE`, `ENGRAM_PROJECT_DIR`, `ENGRAM_OUTBOX`, `ENGRAM_DASHBOARD_URL`, and `ENGRAM_CLIENT_DASHBOARD_PORT` (default `4872`). The Client app shows the connected server version from `/version`, or `Engram (offline)` when unreachable, and reports whether its local dashboard is running. **Open dashboard** opens the one-time setup URL while initial password setup is pending, then opens `http://127.0.0.1:<port>/`; an explicit `ENGRAM_DASHBOARD_URL` in `client.env` overrides the opened URL. **Copy first-time sign-in link** is available only while setup is pending. The setup URL is read from `~/.config/engram/client-dashboard.txt`, which is private mode `0600`, and is never written to the shared dashboard log or shown in a text field. The token-free first-time sign-in screen points users to the Client menu. Client dashboard auth state is under `~/Library/Application Support/Engram/client-dashboard/`. See `docs/client-daemon.md` for setup and CLI details.
+
+The Server app also has **Open dashboard** and **Copy first-time sign-in link** menu actions. It reads its setup note from `~/.config/engram/dashboard.txt`; any LAN host in the saved link is changed to `127.0.0.1` when opening locally. `ENGRAM_DASHBOARD_PORT` selects the dashboard port (default `4871`).
+
+On macOS both dashboard services show a native startup alert with the URL and first-run or sign-in instructions. Set `MDB_DASHBOARD_ALERT=false` in the service environment to suppress it. For the Client dashboard, the token-bearing URL is visible in the alert and stored in the private `~/.config/engram/client-dashboard.txt` note; it never goes to the shared dashboard log. The Client status pill summarizes sync service, token-file safety, capture-server reachability and queued/conflicted/rejected events. An offline server is Attention while local buffering continues.
+
+In the client dashboard, **Server** is the capture endpoint form. It previews changes to the client environment, outbox service, user capture config, configured agent MCP entries, and already-installed remote hooks. Applying requires reviewing the target list, typing `APPLY SERVER CHANGE`, checking the confirmation box, and re-entering the dashboard password. The form accepts a token file path (default `~/.config/engram/client.token`), never a token value. **Connections** is separate: it stores a dashboard URL and dashboard credential for remote server administration.
 
 For the server, configure its existing `ENGRAM_DATA_DIR`, HTTP credential or OAuth validation settings, and ingress options. HTTP defaults to loopback on port 3333 with the remote-web toolset. Public access still requires authenticated HTTPS ingress.
 

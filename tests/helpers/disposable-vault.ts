@@ -12,6 +12,10 @@ export async function disposableVault(t: Cleanup, options: { sqlite?: boolean; p
   // a hook may have started a detached drain that is still writing: removing the vault under it is the race this wait closes
   t.after(async () => { assertDisposable(root); await stopOwnedChildren(t); await waitForDrainIdle(root); await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   const vault = options.now ? new Vault(root, undefined, { now: options.now }) : new Vault(root); await vault.init({ sqlite: options.sqlite ?? false });
+  // Injected test providers are deterministic in-process fakes unless a test
+  // explicitly marks its provider remote. Keep that locality explicit in the
+  // fixture so the production consent gate remains covered by remote tests.
+  await vault.setConfig(config => { config.model.locality = 'local'; });
   return { root, vault };
 }
 export function assertDisposable(root: string): void {

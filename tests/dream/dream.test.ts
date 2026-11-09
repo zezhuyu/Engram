@@ -104,7 +104,7 @@ test('a valid lexical-decoy abstention completes once without a discovery repair
   for (const doc of await vault.listDocuments()) if (!pair.some(item => item.id === doc.id) && doc.kind !== 'user_insight') await vault.delete(doc.id, doc.revisionId);
   await configureDreamEvalVault(vault, root);
   const calls: ModelRequest[] = [];
-  const model: ModelProvider = { id: 'explicit-abstention', async generate(request) { calls.push(request); return { kind: 'no_insight', title: 'No supported connection', body: 'The supplied sources do not establish a relationship between the two meanings.', evidence: [] }; } };
+  const model: ModelProvider = { id: 'explicit-abstention', locality: 'local', async generate(request) { calls.push(request); return { kind: 'no_insight', title: 'No supported connection', body: 'The supplied sources do not establish a relationship between the two meanings.', evidence: [] }; } };
   const engine = new IntelligenceEngine(vault, model); const [job] = await enqueueRun(engine, { mode: 'deep' });
   assert.equal(job?.status, 'complete', job?.error);
   assert.equal(calls.length, 1);
@@ -119,7 +119,7 @@ test('Dream structural repair permits abstention, while repeated malformed outpu
   for (const doc of await vault.listDocuments()) if (!pair.some(item => item.id === doc.id) && doc.kind !== 'user_insight') await vault.delete(doc.id, doc.revisionId);
   await configureDreamEvalVault(vault, root);
   const calls: ModelRequest[] = [];
-  const model: ModelProvider = { id: 'repair-to-abstention', async generate(request) { calls.push(request); return calls.length === 1 ? { kind: 'discovery', title: '', body: 'invalid', evidence: [] } : { kind: 'no_insight', title: 'No supported connection', body: 'The sources share a name but establish no relationship.', evidence: [] }; } };
+  const model: ModelProvider = { id: 'repair-to-abstention', locality: 'local', async generate(request) { calls.push(request); return calls.length === 1 ? { kind: 'discovery', title: '', body: 'invalid', evidence: [] } : { kind: 'no_insight', title: 'No supported connection', body: 'The sources share a name but establish no relationship.', evidence: [] }; } };
   const engine = new IntelligenceEngine(vault, model); const [job] = await enqueueRun(engine, { mode: 'deep' });
   assert.equal(job?.status, 'complete', job?.error);
   assert.equal(calls.length, 2);
@@ -131,7 +131,7 @@ test('Dream structural repair permits abstention, while repeated malformed outpu
   const malformedDocs = await buildNegativeControlDocs(malformedVault); const malformedPair = [malformedDocs.javaLanguage!, malformedDocs.javaIsland!];
   for (const doc of await malformedVault.listDocuments()) if (!malformedPair.some(item => item.id === doc.id) && doc.kind !== 'user_insight') await malformedVault.delete(doc.id, doc.revisionId);
   await configureDreamEvalVault(malformedVault, malformedRoot);
-  const malformedModel: ModelProvider = { id: 'still-malformed', async generate() { return {} as unknown as ModelProposal; } };
+  const malformedModel: ModelProvider = { id: 'still-malformed', locality: 'local', async generate() { return {} as unknown as ModelProposal; } };
   const malformedEngine = new IntelligenceEngine(malformedVault, malformedModel); const [failed] = await enqueueRun(malformedEngine, { mode: 'deep' });
   assert.equal(failed?.status, 'dead_letter');
   assert.match(String(failed?.error), /no valid discovery or explicit abstention/);
@@ -543,7 +543,8 @@ test('privacy: an agent cannot dream over what it cannot read; a remote model ne
   const agentEngine = new IntelligenceEngine(agentVault, spy); await enqueueRun(agentEngine, { mode: 'deep' });
   assert.ok(spy.calls.length >= 1); assert.ok(!seen.some(b => b.includes('PRIVATE-MARKER')), 'an agent without workspace access never receives private text, in any mode'); assert.ok(!JSON.stringify(await agentEngine.proposals()).includes('PRIVATE-MARKER'));
   const remote = Object.assign(dreamer(), { locality: 'remote' as const }); const gated = new IntelligenceEngine(w.vault, remote);
-  const blocked = await enqueueRun(gated, { mode: 'micro', scope: { type: 'workspace', workspaceId: 'private' } satisfies Scope }); assert.equal(blocked[0]!.status, 'blocked'); assert.match(blocked[0]!.error!, /allowPrivateContentToRemote/); assert.equal(remote.calls.length, 0, 'the remote provider was never called');
+  await w.vault.setConfig(config => { config.model.allowNetwork = true; });
+  const blocked = await enqueueRun(gated, { mode: 'micro', scope: { type: 'workspace', workspaceId: 'private' } satisfies Scope }); assert.equal(blocked[0]!.status, 'blocked'); assert.match(blocked[0]!.error!, /Remote model consent is required/); assert.equal(remote.calls.length, 0, 'the remote provider was never called');
   const local = new IntelligenceEngine(w.vault, dreamer()); await enqueueRun(local, { mode: 'micro', objectIds: ids(w.pack, 'privApi', 'pyApi') });
   const p = (await local.proposals()).at(-1)!; assert.equal(p.status, 'pending'); assert.ok(p.flags!.includes('derived_from_private')); assert.equal(p.input.metadata!.derivedFromPrivate, true); assert.equal(p.critic!.verdict, 'review_required');
   const stored = await w.vault.get((await local.review(p.id, true, 'reviewed')).objectId!); assert.equal(stored.metadata.visibility, 'user_private');
