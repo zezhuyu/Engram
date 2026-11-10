@@ -26,6 +26,7 @@ export interface HarnessAdapter {
   installHandoff(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
   installFileSync(options: { projectRoot: string; localRoot?: string }): Promise<{ changed: boolean; backup?: string }>;
   removeFileSync(projectRoot: string): Promise<number>;
+  removeProjectHooks(projectRoot: string): Promise<number>;
   refreshRemoteUrl(url: string): Promise<{ changed: boolean; commands: number }>;
 }
 const MARKER = '# engram-mdb:';
@@ -201,6 +202,27 @@ export class HookFileAdapter implements HarnessAdapter {
     const next: Settings = structuredClone(parsed.settings); let removed = 0;
     for (const [name, list] of Object.entries(next.hooks ?? {})) { const kept = list.filter(e => { const own = e.hooks?.some(h => typeof h.command === 'string' && h.command.includes(`${FILESYNC_MARKER}${id}`)); if (own) removed++; return !own; }); if (kept.length) next.hooks![name] = kept; else delete next.hooks![name]; }
     if (removed) await this.write(next); return removed;
+  }
+  /** Removes only hooks carrying this project's exact root and Engram marker. */
+  async removeProjectHooks(projectRoot: string): Promise<number> {
+    const root = path.resolve(projectRoot); let parsed: { settings: Settings; existed: boolean };
+    try { parsed = await this.read(); } catch { return 0; } if (!parsed.existed) return 0;
+    const next: Settings = structuredClone(parsed.settings); let removed = 0; const registrations = new Set<string>();
+    for (const [name, list] of Object.entries(next.hooks ?? {})) {
+      const kept = list.flatMap(entry => {
+        const hooks = (entry.hooks ?? []).filter(hook => {
+          const command = hook.command;
+          const own = typeof command === 'string' && command.includes('engram-mdb') && command.includes(`--project-root ${JSON.stringify(root)}`);
+          if (own) { removed++; const match = /engram-mdb(?:-remote)?:([A-Za-z0-9_-]+)/.exec(command); if (match) registrations.add(match[1]!); }
+          return !own;
+        });
+        return hooks.length ? [{ ...entry, hooks }] : [];
+      });
+      if (kept.length) next.hooks![name] = kept; else delete next.hooks![name];
+    }
+    if (removed) await this.write(next);
+    for (const id of registrations) await revokeRegistration(this.options.root, id);
+    return removed;
   }
   /** Removes only user-level hooks (`memory capture --user`), leaving project hooks and everything else in the file. */
   async removeUserHooks(): Promise<number> {

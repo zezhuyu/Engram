@@ -28,9 +28,10 @@ export class Scripted implements ModelProvider {
     await this.onProfile?.(req, options); const e = this.profileFails?.(req); if (e) throw e;
     for (let waited = 0; waited < this.profileWaitMs; waited += 10) { if (options?.signal?.aborted) throw new CancelledError(); await sleep(10); }
     if (options?.signal?.aborted) throw new CancelledError();
-    const doc = req.documents.find((d: Document) => d.metadata.speaker === 'user') ?? req.documents[0]!;
+    const doc = req.documents.find((d: Document) => d.metadata.speaker === 'user') ?? req.documents.find((d: Document) => d.kind === 'chat_conversation') ?? req.documents[0]!;
     const key = /\[key:(\w+)\]/.exec(doc.body)?.[1] ?? 'general'; const word = /prefer (\w+)/i.exec(doc.body)?.[1] ?? 'something';
-    const span = doc.body.slice(0, Math.min(doc.body.length, 90));
+    const userTurn = doc.kind === 'chat_conversation' && Array.isArray(doc.metadata.turns) ? (doc.metadata.turns as Array<{ role?: string; start?: number; end?: number }>).find(turn => turn.role === 'user' && Number.isInteger(turn.start) && Number.isInteger(turn.end)) : undefined;
+    const span = userTurn ? doc.body.slice(userTurn.start!, userTurn.end!) : doc.body.slice(0, Math.min(doc.body.length, 90));
     return { kind: 'user_insight', title: `Prefers ${word}`, body: `The user prefers ${word}.`, evidence: [{ uri: doc.uri, revisionId: doc.revisionId, span }], metadata: { category: 'preference', preferenceKey: key, sensitivity: 'none', explicitStatement: true } };
   }
 }

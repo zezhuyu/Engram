@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createDashboardServer } from '../../packages/dashboard/server.js';
+import { makeDisposableVault, requestDashboard, stopDashboard } from './security-helpers.js';
+
+test('profile domain editor is authenticated, CSRF protected and patches by expected revision', async t => {
+  const fixture = await makeDisposableVault();
+  const insight = await fixture.engram.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Risk tolerance', body: 'The user prefers explicit investment risk controls.', status: 'accepted', metadata: { category: 'preference', domains: ['general'], sensitivity: 'none' } });
+  const dashboard = await createDashboardServer({ engram: fixture.engram, token: 'b'.repeat(64), idleMs: 60_000 });
+  t.after(async () => { await stopDashboard(dashboard); await fixture.cleanup(); });
+  const origin = `http://127.0.0.1:${dashboard.port}`;
+  const anonymous = await requestDashboard(dashboard.port, '/api/profile/domains');
+  assert.equal(anonymous.status, 401);
+  const current = await requestDashboard(dashboard.port, '/api/profile/domains', { headers: { Authorization: `Bearer ${dashboard.token}` } });
+  assert.equal(current.status, 200); assert.match(current.body, /explicit investment risk controls/);
+  const csrf = await requestDashboard(dashboard.port, '/api/profile/domains', { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}`, Origin: 'http://attacker.invalid', 'Content-Type': 'application/json' }, body: JSON.stringify({ id: insight.id, expectedRevisionId: insight.revisionId, domains: ['investing'] }) });
+  assert.equal(csrf.status, 403);
+  const saved = await requestDashboard(dashboard.port, '/api/profile/domains', { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}`, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: insight.id, expectedRevisionId: insight.revisionId, domains: ['investing'] }) });
+  assert.equal(saved.status, 200); const revised = await fixture.engram.get(insight.id);
+  assert.notEqual(revised.revisionId, insight.revisionId); assert.equal(revised.body, insight.body); assert.equal(revised.status, 'accepted'); assert.deepEqual(revised.metadata.domains, ['investing']);
+  const stale = await requestDashboard(dashboard.port, '/api/profile/domains', { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}`, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: insight.id, expectedRevisionId: insight.revisionId, domains: ['coding'] }) });
+  assert.equal(stale.status, 409);
+});
+
+test('dashboard domain panel reads without mutation and writes revisioned registry changes with preconditions', async t => {
+  const fixture = await makeDisposableVault();
+  const insight = await fixture.engram.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Episodes', body: 'The user likes episodic video.', status: 'accepted', metadata: { category: 'preference', domains: ['general'], sensitivity: 'none' } });
+  const dashboard = await createDashboardServer({ engram: fixture.engram, token: 'c'.repeat(64), idleMs: 60_000 });
+  t.after(async () => { await stopDashboard(dashboard); await fixture.cleanup(); });
+  const origin = `http://127.0.0.1:${dashboard.port}`, headers = { Authorization: `Bearer ${dashboard.token}` };
+  const read1 = await requestDashboard(dashboard.port, '/api/profile/domains', { headers });
+  const read2 = await requestDashboard(dashboard.port, '/api/profile/domains', { headers });
+  const first = JSON.parse(read1.body) as { registryRevisionId?: string; autoApply: boolean; domains: Array<{ slug: string; origin: string }> };
+  const second = JSON.parse(read2.body) as typeof first;
+  assert.equal(first.registryRevisionId, second.registryRevisionId, 'polling does not create registry revisions');
+  assert.equal(first.autoApply, true);
+  const add = await requestDashboard(dashboard.port, '/api/profile/domains', { method: 'POST', headers: { ...headers, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'add', slug: 'serial-art', label: 'Serial art', description: 'Serial visual stories.', keywords: ['serial-art', 'story-board'], evidence: [insight.id], expectedRegistryRevisionId: first.registryRevisionId }) });
+  assert.equal(add.status, 200, add.body);
+  const after = JSON.parse((await requestDashboard(dashboard.port, '/api/profile/domains', { headers })).body) as { registryRevisionId?: string; domains: Array<{ slug: string; origin: string }> };
+  assert.ok(after.domains.some(domain => domain.slug === 'serial-art' && domain.origin === 'owner'));
+  const stale = await requestDashboard(dashboard.port, '/api/profile/domains', { method: 'POST', headers: { ...headers, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'autoApply', enabled: false, expectedRegistryRevisionId: first.registryRevisionId }) });
+  assert.equal(stale.status, 409);
+});

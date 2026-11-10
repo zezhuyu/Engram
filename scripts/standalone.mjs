@@ -125,6 +125,10 @@ async function installService(bundle = resolve(root, 'dist-standalone', `engram-
     run('systemctl', ['--user', 'enable', '--now', 'engram-mcp.service']);
     console.log(`Installed user systemd service ${service}.`);
   } else throw new Error('Install is supported on macOS and Linux');
+  // Register the owner CLI beside user binaries; a conflict is reported but never replaces another command.
+  const cli = join(resolve(bundle), 'app/bin/mdb.js');
+  const shimInstall = spawnSync(join(resolve(bundle), 'runtime/bin/node'), [cli, 'shim', 'install'], { stdio: 'inherit' });
+  if (shimInstall.status !== 0) console.error('Could not install the mdb command shim; service installation will continue.');
 }
 
 function systemUserHome(user) {
@@ -186,6 +190,12 @@ async function uninstallService() {
     await rm(join(home, '.config', 'systemd', 'user', 'engram-mcp.service'), { force: true });
     run('systemctl', ['--user', 'daemon-reload']);
   } else throw new Error('Uninstall is supported on macOS and Linux');
+  const shimNode = resolve(root, 'dist-standalone', `engram-${platformName}-${architecture}`, 'runtime/bin/node');
+  const shimCli = resolve(root, 'dist-standalone', `engram-${platformName}-${architecture}`, 'app/bin/mdb.js');
+  if (await (await import('node:fs/promises')).access(shimNode).then(() => true, () => false)) {
+    const removed = spawnSync(shimNode, [shimCli, 'shim', 'remove'], { stdio: 'inherit' });
+    if (removed.status !== 0) console.error('Could not remove the mdb command shim.');
+  }
 }
 
 async function uninstallSystemService() {

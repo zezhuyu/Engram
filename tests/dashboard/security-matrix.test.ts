@@ -39,6 +39,9 @@ const routes: Route[] = [
   { path: '/api/connectors/credentials/:id/rotate', methods: ['POST'], kind: 'pattern' },
   { path: '/api/connectors/credentials/:id/revoke', methods: ['POST'], kind: 'pattern' },
   { path: '/api/connectors/openai/status', methods: ['GET'] }, { path: '/api/connectors/openai/config', methods: ['POST'] },
+  { path: '/api/connectors/openai/by-name', methods: ['POST'] },
+  { path: '/api/connectors/openai/writes', methods: ['POST'] },
+  { path: '/api/connectors/openai/workspaces/:name/write', methods: ['POST'], kind: 'pattern' },
   { path: '/api/connectors/openai/workspaces', methods: ['POST'] }, { path: '/api/connectors/openai/workspaces/:name', methods: ['DELETE'], kind: 'pattern' },
   { path: '/api/connectors/openai/workspaces/:name/rotate', methods: ['POST'], kind: 'pattern' },
   { path: '/api/connectors/openai/:action', methods: ['POST'], kind: 'pattern' },
@@ -46,8 +49,8 @@ const routes: Route[] = [
   { path: '/api/connectors/claude/local', methods: ['GET'] }, { path: '/api/connectors/claude/local/preview', methods: ['POST'] }, { path: '/api/connectors/claude/local/apply', methods: ['POST'] },
   { path: '/api/connectors/claude/web', methods: ['GET', 'POST'] }, { path: '/api/connectors/claude/web/rotate-key', methods: ['POST'] }, { path: '/api/connectors/claude/web/key', methods: ['DELETE'] }, { path: '/api/connectors/claude/web/probe', methods: ['POST'] },
   { path: '/api/connectors/test', methods: ['POST'] }, { path: '/api/connectors/config', methods: ['POST'] },
-  { path: '/api/status', methods: ['GET'] }, { path: '/api/status/:section', methods: ['GET'], kind: 'pattern' },
-  { path: '/api/settings', methods: ['GET'] }, { path: '/api/models/detect', methods: ['GET'] }, { path: '/api/settings/preview', methods: ['POST'] },
+  { path: '/api/status', methods: ['GET'] }, { path: '/api/status/:section', methods: ['GET'], kind: 'pattern' }, { path: '/api/dream/run-status', methods: ['GET'] },
+  { path: '/api/settings', methods: ['GET'] }, { path: '/api/shim/status', methods: ['GET'] }, { path: '/api/models/detect', methods: ['GET'] }, { path: '/api/settings/preview', methods: ['POST'] },
   { path: '/api/settings/model-secret', methods: ['PUT', 'DELETE'] },
   { path: '/api/settings/embedding-secret', methods: ['PUT', 'DELETE'] },
   { path: '/api/embedding/builtin', methods: ['GET'] },
@@ -62,6 +65,7 @@ const routes: Route[] = [
   { path: '/api/url-notes', methods: ['POST'] }, { path: '/api/url-notes/:id', methods: ['GET', 'DELETE'], kind: 'pattern' },
   { path: '/api/url-notes/:id/approve', methods: ['POST'], kind: 'pattern' }, { path: '/api/audit', methods: ['GET'] },
   { path: '/api/documents', methods: ['GET', 'POST'] }, { path: '/api/documents/:id', methods: ['GET', 'PATCH', 'DELETE'], kind: 'pattern' },
+  { path: '/api/profile/domains', methods: ['GET', 'POST'] },
   { path: '/api/documents/:id/restore', methods: ['POST'], kind: 'pattern' },
   { path: '/api/workspaces', methods: ['GET', 'POST'] }, { path: '/api/proposals', methods: ['GET'] },
   { path: '/api/proposals/:id/review', methods: ['POST'], kind: 'pattern' },
@@ -99,6 +103,7 @@ async function observe(port: number, route: Route, method: string, options: { he
 
 test('dashboard route security matrix: every current route/method rejects anonymous and invalid bearer requests', async t => {
   const vault = await makeDisposableVault();
+  const priorPath = process.env.PATH, fakeBin = path.join(vault.root, 'fake-bin'); await mkdir(fakeBin); await writeFile(path.join(fakeBin, 'launchctl'), '#!/bin/sh\nexit 1\n', { mode: 0o700 }); process.env.PATH = fakeBin + path.delimiter + (priorPath ?? '');
   const oldCanary = process.env.MDB_CANARY_SECRET; const canary = `MDB-CANARY-${Date.now()}-${Math.random()}`;
   process.env.MDB_CANARY_SECRET = canary;
   const serverLogs: string[] = [];
@@ -178,6 +183,10 @@ test('dashboard route security matrix: every current route/method rejects anonym
     record('/api/status', 'GET', 'api-no-store-cache-header', 'Cache-Control: no-store', String(absentOrigin.headers['cache-control']), absentOrigin.headers['cache-control'] === 'no-store' ? 'PASS' : 'FAIL');
     assert.equal(absentOrigin.headers['cache-control'], 'no-store');
     assert.equal(absentOrigin.body.includes(dashboard.token), false);
+    const dreamStatus = await requestDashboard(dashboard.port, '/api/dream/run-status', { headers: { Authorization: `Bearer ${dashboard.token}` } });
+    assert.equal(dreamStatus.status, 200, dreamStatus.body); assert.match(dreamStatus.body, /No schedule configured/);
+    const crossOriginDream = await requestDashboard(dashboard.port, '/api/dream/run-status', { headers: { Authorization: `Bearer ${dashboard.token}`, Origin: 'http://evil.invalid' } });
+    record('/api/dream/run-status', 'GET', 'csrf-cross-origin', '403 and no scheduler details', String(crossOriginDream.status), crossOriginDream.status === 403 ? 'PASS' : 'FAIL'); assert.equal(crossOriginDream.status, 403);
     assert.equal(canaryLeak(absentOrigin, canary), false);
     record('/api/status', 'GET', 'MDB_CANARY_SECRET-response', 'canary absent from response body and headers', canaryLeak(absentOrigin, canary) ? 'leaked' : 'absent', canaryLeak(absentOrigin, canary) ? 'FAIL' : 'PASS');
     assert.equal(canaryLeak(absentOrigin, canary), false);
@@ -438,6 +447,7 @@ test('dashboard route security matrix: every current route/method rejects anonym
   } finally {
     await stopDashboard(dashboard);
     await vault.cleanup();
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
     if (oldCanary === undefined) delete process.env.MDB_CANARY_SECRET; else process.env.MDB_CANARY_SECRET = oldCanary;
     console.log = originalConsole.log; console.info = originalConsole.info; console.warn = originalConsole.warn; console.error = originalConsole.error;
   }

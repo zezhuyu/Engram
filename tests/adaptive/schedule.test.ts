@@ -45,8 +45,9 @@ test('DST: the spring-forward gap does not skip the day, and the fall-back repea
 
 test('after downtime exactly one catch-up cycle runs in the next idle window, and a time-zone change cannot cause a second run for the same local date', async t => {
   const w = await sched(t); await w.ai.tick(at('2027-02-01T08:00:00Z')); await w.say('alpha', 'I prefer Go for tools [key:more]');
-  const catchUp = await w.ai.tick(at('2027-02-04T19:00:00Z')); assert.equal(catchUp.decision.action, 'start'); assert.match((catchUp.decision as { reason: string }).reason, /catch-up/); assert.equal(catchUp.run!.cycle!.state, 'COMPLETED');
-  assert.equal((await w.ai.tick(at('2027-02-04T20:00:00Z'))).decision.action, 'skip'); assert.deepEqual((await w.ai.cycles()).map(c => c.localDate).sort(), ['2027-02-01', '2027-02-04'], 'missed days are not replayed one by one');
+  const outsideQuiet = await w.ai.tick(at('2027-02-04T19:00:00Z')); assert.equal(outsideQuiet.decision.action, 'wait', 'a missed date no longer bypasses the quiet window');
+  const catchUp = await w.ai.tick(at('2027-02-05T08:00:00Z')); assert.equal(catchUp.decision.action, 'start'); assert.match((catchUp.decision as { reason: string }).reason, /catch-up/); assert.equal(catchUp.run!.cycle!.state, 'COMPLETED');
+  assert.equal((await w.ai.tick(at('2027-02-05T09:00:00Z'))).decision.action, 'skip'); assert.deepEqual((await w.ai.cycles()).map(c => c.localDate).sort(), ['2027-02-01', '2027-02-05'], 'missed days are not replayed one by one');
   const z = await sched(t); await z.ai.tick(at('2027-01-15T08:00:00Z')); await z.ai.configure({ timezone: 'Europe/London', quietEnd: '09:00', targetLocalTime: '03:00' });
   assert.equal((await z.ai.tick(at('2027-01-15T08:30:00Z'))).decision.action, 'skip', 'same local date in the new zone: no duplicate'); assert.equal((await z.ai.cycles()).length, 1);
   recordCase({ suite: 'adaptive', name: 'catch-up-and-timezone-change', status: 'PASS' });

@@ -1,28 +1,50 @@
-# Importing a Markdown wiki
+# Importing and retiring a Markdown wiki
 
-`mdb wiki import` copies an existing Markdown wiki into two collections in one workspace. It reads the source directories and commits each accepted source or page through the normal Vault APIs. It never scans conversations, fetches URLs, calls a model, executes imported text, or modifies the source tree.
+`mdb wiki import` imports a curated Markdown tree into the global `wiki` area by default. Each source tree must use its own lowercase namespace slug, so equal relative paths do not overwrite one another. Page and source documents live under `wiki/pages/<namespace>/` and `wiki/sources/manifests/<namespace>/`; `metadata.wikiNamespace` and namespace-prefixed `metadata.importPath` retain the source identity. `vault.ingest` keeps the exact source bytes under immutable originals.
 
 ```sh
-mdb wiki import --from ./wiki --raw ./raw --workspace project-wiki --label "migration 2026-11" [--max-bytes N]
-mdb wiki import --from ./wiki --raw ./raw --workspace project-wiki --dry-run --json
-mdb wiki import verify --from ./wiki --raw ./raw --workspace project-wiki --json
+mdb wiki import --from ./kb/wiki --raw ./kb/raw --target wiki --namespace kb --label "migration 2026-11"
+mdb wiki import --from ./aegis/wiki --raw ./aegis/raw --target wiki --namespace aegiswealth
+mdb wiki import --from ./strata/wiki --raw ./strata/raw --target wiki --namespace stratamind
+mdb wiki import --from ./kb/wiki --raw ./kb/raw --target wiki --namespace kb --dry-run --json
+mdb wiki import verify --from ./kb/wiki --raw ./kb/raw --target wiki --namespace kb --json
 ```
 
-The default collections are `wiki` and `sources`; use `--wiki-collection` and `--sources-collection` to change them. `--label` is recorded with imported metadata. The raw tree is optional. Items are processed sequentially, with progress on stderr every 25 files. One file error is reported while processing continues; any error makes the command fail.
+For backward compatibility, `mdb wiki import --workspace project-wiki ...` still imports into the `wiki` and `sources` collections of that workspace. `--target workspace --workspace NAME` is equivalent. Global imports require `--namespace`; only lowercase slugs containing lowercase letters, digits, and single hyphens are accepted.
 
-| Input | Engram representation |
-|---|---|
-| Regular file in `--raw` | `source` document in the sources collection, original bytes preserved by `vault.ingest`; relative path and SHA-256 are metadata. Duplicate basenames remain distinct by relative path. |
-| Markdown file under `--from` | `wiki_page` in the wiki collection; original Markdown text (including frontmatter) stays in the body, and parsed frontmatter, original body, path and SHA-256 are also metadata. |
-| `tags`, `category`, `type`, `status`, `summary`, `language`, `created`, `updated` | Tags/category become tags; status becomes status; remaining values are retained as metadata. Templates receive the `template` tag. All original frontmatter keys and values are kept in `originalFrontmatter`. |
-| `sources`, `source`, `[[wiki links]]` | Resolvable citations and page links become document relations. URLs are never fetched. Unresolved references remain in metadata and are included in the report. |
+Imported originals are always ingested byte-for-byte. Page Markdown (including frontmatter) stays intact in the body. Parsed frontmatter is metadata; citations and wiki links become Vault relations. A link resolves against the current namespace first and only; it cannot silently bind to a same-named page from another imported tree. Source links keep their existing raw-tree resolution behavior. URLs are never fetched and document content is untrusted data.
 
-Dotfiles, symlinks, non-Markdown wiki files, and raw files above the default 25 MiB size cap are skipped and reported. `--max-bytes` changes the source cap in bytes. Frontmatter is limited to 1 MiB; oversized frontmatter and unreadable/non-UTF-8 files remain errors or skips as appropriate. Missing frontmatter is accepted. If YAML parsing fails, the page is still imported with its complete original Markdown as the body, a title from its first H1 (or filename), the `unparsed-frontmatter` tag, bounded `frontmatterError` and raw frontmatter metadata, and a path/reason entry under `pages.warnings`. These warnings are counted separately from per-file errors. The import is owner-CLI only. Workspace and collections are created only when missing; existing grants are not changed.
+Global pages without an explicit status default to `accepted` only for owner-curated imports. Explicit frontmatter status is preserved. Pages marked with model-generation provenance (`generatedBy`, `generated_by`, `model`, `modelName`, `model_name`, or `provenance: model`) default to `candidate` and record `importProvenance: compiled-from-model`. No review rule is bypassed; imported pages enter the normal searchable wiki only when their stored status is eligible. Workspace-target imports retain their previous `active` default.
 
-Wiki links and embeds (`[[...]]` and `![[...]]`) resolve in this order: paths relative to the wiki directory (with or without `.md`); project-root paths prefixed by the wiki directory name (for example `wiki/pages/concepts/x`); a `pages/` path variant; a unique case-insensitive filename stem anywhere in the wiki; then a unique case-insensitive title from frontmatter or the first H1. Aliases after `|` and heading anchors after `#` are removed before lookup. Ambiguous matches are left unresolved and reported with reason `ambiguous`; placeholders containing `<` or `>` and the exact `wikilink` placeholder are counted under `placeholders` and remain listed as unresolved. The report's `wikiLinks` section includes resolved and unresolved entries plus ambiguous and placeholder counts.
+`verify` is read-only. It reports page/source counts, source SHA-256 mismatches against the source tree and stored immutable originals, stale links, and resolution totals. An unchanged second import creates no revisions. Each changed import remains resumable at file boundaries.
 
-When `--raw` is provided, a target beginning with the raw directory's basename (for example `raw/article` or `raw/article.md`) or with `<project-root>/<raw-directory>/` is also matched against imported source `importPath` values. Source paths are checked with and without `.md`, followed by a unique filename-stem match. These page-to-source links use the same `references` relation as frontmatter citations; a citation and one or more wiki links to the same source produce only one relation. A matching raw file that was not imported is unresolved with reason `source-not-imported`; unrelated dangling page links remain `unresolved`.
+## Retiring a previous workspace copy
 
-Each item carries an import key based on its relative path and content hash. Repeating an unchanged import does not add revisions unless its computed citations or wiki links differ from the stored relation set; those differences use the normal revision-checked patch operation and are counted as `pages.relinked`. Once link sets match, further runs add no revisions. A changed page patches its existing document with the current revision; changed source bytes are ingested as a new immutable source. Each file is its own commit, so a later failure can be resumed by rerunning the command. `--dry-run` does not write to the vault. `verify` compares source hashes against committed original bytes and page hashes against current files, and reports `pages.stale-links` when the stored relation set differs from the current resolver; it is read-only.
+After importing and verifying one old workspace into the global namespace with the same name, take a backup, then preview retirement:
 
-The report includes imported, unchanged, updated, skipped, unresolved/resolved references, errors, and elapsed time. SQLite and navigation are rebuildable derivatives; original files remain authoritative outside the vault until the owner retires them separately.
+```sh
+mdb wiki retire-workspace --workspace kb --into-wiki-verified --dry-run
+mdb wiki retire-workspace --workspace kb --into-wiki-verified [--allow-leftovers]
+```
+
+The command verifies every imported source and wiki page against the same relative path in `wikiNamespace: kb`. Source files are checked against immutable original bytes. For pages it compares the importer's `metadata.importSha256`, which records the original file bytes even if link resolution changed the stored page text. Missing or mismatched counterparts fail closed. The report lists verified/unverified counts and offending paths. Unimported workspace documents are reported as leftovers and block retirement unless `--allow-leftovers` is explicitly supplied; they are never deleted. A dry run performs all checks and lists intended tombstones without changing the journal or workspace metadata.
+
+After successful retirement, the workspace metadata contains `retired: true` and it is omitted from normal workspace lists used by dashboard pickers and agent enumeration. Its documents and history remain readable to actors who explicitly request that workspace. Restore through the same command:
+
+```sh
+mdb wiki retire-workspace --workspace kb --restore
+# equivalent shorthand
+mdb wiki retire-workspace --restore kb
+```
+
+Restore creates normal Vault restore revisions for the retired imported documents and clears the marker. The reserved `personal` workspace cannot be retired.
+
+Restore any retired object from its prior revision with the normal versioned restore command:
+
+```sh
+mdb restore OBJECT_ID PRIOR_REVISION_ID --revision TOMBSTONE_REVISION_ID
+```
+
+SQLite, indexes, and navigation remain disposable derivatives. The controller should retire the existing `kb`, `aegiswealth`, and `stratamind` workspaces only after taking a real-vault backup and running a successful global import plus `verify` for each namespace. This tool does not perform that live migration or remove workspace directories.
+
+For the imported-then-retired `kb`, `aegiswealth`, and `stratamind` workspaces, `mdb workspace reactivate NAME` clears only the retired marker so the workspace can hold ongoing project notes again. It does not restore the tombstoned imported copies; their history remains available, and `wiki retire-workspace --restore` can still restore those documents later. Reactivation is owner-only and is recorded in the workspace-retirement audit log.

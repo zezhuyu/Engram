@@ -202,10 +202,11 @@ export class ChatProjectRegistry {
 
   async listProjects(): Promise<ChatProjectBinding[]> {
     await this.requireRegistryRead();
-    const docs = await this.vault.listDocuments({ scopes: [PERSONAL_SCOPE] });
+    const [docs, workspaces] = await Promise.all([this.vault.listDocuments({ scopes: [PERSONAL_SCOPE] }), this.vault.listWorkspaces()]);
+    const visibleWorkspaces = new Set(workspaces.map(workspace => workspace.id));
     const bindings = docs.filter(doc => doc.kind === 'chat_project_binding').map(doc => recordBody<ChatProjectBinding>(doc, 'chat_project_binding'));
     const visible: ChatProjectBinding[] = [];
-    for (const binding of bindings) if (binding.status === 'active' && await this.vault.canAccess({ type: 'workspace', workspaceId: binding.workspaceId }, 'read')) visible.push(binding);
+    for (const binding of bindings) if (binding.status === 'active' && visibleWorkspaces.has(binding.workspaceId) && await this.vault.canAccess({ type: 'workspace', workspaceId: binding.workspaceId }, 'read')) visible.push(binding);
     return visible;
   }
 

@@ -5,7 +5,7 @@ import { CycleRunner, type RunResult } from './cycle.js';
 import { inWindow, localParts, parseHHMM, addDays } from './clock.js';
 import { Governor } from './governor.js';
 import type { AdaptiveStore } from './state.js';
-import type { Cycle, ScheduleEvent } from './types.js';
+import type { AdaptiveConfig, Cycle, ScheduleEvent, Telemetry } from './types.js';
 import { randomUUID } from 'node:crypto';
 
 export type Decision = { action: 'start' | 'resume'; reason: string; cycleId: string } | { action: 'wait' | 'skip'; reason: string };
@@ -20,6 +20,37 @@ const NEEDS_RETRY_DELAY_MS = 30 * 60 * 1000;
 /** Pauses for activity or resource pressure are expected on a busy machine; only genuine stage failures count toward quarantine. */
 const isPoison = (c: Pick<Cycle, 'attempts' | 'error' | 'state'>, limit: number): boolean => c.state !== 'COMPLETED' && c.state !== 'INVALIDATED' && c.attempts >= limit && c.error?.category !== 'CANCELLED_FOR_ACTIVITY' && c.error?.category !== 'RESOURCE_PRESSURE';
 
+/** Pure scheduler policy shared by the live worker and read-only dashboard preview. */
+export function decideFromSnapshot(input: { config: AdaptiveConfig; telemetry: Telemetry; cycles: Cycle[]; lease?: { expiresAt: string }; now: Date; idle: number; resourcesAvailable?: boolean; resourceReason?: string }): Decision {
+  const { config, telemetry, cycles, now, idle } = input;
+  const estimate = estimateWindow(telemetry, config, now);
+  const lp = localParts(now, config.timezone);
+  const id = `${lp.date}@${config.timezone}`;
+  if (!config.enabled) return { action: 'skip', reason: 'DISABLED' };
+  if (config.paused) return { action: 'skip', reason: 'PAUSED' };
+  const today = cycles.filter(c => c.localDate === lp.date && c.kind === 'scheduled' && c.state !== 'INVALIDATED');
+  if (today.some(c => c.state === 'COMPLETED')) return { action: 'skip', reason: 'ALREADY_COMPLETED_FOR_LOCAL_DATE' };
+  if (input.lease && Date.parse(input.lease.expiresAt) > now.getTime()) return { action: 'skip', reason: 'ANOTHER_INSTANCE_RUNNING' };
+  const start = parseHHMM(estimate.startLocal), qe = parseHHMM(config.quietEnd), qs = parseHHMM(config.quietStart);
+  const lastDone = cycles.filter(c => c.kind === 'scheduled' && c.state === 'COMPLETED').map(c => c.localDate).sort().at(-1);
+  const catchUp = lastDone !== undefined && lastDone < addDays(lp.date, -1);
+  // 00:00-23:59 is the repository's representable all-day window (24:00 is not valid HH:MM).
+  // Preserve its historical immediate catch-up behavior while keeping catch-up inside every bounded window.
+  const allDay = qs === 0 && qe === 23 * 60 + 59;
+  const inQuiet = inWindow(lp.minutes, qs, qe) && (qs <= qe ? lp.minutes >= start : lp.minutes >= start || lp.minutes < qe);
+  const eligibleWindowTime = inQuiet || (catchUp && allDay);
+  if (!eligibleWindowTime) return { action: 'wait', reason: `outside the learned quiet window (${estimate.startLocal}-${config.quietEnd} ${config.timezone})` };
+  if (idle < config.inactivityMinutes) return { action: 'wait', reason: `foreground activity ${idle.toFixed(0)} min ago; ${config.inactivityMinutes} min of inactivity required` };
+  if (input.resourcesAvailable === false) return { action: 'wait', reason: input.resourceReason ?? 'resource limits currently prevent a run' };
+  const open = today[0];
+  if (open && isPoison(open, config.deadLetterAfterAttempts)) return { action: 'skip', reason: `DEAD_LETTER: ${open.attempts} failed attempts for ${open.localDate}; quarantined until the next local date (or run a manual cycle)` };
+  if (open) {
+    if ((open.state === 'BLOCKED' || open.state === 'RETRY_WAIT') && now.getTime() - Date.parse(open.updatedAt) < NEEDS_RETRY_DELAY_MS) return { action: 'wait', reason: `${open.state}: retry after ${(NEEDS_RETRY_DELAY_MS / 60000).toFixed(0)} min` };
+    return { action: 'resume', reason: `resume ${open.state}`, cycleId: open.id };
+  }
+  return { action: 'start', reason: catchUp ? 'catch-up cycle after downtime' : 'quiet window reached', cycleId: id };
+}
+
 /** Decides when the daily cycle may start. Pure policy over durable state: starting is delegated to CycleRunner, which enforces single-flight via a lease. */
 export class AdaptiveScheduler {
   constructor(private readonly vault: Vault, private readonly provider: ModelProvider | undefined, private readonly store: AdaptiveStore) {}
@@ -28,26 +59,11 @@ export class AdaptiveScheduler {
   async decide(now: Date): Promise<{ decision: Decision; estimate: WindowEstimate; idle: number }> {
     const config = await this.store.config(); const telemetry = await observe(this.vault, this.store, config, now); const estimate = estimateWindow(telemetry, config, now);
     if (estimate.learned && JSON.stringify(estimate.learned) !== JSON.stringify(telemetry.learned)) { telemetry.learned = estimate.learned; await this.store.saveTelemetry(telemetry); }
-    const lp = localParts(now, config.timezone); const idle = idleMinutes(await lastForegroundAt(this.vault, (await this.store.cycles())[0]?.ownSequenceRanges ?? []), now);
-    const base = { estimate, idle };
-    if (!config.enabled) return { decision: { action: 'skip', reason: 'DISABLED' }, ...base };
-    if (config.paused) return { decision: { action: 'skip', reason: 'PAUSED' }, ...base };
-    const cycles = await this.store.cycles(); const id = `${lp.date}@${config.timezone}`;
-    // Exactly once per local date: a completed or running cycle for this date wins, whatever the time zone label (covers DST fall-back and zone changes).
-    const today = cycles.filter(c => c.localDate === lp.date && c.kind === 'scheduled' && c.state !== 'INVALIDATED');
-    if (today.some(c => c.state === 'COMPLETED')) return { decision: { action: 'skip', reason: 'ALREADY_COMPLETED_FOR_LOCAL_DATE' }, ...base };
-    const lease = await this.store.lease(); if (lease && Date.parse(lease.expiresAt) > now.getTime()) return { decision: { action: 'skip', reason: 'ANOTHER_INSTANCE_RUNNING' }, ...base };
-    const start = parseHHMM(estimate.startLocal), qe = parseHHMM(config.quietEnd), qs = parseHHMM(config.quietStart);
-    const lastDone = cycles.filter(c => c.kind === 'scheduled' && c.state === 'COMPLETED').map(c => c.localDate).sort().at(-1);
-    const catchUp = lastDone !== undefined && lastDone < addDays(lp.date, -1); // at most one missed cycle is run: cycles cover everything after the cursors
-    const inQuiet = inWindow(lp.minutes, qs, qe) && (qs <= qe ? lp.minutes >= start : lp.minutes >= start || lp.minutes < qe);
-    if (!inQuiet && !catchUp) return { decision: { action: 'wait', reason: `outside the learned quiet window (${estimate.startLocal}-${config.quietEnd} ${config.timezone})` }, ...base };
-    if (idle < config.inactivityMinutes) return { decision: { action: 'wait', reason: `foreground activity ${idle.toFixed(0)} min ago; ${config.inactivityMinutes} min of inactivity required` }, ...base };
-    const gov = await new Governor(this.vault, config, { respectActivity: false, segmentStart: 0, ownRanges: () => [] }).check(); if (!gov.ok) return { decision: { action: 'wait', reason: gov.detail }, ...base };
-    const open = today[0]; // incomplete cycle for today: resume the same snapshot
-    if (open && isPoison(open, config.deadLetterAfterAttempts)) return { decision: { action: 'skip', reason: `DEAD_LETTER: ${open.attempts} failed attempts for ${open.localDate}; quarantined until the next local date (or run a manual cycle)` }, ...base };
-    if (open) { if ((open.state === 'BLOCKED' || open.state === 'RETRY_WAIT') && now.getTime() - Date.parse(open.updatedAt) < NEEDS_RETRY_DELAY_MS) return { decision: { action: 'wait', reason: `${open.state}: retry after ${(NEEDS_RETRY_DELAY_MS / 60000).toFixed(0)} min` }, ...base }; return { decision: { action: 'resume', reason: `resume ${open.state}`, cycleId: open.id }, ...base }; }
-    return { decision: { action: 'start', reason: catchUp ? 'catch-up cycle after downtime' : 'quiet window reached', cycleId: id }, ...base };
+    const cycles = await this.store.cycles(); const idle = idleMinutes(await lastForegroundAt(this.vault, cycles[0]?.ownSequenceRanges ?? []), now);
+    const gov = config.enabled && !config.paused && idle >= config.inactivityMinutes
+      ? await new Governor(this.vault, config, { respectActivity: false, segmentStart: 0, ownRanges: () => [] }).check() : undefined;
+    const decision = decideFromSnapshot({ config, telemetry, cycles, lease: await this.store.lease(), now, idle, resourcesAvailable: gov?.ok, ...(gov && !gov.ok ? { resourceReason: gov.detail } : {}) });
+    return { decision, estimate, idle };
   }
   /** Logs a skip/wait once per distinct reason, so a worker polling every few minutes does not flood the log. */
   private async noteSkip(reason: string, extra: Partial<ScheduleEvent> = {}): Promise<void> {

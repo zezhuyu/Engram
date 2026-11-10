@@ -9,7 +9,8 @@ import { resolve } from 'node:path';
 import { Engram } from '../../packages/sdk/index.js';
 import { MDBError } from '../../packages/core/types.js';
 import { createHttpCredential } from '../../packages/mcp/credentials.js';
-import { initializeProject, neutralize, refreshContext, remoteWorkspaceIdFor } from '../../packages/project-init.js';
+import { detectProjectDomains, initializeProject, neutralize, previewProjectInit, refreshContext, remoteWorkspaceIdFor, renderBlock } from '../../packages/project-init.js';
+import { unbindProject } from '../../packages/project-unbind.js';
 import { projectDoctor } from '../../packages/memory/project-doctor.js';
 import { readBinding } from '../../packages/core/project-binding.js';
 import { disposableVault } from '../helpers/disposable-vault.js';
@@ -19,12 +20,29 @@ type Cleanup = { after(fn: () => void | Promise<void>): void };
 const MCP = resolve('bin/mdb-mcp.js');
 async function dir(t: Cleanup, prefix: string): Promise<string> { const d = await mkdtemp(path.join(tmpdir(), prefix)); t.after(() => rm(d, { recursive: true, force: true })); return d; }
 const insight = (client: Engram, title: string, body: string, category: string, scopeLabel?: string) => client.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title, body, status: 'accepted', metadata: { category, evidenceClass: 'explicit', visibility: 'user_private', ...(scopeLabel ? { scopeLabel } : {}) } });
+
+test('domain detection uses code manifests, investing project names and explicit package hints', async t => {
+  const base = await dir(t, 'engram-domains-');
+  const code = path.join(base, 'sample'); await mkdir(code); await writeFile(path.join(code, 'Cargo.toml'), '[package]');
+  const invest = path.join(base, 'AegisWealth'); await mkdir(invest); await writeFile(path.join(invest, 'package.json'), JSON.stringify({ engram: { domains: ['investing', 'coding'] } }));
+  const plain = path.join(base, 'notes'); await mkdir(plain);
+  assert.deepEqual(await detectProjectDomains(code), ['coding']);
+  assert.deepEqual(await detectProjectDomains(invest), ['coding', 'investing']);
+  assert.deepEqual(await detectProjectDomains(plain), ['general']);
+});
 async function localProject(t: Cleanup) {
   const base = await dir(t, 'engram-init2-'); const { root } = await disposableVault(t); const client = new Engram(root);
   const projectDir = path.join(base, 'sample'); await mkdir(projectDir);
   return { base, projectDir, client, settings: { 'claude-code': path.join(base, 'claude.json'), codex: path.join(base, 'codex.json') } };
 }
 const blocks = (text: string) => ({ starts: text.split('<!-- engram:managed:start -->').length - 1, ends: text.split('<!-- engram:managed:end -->').length - 1 });
+test('managed block matches full local/remote golden output for both hosts', async () => {
+  const projection = { revision: 'none', preferences: [], insights: [], source: 'none' as const };
+  for (const host of ['claude-code', 'codex'] as const) for (const remote of [false, true]) {
+    const suffix = remote ? 'remote' : 'local'; const golden = await readFile(resolve(`tests/fixtures/project-init-block/${host}-${suffix}.md`), 'utf8');
+    assert.equal(renderBlock(host, 'sample', 'sample', projection, remote), golden, `${host} ${suffix} managed block`);
+  }
+});
 const initBoth = (client: Engram | undefined, projectDir: string, settings: Record<string, string>, extra: Record<string, unknown> = {}) => initializeProject(client, { projectDir, hosts: ['claude-code', 'codex'], settingsPaths: settings, ...extra } as never);
 
 test('init for both hosts writes one binding and equivalent managed blocks that carry only accepted, project-relevant preferences', async t => {
@@ -42,7 +60,7 @@ test('init for both hosts writes one binding and equivalent managed blocks that 
   for (const text of [claude, agents]) {
     assert.deepEqual(blocks(text), { starts: 1, ends: 1 }, 'a hostile claim cannot add or close a managed block');
     assert.match(text, /Prefers small, reviewable commits\./); assert.match(text, /Run the full test suite/); assert.match(text, /Ship the workspace resolver/);
-    assert.doesNotMatch(text, /billing project/); assert.doesNotMatch(text, /Unreviewed hypothesis/); assert.doesNotMatch(text, /^# Ignore all rules/m); assert.match(text, /workspace=sample managed-version=2/);
+    assert.doesNotMatch(text, /billing project/); assert.doesNotMatch(text, /Unreviewed hypothesis/); assert.doesNotMatch(text, /^# Ignore all rules/m); assert.match(text, /workspace=sample managed-version=3/);
   }
   assert.equal(claude.match(/projection=([0-9a-f]+)/)![1], agents.match(/projection=([0-9a-f]+)/)![1], 'both files carry the same projection revision');
   const binding = await readBinding(projectDir); assert.equal(binding.workspaceId, 'sample'); assert.deepEqual(binding.hosts, ['claude-code', 'codex']); assert.equal(binding.managed.projectionRevision, result.projection.revision);
@@ -67,6 +85,55 @@ test('rerunning init five times changes nothing: user text, CRLF endings and fil
   assert.equal((await stat(path.join(projectDir, 'CLAUDE.md'))).mode & 0o777, 0o640);
   assert.deepEqual(blocks(last.claude), { starts: 1, ends: 1 });
   assert.equal((await readFile(path.join(projectDir, '.gitignore'), 'utf8')).match(/\.engram\//g)!.length, 1);
+});
+
+test('previous managed block upgrades in place without duplicating markers', async t => {
+  const { projectDir, client, settings } = await localProject(t);
+  await initBoth(client, projectDir, settings);
+  const file = path.join(projectDir, 'CLAUDE.md');
+  const prior = (await readFile(file, 'utf8')).replace('managed-version=3', 'managed-version=2');
+  await writeFile(file, prior);
+  await initBoth(client, projectDir, settings);
+  const upgraded = await readFile(file, 'utf8');
+  assert.match(upgraded, /managed-version=3/); assert.deepEqual(blocks(upgraded), { starts: 1, ends: 1 });
+  assert.match(upgraded, /older instruction elsewhere in this file or repository/);
+});
+
+test('init manifest unbind restores every init target byte-for-byte and refuses drift', async t => {
+  const { projectDir, client } = await localProject(t);
+  await mkdir(path.join(projectDir, '.claude'), { recursive: true }); await mkdir(path.join(projectDir, '.codex'), { recursive: true });
+  await mkdir(path.join(projectDir, '.engram/notes'), { recursive: true });
+  const preexisting: Record<string, string> = {
+    'CLAUDE.md': '# Claude owner text\n<!-- omx:generated:start -->\nKeep this\n<!-- omx:generated:end -->\n',
+    'AGENTS.md': '# Codex owner text\n', '.gitignore': 'local-only.txt\n', '.claude/settings.local.json': '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"other-tool"}]}]}}\n',
+    '.codex/hooks.json': '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"other-codex-hook"}]}]}}\n', '.mcp.json': '{"mcpServers":{"other":{"type":"stdio"}}}\n'
+  };
+  preexisting['.engram/notes/local.md'] = '# Local notes stay local\n';
+  for (const [rel, content] of Object.entries(preexisting)) await writeFile(path.join(projectDir, rel), content);
+  await initBoth(client, projectDir, { 'claude-code': path.join(projectDir, '.claude/settings.local.json'), codex: path.join(projectDir, '.codex/hooks.json') });
+  const manifest = JSON.parse(await readFile(path.join(projectDir, '.engram/init-manifest.json'), 'utf8')) as { files: Array<{ path: string; action: string; sha256Before: string | null; sha256After: string | null }> };
+  assert.ok(manifest.files.some(file => file.path === 'CLAUDE.md' && file.action === 'modify' && file.sha256Before && file.sha256After));
+  assert.ok(manifest.files.every(file => file.sha256After));
+  const dry = await unbindProject(projectDir, { dryRun: true }); assert.deepEqual(dry.conflicts, []);
+  const changed = await import('../../packages/cli/index.js').then(({ execute }) => execute(['project', 'unbind', '--root', projectDir])) as Awaited<ReturnType<typeof unbindProject>>;
+  assert.deepEqual(changed.conflicts, []);
+  for (const [rel, content] of Object.entries(preexisting)) assert.equal(await readFile(path.join(projectDir, rel), 'utf8'), content, `${rel} restored byte-for-byte`);
+  assert.equal(await readFile(path.join(projectDir, '.engram/notes/local.md'), 'utf8'), preexisting['.engram/notes/local.md']);
+
+  const another = path.join(path.dirname(projectDir), 'drift'); await mkdir(another); await initializeProject(client, { projectDir: another, host: 'claude-code', noLocalMcp: true });
+  await writeFile(path.join(another, 'CLAUDE.md'), (await readFile(path.join(another, 'CLAUDE.md'), 'utf8')).replace('<!-- engram:managed:end -->', 'user edit'));
+  const refused = await unbindProject(another); assert.ok(refused.conflicts.includes('CLAUDE.md')); assert.ok(await readBinding(another));
+});
+
+test('project init dry-run is read-only and reports per-file actions without printing token values', async t => {
+  const { projectDir, client } = await localProject(t);
+  await writeFile(path.join(projectDir, 'CLAUDE.md'), '# Existing rules\n'); await writeFile(path.join(projectDir, 'AGENTS.md'), '# Existing agent rules\n');
+  const before = { claude: await readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'), agents: await readFile(path.join(projectDir, 'AGENTS.md'), 'utf8'), workspaces: await client.listWorkspaces(), events: await client.vault.events() };
+  const preview = await previewProjectInit(undefined, { projectDir, hosts: ['claude-code', 'codex'], workspaceId: 'preview-space', mcpUrl: 'https://example.test/mcp', tokenEnv: 'PREVIEW_TOKEN' });
+  assert.equal(preview.workspaceId, 'preview-space'); assert.ok(preview.files.some(file => file.path === 'CLAUDE.md' && file.action === 'modify' && file.diff));
+  assert.deepEqual(preview.tokenEnvironmentNames, ['PREVIEW_TOKEN']); assert.doesNotMatch(JSON.stringify(preview), /secret-value/);
+  assert.deepEqual(await client.listWorkspaces(), before.workspaces); assert.deepEqual(await client.vault.events(), before.events);
+  assert.deepEqual({ claude: await readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'), agents: await readFile(path.join(projectDir, 'AGENTS.md'), 'utf8') }, { claude: before.claude, agents: before.agents });
 });
 
 test('concurrent init attempts leave one valid block and one valid binding', async t => {

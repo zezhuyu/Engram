@@ -8,6 +8,7 @@ import { AdaptiveStore } from './state.js';
 import { MicroTrigger, runWorker, serviceDefinition, type WorkerOptions, type WorkerSummary } from './worker.js';
 import type { AdaptiveConfig, Cycle } from './types.js';
 import { isValidTimeZone, parseHHMM } from './clock.js';
+import { refreshAutomaticDomainTags } from '../profile/domain-registry.js';
 
 export { touchActivity } from './activity.js';
 export * from './types.js';
@@ -43,8 +44,8 @@ export class AdaptiveIntelligence {
   events(limit?: number) { return this.store.events(limit); }
   serviceDefinition(kind: 'launchd' | 'systemd', params: Parameters<typeof serviceDefinition>[1]) { return serviceDefinition(kind, params); }
   /** Manual or scheduled run of the daily DAG against an explicitly sealed snapshot. Manual runs are idempotent per idempotencyKey. */
-  runCycle(options: RunOptions): Promise<RunResult> { return this.runner.run(options); }
-  resumeCycle(id: string, options: Omit<RunOptions, 'kind' | 'cycleId'> = {}): Promise<RunResult> { return this.runner.run({ ...options, kind: id.startsWith('manual-') ? 'manual' : 'scheduled', cycleId: id }); }
+  async runCycle(options: RunOptions): Promise<RunResult> { await refreshAutomaticDomainTags(this.vault); return this.runner.run(options); }
+  async resumeCycle(id: string, options: Omit<RunOptions, 'kind' | 'cycleId'> = {}): Promise<RunResult> { await refreshAutomaticDomainTags(this.vault); return this.runner.run({ ...options, kind: id.startsWith('manual-') ? 'manual' : 'scheduled', cycleId: id }); }
   cycles(): Promise<Cycle[]> { return this.store.cycles(); }
   cycle(id: string): Promise<Cycle | undefined> { return this.store.cycle(id); }
 

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { MDBError } from './types.js';
 import { looksSecret } from '../memory/redact.js';
+import type { ProfileDomain } from '../profile/domains.js';
 
 /**
  * Project binding: which workspace, server and hosts a project directory uses. It lives in `.engram/project.json`, is gitignored, and holds
@@ -14,9 +15,10 @@ export type BindingHost = (typeof BINDING_HOSTS)[number];
 export interface ProjectBinding {
   schemaVersion: 1; projectRoot: '.'; workspaceId: string; serverUrl?: string; hosts: BindingHost[]; credentialRef?: string; registrationId?: string;
   captureConsent: boolean; fileSyncConsent: boolean; /** false keeps accepted-profile text out of AGENTS.md/CLAUDE.md (it is still delivered at session start) */ profileInFiles?: boolean; notesInclude: string[]; notesExclude: string[]; profileMaxTokens: number; sessionContextMaxTokens: number;
+  /** Omitted on legacy bindings to preserve their historical unfiltered projection. */ domains?: ProfileDomain[];
   managed: { version: number; projectionRevision?: string; generatedAt?: string };
 }
-const KEYS = new Set(['schemaVersion', 'projectRoot', 'workspaceId', 'serverUrl', 'hosts', 'credentialRef', 'registrationId', 'captureConsent', 'fileSyncConsent', 'profileInFiles', 'notesInclude', 'notesExclude', 'profileMaxTokens', 'sessionContextMaxTokens', 'managed']);
+const KEYS = new Set(['schemaVersion', 'projectRoot', 'workspaceId', 'serverUrl', 'hosts', 'credentialRef', 'registrationId', 'captureConsent', 'fileSyncConsent', 'profileInFiles', 'notesInclude', 'notesExclude', 'profileMaxTokens', 'sessionContextMaxTokens', 'domains', 'managed']);
 const invalid = (message: string): never => { throw new MDBError('INVALID_INPUT', `Invalid project binding: ${message}`); };
 const WORKSPACE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/, ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -43,6 +45,7 @@ export function parseBinding(raw: unknown): ProjectBinding {
   if (v.registrationId !== undefined && (typeof v.registrationId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(v.registrationId))) invalid('registrationId');
   for (const flag of ['captureConsent', 'fileSyncConsent'] as const) if (typeof v[flag] !== 'boolean') invalid(flag);
   if (v.profileInFiles !== undefined && typeof v.profileInFiles !== 'boolean') invalid('profileInFiles');
+  if (v.domains !== undefined) { if (!Array.isArray(v.domains) || !v.domains.length || v.domains.length > 3 || v.domains.some(item => typeof item !== 'string' || (item !== 'general' && !/^[a-z][a-z0-9-]{1,23}$/.test(item)))) invalid('domains must contain 1–3 valid domain slugs'); }
   for (const list of ['notesInclude', 'notesExclude'] as const) { if (!Array.isArray(v[list]) || (v[list] as unknown[]).length > 50) invalid(list); (v[list] as unknown[]).forEach(item => glob(item, list)); }
   for (const item of v.notesInclude as string[]) if (!item.endsWith('.md')) invalid('notesInclude patterns must end in .md');
   const inRange = (value: unknown, lo: number, hi: number, label: string) => { if (!Number.isInteger(value) || (value as number) < lo || (value as number) > hi) invalid(`${label} must be ${lo}-${hi}`); };

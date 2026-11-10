@@ -7,10 +7,10 @@ import type { Document, Scope } from '../core/types.js';
 import { MDBError } from '../core/types.js';
 
 type Item = { path: string; absolute: string; bytes: Buffer; hash: string };
-type Options = { from: string; raw?: string; workspace: string; wikiCollection?: string; sourcesCollection?: string; label?: string; dryRun?: boolean; verify?: boolean; maxBytes?: number; progress?: (text: string) => void; limitedWikiLinks?: boolean };
+type Options = { from: string; raw?: string; workspace?: string; target?: 'workspace' | 'wiki'; namespace?: string; wikiCollection?: string; sourcesCollection?: string; label?: string; dryRun?: boolean; verify?: boolean; maxBytes?: number; progress?: (text: string) => void; limitedWikiLinks?: boolean };
 type Relation = { type: string; target: string; revisionId?: string };
 type ParsedPage = { value: Record<string, unknown>; body: string; raw?: string; error?: string };
-export type WikiImportReport = { workspace: string; pages: { imported: number; unchanged: number; updated: number; relinked: number; 'stale-links': unknown[]; warnings: unknown[]; skipped: unknown[]; errors: unknown[] }; sources: { imported: number; unchanged: number; updated: number; skipped: unknown[]; errors: unknown[] }; citations: { resolved: number; unresolved: unknown[] }; wikiLinks: { resolved: number; unresolved: unknown[]; ambiguous: number; placeholders: number }; redactions: number; durationMs: number };
+export type WikiImportReport = { target: 'workspace' | 'wiki'; workspace?: string; namespace?: string; pages: { imported: number; unchanged: number; updated: number; relinked: number; 'stale-links': unknown[]; warnings: unknown[]; skipped: unknown[]; errors: unknown[] }; sources: { imported: number; unchanged: number; updated: number; skipped: unknown[]; errors: unknown[] }; verification: { pageHashes: Array<{ path: string; sourceSha256: string; storedSha256?: string }>; sourceHashes: Array<{ path: string; sourceSha256: string; storedOriginalSha256?: string }> }; citations: { resolved: number; unresolved: unknown[] }; wikiLinks: { resolved: number; unresolved: unknown[]; ambiguous: number; placeholders: number }; redactions: number; durationMs: number };
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const within = (root: string, target: string) => target === root || target.startsWith(root + path.sep);
 const frontmatterMatch = (text: string) => /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
@@ -61,21 +61,26 @@ function sameRelations(a: Relation[], b: Relation[]): boolean {
 }
 
 export async function wikiImport(vault: Vault, options: Options): Promise<WikiImportReport> {
+  const target = options.target ?? 'workspace';
+  if (target === 'workspace' && !options.workspace) throw new MDBError('INVALID_INPUT', 'Workspace imports require a workspace name');
+  if (target === 'wiki' && (!options.namespace || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(options.namespace))) throw new MDBError('INVALID_INPUT', 'Global wiki imports require a lowercase --namespace slug');
+  const namespace = target === 'wiki' ? options.namespace! : undefined;
   if (options.maxBytes !== undefined && (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1)) throw new MDBError('INVALID_INPUT', 'Maximum import size must be a positive safe integer');
   const started = Date.now(), wikiRoot = path.resolve(options.from), rawRoot = options.raw ? path.resolve(options.raw) : undefined;
   const wikiCollection = options.wikiCollection ?? 'wiki', sourcesCollection = options.sourcesCollection ?? 'sources';
-  const pageScope = safeScope(options.workspace, wikiCollection), sourceScope = safeScope(options.workspace, sourcesCollection), wikiDirName = path.basename(wikiRoot).toLowerCase(), rawDirName = rawRoot ? path.basename(rawRoot) : undefined, projectDirName = path.basename(path.dirname(wikiRoot));
-  const report: WikiImportReport = { workspace: options.workspace, pages: { imported: 0, unchanged: 0, updated: 0, relinked: 0, 'stale-links': [], warnings: [], skipped: [], errors: [] }, sources: { imported: 0, unchanged: 0, updated: 0, skipped: [], errors: [] }, citations: { resolved: 0, unresolved: [] }, wikiLinks: { resolved: 0, unresolved: [], ambiguous: 0, placeholders: 0 }, redactions: 0, durationMs: 0 };
+  const pageScope: Scope = target === 'wiki' ? { type: 'global', area: 'wiki' } : safeScope(options.workspace!, wikiCollection), sourceScope: Scope = target === 'wiki' ? { type: 'global', area: 'wiki' } : safeScope(options.workspace!, sourcesCollection), wikiDirName = path.basename(wikiRoot).toLowerCase(), rawDirName = rawRoot ? path.basename(rawRoot) : undefined, projectDirName = path.basename(path.dirname(wikiRoot));
+  const storedPath = (relative: string) => namespace ? `${namespace}/${relative}` : relative;
+  const report: WikiImportReport = { target, ...(options.workspace ? { workspace: options.workspace } : {}), ...(namespace ? { namespace } : {}), pages: { imported: 0, unchanged: 0, updated: 0, relinked: 0, 'stale-links': [], warnings: [], skipped: [], errors: [] }, sources: { imported: 0, unchanged: 0, updated: 0, skipped: [], errors: [] }, verification: { pageHashes: [], sourceHashes: [] }, citations: { resolved: 0, unresolved: [] }, wikiLinks: { resolved: 0, unresolved: [], ambiguous: 0, placeholders: 0 }, redactions: 0, durationMs: 0 };
   const maxBytes = options.maxBytes ?? 25 * 1024 * 1024;
   const pageScan = await files(wikiRoot, '.md'), sourceScan = rawRoot ? await files(rawRoot, undefined, maxBytes) : { items: [], skipped: [] };
   const pageFiles = pageScan.items, sourceFiles = sourceScan.items;
   report.pages.skipped.push(...pageScan.skipped); report.sources.skipped.push(...sourceScan.skipped);
-  const existingWs = (await vault.listWorkspaces()).find(w => w.id === options.workspace);
-  if (!existingWs && !options.dryRun && !options.verify) await vault.createWorkspace(options.workspace, `Imported wiki: ${options.label ?? options.workspace}`);
-  if (!options.dryRun && !options.verify) {
-    const cols = existingWs ? await vault.listCollections(options.workspace) : [];
-    if (!cols.some(c=>c.id===wikiCollection)) await vault.createCollection(options.workspace, wikiCollection, 'Imported wiki pages');
-    if (!cols.some(c=>c.id===sourcesCollection)) await vault.createCollection(options.workspace, sourcesCollection, 'Imported original sources');
+  const existingWs = target === 'workspace' ? (await vault.listWorkspaces()).find(w => w.id === options.workspace) : undefined;
+  if (target === 'workspace' && !existingWs && !options.dryRun && !options.verify) await vault.createWorkspace(options.workspace!, `Imported wiki: ${options.label ?? options.workspace}`);
+  if (target === 'workspace' && !options.dryRun && !options.verify) {
+    const cols = existingWs ? await vault.listCollections(options.workspace!) : [];
+    if (!cols.some(c=>c.id===wikiCollection)) await vault.createCollection(options.workspace!, wikiCollection, 'Imported wiki pages');
+    if (!cols.some(c=>c.id===sourcesCollection)) await vault.createCollection(options.workspace!, sourcesCollection, 'Imported original sources');
   }
   const [docs] = await Promise.all([vault.listDocuments({ scopes: [pageScope, sourceScope] })]);
   const byKey = new Map<string,Document>(), byPath = new Map<string,Document>();
@@ -84,15 +89,17 @@ export async function wikiImport(vault: Vault, options: Options): Promise<WikiIm
   let count = 0;
   for (const item of sourceFiles) {
     count++; if (count % 25 === 0) options.progress?.(`wiki import: processed ${count} files`);
-    const key = `source:${item.path}:${item.hash}`, previous = byKey.get(key), old = byPath.get(`source:${item.path}`);
+    const key = `source:${storedPath(item.path)}:${item.hash}`, previous = byKey.get(key), old = byPath.get(`source:${storedPath(item.path)}`);
     try {
       let doc = previous;
       if (options.verify && old) {
+        const hashRecord: { path: string; sourceSha256: string; storedOriginalSha256?: string } = { path: item.path, sourceSha256: item.hash };
         if (old.metadata.importSha256 !== item.hash) report.sources.errors.push({ path: item.path, reason: 'source file hash mismatch' });
-        try { const stored = await fs.readFile(path.join(vault.root, String(old.metadata.originalPath))); if (hash(stored) !== item.hash) report.sources.errors.push({ path: item.path, reason: 'stored original bytes mismatch' }); }
+        try { const stored = await fs.readFile(path.join(vault.root, String(old.metadata.originalPath))); hashRecord.storedOriginalSha256 = hash(stored); if (hashRecord.storedOriginalSha256 !== item.hash) report.sources.errors.push({ path: item.path, reason: 'stored original bytes mismatch' }); }
         catch { report.sources.errors.push({ path: item.path, reason: 'stored original bytes missing' }); }
+        report.verification.sourceHashes.push(hashRecord);
       }
-      if (!doc && !options.dryRun && !options.verify) doc = await vault.ingest(item.absolute, sourceScope, { title: item.path, idempotencyKey: `wiki-import:${options.workspace}:${sourcesCollection}:${item.path}:${item.hash}`, metadata: { importKey: key, importPath: item.path, importSha256: item.hash, importLabel: options.label ?? '', importTime: new Date().toISOString() } });
+      if (!doc && !options.dryRun && !options.verify) doc = await vault.ingest(item.absolute, sourceScope, { title: item.path, idempotencyKey: `wiki-import:${namespace ?? options.workspace}:${sourcesCollection}:${item.path}:${item.hash}`, metadata: { importKey: key, importPath: storedPath(item.path), ...(namespace ? { wikiNamespace: namespace, wikiOriginalPath: item.path } : {}), importSha256: item.hash, importLabel: options.label ?? '', importTime: new Date().toISOString() } });
       if (previous) report.sources.unchanged++; else if (old) report.sources.updated++; else report.sources.imported++;
       if (doc) { sourceByPath.set(item.path, doc); const names = sourceByName.get(path.basename(item.path).toLowerCase()) ?? []; names.push(doc); sourceByName.set(path.basename(item.path).toLowerCase(), names); }
     } catch (error) { report.sources.errors.push({ path: item.path, reason: (error as Error).message }); }
@@ -100,7 +107,7 @@ export async function wikiImport(vault: Vault, options: Options): Promise<WikiIm
   const pageInfo = new Map<string, { item: Item; parsed: ParsedPage; title: string; doc?: Document }>();
   for (const item of pageFiles) {
     try {
-      if (isBinary(item.bytes)) { report.pages.skipped.push({ path: item.path, reason: 'non-UTF-8 page treated as binary source attachment' }); if (!options.dryRun && !options.verify) await vault.ingest(item.absolute, sourceScope, { title: item.path, metadata: { importKey: `binary-page:${item.path}:${item.hash}`, importPath: item.path, importSha256: item.hash } }); continue; }
+      if (isBinary(item.bytes)) { report.pages.skipped.push({ path: item.path, reason: 'non-UTF-8 page treated as binary source attachment' }); if (!options.dryRun && !options.verify) await vault.ingest(item.absolute, sourceScope, { title: item.path, metadata: { importKey: `binary-page:${storedPath(item.path)}:${item.hash}`, importPath: storedPath(item.path), ...(namespace ? { wikiNamespace: namespace, wikiOriginalPath: item.path } : {}), importSha256: item.hash } }); continue; }
       const text = item.bytes.toString('utf8'), parsed = frontmatter(text);
       const title = titleOf(parsed.error ? {} : parsed.value, parsed.error ? text : parsed.body, item.path);
       pageInfo.set(item.path, { item, parsed, title });
@@ -149,7 +156,7 @@ export async function wikiImport(vault: Vault, options: Options): Promise<WikiIm
   };
   const citationRelationsByPath = new Map<string, Relation[]>();
   for (const [relPath, info] of pageInfo) {
-    const { item, parsed, title } = info, key = `page:${item.path}:${item.hash}`, previous = byKey.get(key), old = byPath.get(`wiki_page:${item.path}`), isTemplate = item.path.split('/').includes('templates');
+    const { item, parsed, title } = info, key = `page:${storedPath(item.path)}:${item.hash}`, previous = byKey.get(key), old = byPath.get(`wiki_page:${storedPath(item.path)}`), isTemplate = item.path.split('/').includes('templates');
     const metadata = parsed.value;
     if (!options.verify && parsed.error) report.pages.warnings.push({ path: item.path, reason: parsed.error });
     const values = parsed.error ? [] : Array.isArray(metadata.sources) ? metadata.sources : metadata.sources !== undefined ? [metadata.sources] : metadata.source !== undefined ? [metadata.source] : [];
@@ -162,14 +169,20 @@ export async function wikiImport(vault: Vault, options: Options): Promise<WikiIm
     }
     citationRelationsByPath.set(relPath, citationRelations);
     if (options.verify) {
+      const hashRecord: { path: string; sourceSha256: string; storedSha256?: string } = { path: item.path, sourceSha256: item.hash };
       if (!old) { report.pages.imported++; report.pages.errors.push({ path: item.path, reason: 'page missing from vault' }); }
-      else if (old.metadata.importSha256 !== item.hash) { report.pages.updated++; report.pages.errors.push({ path: item.path, reason: 'page hash mismatch' }); }
-      else { report.pages.unchanged++; info.doc = old; pageByPath.set(relPath, old); }
+      else {
+        hashRecord.storedSha256 = hash(Buffer.from(old.body));
+        if (old.metadata.importSha256 !== item.hash || hashRecord.storedSha256 !== item.hash) { report.pages.updated++; report.pages.errors.push({ path: item.path, reason: 'page hash mismatch' }); }
+        else { report.pages.unchanged++; info.doc = old; pageByPath.set(relPath, old); }
+      }
+      report.verification.pageHashes.push(hashRecord);
       continue;
     }
     if (previous) { report.pages.unchanged++; info.doc = previous; pageByPath.set(relPath, previous); continue; }
     const tagValues = parsed.error ? [] : strings(metadata.tags), category = parsed.error ? [] : strings(metadata.category);
-    const input = { title, body: item.bytes.toString('utf8'), tags: [...tagValues, ...category.map(v=>`category:${v}`), ...(isTemplate ? ['template'] : []), ...(parsed.error ? ['unparsed-frontmatter'] : [])], status: !parsed.error && typeof metadata.status === 'string' ? metadata.status : 'active', links: [...citationRelations, ...(old?.links.filter(link=>link.type==='wiki_link') ?? [])], metadata: { importKey: key, importPath: item.path, importSha256: item.hash, importLabel: options.label ?? '', originalFrontmatter: parsed.error ? {} : metadata, originalBody: parsed.error ? item.bytes.toString('utf8') : parsed.body, sourceReferences: values, wikiLinks: [...item.bytes.toString('utf8').matchAll(/!?\[\[([^\]]+)\]\]/g)].map(m=>m[1]!.trim()), importedAt: new Date().toISOString(), untrusted: true, ...(parsed.error ? { frontmatterError: parsed.error, rawFrontmatter: parsed.raw ?? '' } : {}), ...(!parsed.error && typeof metadata.type === 'string' ? { sourceType: metadata.type } : {}), ...(!parsed.error && typeof metadata.summary === 'string' ? { summary: metadata.summary } : {}), ...(!parsed.error && typeof metadata.language === 'string' ? { language: metadata.language } : {}), ...(!parsed.error && metadata.created !== undefined ? { sourceCreated: metadata.created } : {}), ...(!parsed.error && metadata.updated !== undefined ? { sourceUpdated: metadata.updated } : {}) } };
+    const modelCompiled = !parsed.error && (['generatedBy','generated_by','model','modelName','model_name'].some(key => typeof metadata[key] === 'string') || metadata.provenance === 'model');
+    const input = { title, body: item.bytes.toString('utf8'), tags: [...tagValues, ...category.map(v=>`category:${v}`), ...(isTemplate ? ['template'] : []), ...(parsed.error ? ['unparsed-frontmatter'] : [])], status: !parsed.error && typeof metadata.status === 'string' ? metadata.status : target === 'wiki' ? (modelCompiled ? 'candidate' : 'accepted') : 'active', links: [...citationRelations, ...(old?.links.filter(link=>link.type==='wiki_link') ?? [])], metadata: { importKey: key, importPath: storedPath(item.path), ...(namespace ? { wikiNamespace: namespace, wikiOriginalPath: item.path, importProvenance: modelCompiled ? 'compiled-from-model' : 'owner-curated' } : {}), importSha256: item.hash, importLabel: options.label ?? '', originalFrontmatter: parsed.error ? {} : metadata, originalBody: parsed.error ? item.bytes.toString('utf8') : parsed.body, sourceReferences: values, wikiLinks: [...item.bytes.toString('utf8').matchAll(/!?\[\[([^\]]+)\]\]/g)].map(m=>m[1]!.trim()), importedAt: new Date().toISOString(), untrusted: true, ...(parsed.error ? { frontmatterError: parsed.error, rawFrontmatter: parsed.raw ?? '' } : {}), ...(!parsed.error && typeof metadata.type === 'string' ? { sourceType: metadata.type } : {}), ...(!parsed.error && typeof metadata.summary === 'string' ? { summary: metadata.summary } : {}), ...(!parsed.error && typeof metadata.language === 'string' ? { language: metadata.language } : {}), ...(!parsed.error && metadata.created !== undefined ? { sourceCreated: metadata.created } : {}), ...(!parsed.error && metadata.updated !== undefined ? { sourceUpdated: metadata.updated } : {}) } };
     try {
       const doc = !options.dryRun ? old ? await vault.patch({ objectId: old.id, expectedRevisionId: old.revisionId, title: input.title, body: input.body, tags: input.tags, status: input.status, links: input.links, metadataPatch: input.metadata }) : await vault.put({ scope: pageScope, kind: 'wiki_page', ...input }) : undefined;
       if (doc) { if (old) report.pages.updated++; else report.pages.imported++; info.doc = doc; pageByPath.set(item.path, doc); }
@@ -210,6 +223,6 @@ export async function wikiImport(vault: Vault, options: Options): Promise<WikiIm
     }
   }
   report.durationMs = Date.now() - started;
-  if (options.verify) report.sources.errors.push(...sourceFiles.filter(f=>!byPath.has(`source:${f.path}`)).map(f=>({ path:f.path, reason:'source missing from vault' })));
+  if (options.verify) report.sources.errors.push(...sourceFiles.filter(f=>!byPath.has(`source:${storedPath(f.path)}`)).map(f=>({ path:f.path, reason:'source missing from vault' })));
   return report;
 }

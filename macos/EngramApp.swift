@@ -38,6 +38,7 @@ final class EngramApp: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let id = Bundle.main.bundleIdentifier, NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { $0.processIdentifier != getpid() }) { NSApp.terminate(nil); return }
         NSApp.setActivationPolicy(.accessory)
+        installCommandLineShim()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let image = NSImage(contentsOf: Bundle.main.resourceURL!.appendingPathComponent("menu_bar.png"))
         image?.size = NSSize(width: 20, height: 20)
@@ -93,6 +94,16 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         refresh()
         refreshServerDashboardStatus()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh(); self?.refreshServerDashboardStatus() }
+    }
+    // Best effort only: command installation must never prevent either app or its worker from starting.
+    func installCommandLineShim() {
+        guard let backend = Bundle.main.resourceURL?.appendingPathComponent("backend"),
+              let node = Bundle.main.resourceURL?.appendingPathComponent("backend/runtime/bin/node"),
+              files.fileExists(atPath: node.path) else { return }
+        let process = Process(); process.executableURL = node
+        process.arguments = [backend.appendingPathComponent("app/bin/mdb.js").path, "shim", "install", "--dir", home.appendingPathComponent(".local/bin").path]
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return }
     }
     @discardableResult func add(_ menu: NSMenu, _ title: String, _ action: Selector) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")

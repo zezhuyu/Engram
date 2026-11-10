@@ -13,6 +13,7 @@ import type { Pressure } from './governor.js';
 import type { SnapshotView } from './snapshot.js';
 import type { AdaptiveStore } from './state.js';
 import { SUMMARY_GENERATOR_VERSION, type AdaptiveConfig, type CycleError, type Cycle, type OutputRef, type WorkspaceRecord } from './types.js';
+import { ensurePersonalCollection, PREFERENCE_SCOPE } from '../chat/live.js';
 
 /** Raised at cooperative checkpoints; the runner turns it into PAUSED and later resumes the same snapshot. */
 export class PauseSignal extends Error { constructor(readonly reason: 'FOREGROUND_ACTIVITY' | 'RESOURCE_PRESSURE', readonly detail: string) { super(detail); } }
@@ -75,25 +76,35 @@ export async function runWorkspaceStage(ctx: StageContext, workspaceId: string, 
     await checkpoint(ctx);
     const manifest = await buildChangeManifest(vault, view, ctx.events, workspaceId, rec.fromSequenceExclusive, cycle.localDate, cycle.timezone, ctx.config.baselineMaxItems);
     rec.manifestHash = manifest.hash; rec.changes = { added: manifest.entries.filter(e => e.status === 'added').length, modified: manifest.entries.filter(e => e.status === 'modified').length, deleted: manifest.entries.filter(e => e.status === 'deleted').length, restored: manifest.entries.filter(e => e.status === 'restored').length, documents: manifest.entries.length };
-    if (!manifest.entries.length) { rec.outcome = 'NO_ELIGIBLE_CHANGES'; rec.insights.status = 'NOT_NEEDED'; rec.status = 'SUCCEEDED'; await ctx.store.advanceCursors(c => { c.workspaces[workspaceId] = Math.max(c.workspaces[workspaceId] ?? 0, view.watermark); }); await ctx.checkpoint(); return rec; }
-    rec.outcome = manifest.baseline ? 'INITIAL_BASELINE' : 'SUMMARIZED';
+    const personalChatIds: string[] = [];
+    if (workspaceId === 'personal') for (const entry of view.entries().filter(item => item.scope.type === 'workspace' && item.scope.workspaceId === 'personal' && item.scope.collectionId === 'chat' && item.sequence > rec.fromSequenceExclusive).slice(-20)) {
+      const doc = await view.read(vault, entry.id); if (doc?.kind === 'chat_conversation') personalChatIds.push(entry.id);
+    }
+    if (!manifest.entries.length && !personalChatIds.length) { rec.outcome = 'NO_ELIGIBLE_CHANGES'; rec.insights.status = 'NOT_NEEDED'; rec.status = 'SUCCEEDED'; await ctx.store.advanceCursors(c => { c.workspaces[workspaceId] = Math.max(c.workspaces[workspaceId] ?? 0, view.watermark); }); await ctx.checkpoint(); return rec; }
+    rec.outcome = manifest.entries.length ? manifest.baseline ? 'INITIAL_BASELINE' : 'SUMMARIZED' : 'SUMMARIZED';
     rec.idempotencyKey = `adaptive:ws-summary:${workspaceId}:${cycle.id}:${rec.fromSequenceExclusive}:${view.watermark}:${manifest.hash.slice(0, 16)}:${SUMMARY_GENERATOR_VERSION}`;
-    if (!rec.summary) {
+    if (manifest.entries.length && !rec.summary) {
       await checkpoint(ctx); const rendered = renderDailySummary(manifest, cycle.localDate);
       const doc = await ctx.own(() => vault.put({ scope: wsScope(workspaceId), kind: 'workspace_daily_summary', title: `Workspace Daily Summary — ${cycle.localDate}`, body: rendered.markdown, tags: ['daily-summary', `date:${cycle.localDate}`], evidence: rendered.evidence, idempotencyKey: rec.idempotencyKey!, metadata: { workspace_id: workspaceId, local_date: cycle.localDate, cycle_id: cycle.id, status: rendered.status, ...(manifest.baseline ? { baseline: 'INITIAL_BASELINE' } : {}), from_committed_sequence_exclusive: rec.fromSequenceExclusive, to_committed_sequence_inclusive: view.watermark, source_manifest_hash: manifest.hash, generator_version: SUMMARY_GENERATOR_VERSION, source_revisions: manifest.entries.map(e => ({ objectId: e.objectId, revisionIds: e.revisions, sequences: e.sequences, status: e.status })) } }));
       rec.summary = { objectId: doc.id, revisionId: doc.revisionId }; cycle.permittedDerived.push({ ...rec.summary, stage: 'WORKSPACE_SUMMARY' }); await ctx.checkpoint();
     }
     const evidence = manifest.entries.filter(e => e.source === 'user-authored' && ['observation', 'note'].includes(e.kind) && e.status !== 'deleted').slice(-20);
     rec.insights.evidenceIds = evidence.map(e => e.objectId);
-    if (!evidence.length) rec.insights.status = 'NOT_NEEDED';
+    if (!evidence.length && !personalChatIds.length) rec.insights.status = 'NOT_NEEDED';
     else if (rec.insights.status !== 'COMPLETED') {
       // Extraction runs once per exact scope (workspace or one of its collections): the profile job matches its evidence by scope.
       const byScope = new Map<string, { scope: Scope; ids: string[] }>();
       for (const e of evidence) { const scope = view.entries().find(o => o.id === e.objectId)?.scope ?? wsScope(workspaceId); const key = JSON.stringify(scope); (byScope.get(key) ?? byScope.set(key, { scope, ids: [] }).get(key)!).ids.push(e.objectId); }
+      if (personalChatIds.length) {
+        await ensurePersonalCollection(vault, 'preferences');
+        const scope: Scope = { type: 'workspace', workspaceId: 'personal', collectionId: 'chat' }; const key = JSON.stringify(scope);
+        (byScope.get(key) ?? byScope.set(key, { scope, ids: [] }).get(key)!).ids.push(...personalChatIds);
+      }
       const done = new Set(rec.insights.jobKey ? rec.insights.jobKey.split(',') : []);
       for (const [key, group] of byScope) {
         const tag = createHash('sha256').update(key).digest('hex').slice(0, 8); if (done.has(tag)) continue;
-        const run = await runEngineJob(ctx, 'profile', { scope: group.scope, objectIds: group.ids, instruction: `adaptive:${cycle.id}:${workspaceId}:${tag}:profile`, snapshot: { cycleId: cycle.id, watermark: view.watermark } });
+        const personalChat = group.scope.type === 'workspace' && group.scope.workspaceId === 'personal' && group.scope.collectionId === 'chat';
+        const run = await runEngineJob(ctx, 'profile', { scope: group.scope, objectIds: group.ids, ...(personalChat ? { preferenceOutputScope: PREFERENCE_SCOPE } : {}), instruction: `adaptive:${cycle.id}:${workspaceId}:${tag}:profile`, snapshot: { cycleId: cycle.id, watermark: view.watermark } });
         if (run.status === 'blocked') throw new StageBlocked(err('MODEL_UNAVAILABLE', run.error ?? 'profile extraction blocked'));
         if (run.status !== 'complete' && !(run.status === 'pending' && run.incomplete && !run.error)) throw new Error(`profile extraction ${run.status}: ${run.error ?? ''}`);
         await settleProposals(ctx, run.proposals, 'user_insight', 'WORKSPACE_INSIGHT', rec);
@@ -132,7 +143,7 @@ export async function runGlobalStage(ctx: StageContext, globalCursor: number): P
     await checkpoint(ctx); const invalidated = await verifyDerived(ctx);
     // 1. extraction over frozen original user-authored GLOBAL evidence at or before W
     const evidence = view.entries().filter(o => o.scope.type === 'global' && o.scope.area !== 'discoveries' && o.sequence > globalCursor).map(o => o.id);
-    const authored: string[] = []; for (const id of evidence.slice(-60)) { const d = await view.read(vault, id); if (d && d.kind !== 'user_insight' && d.kind !== 'profile' && (d.metadata.speaker === 'user' || d.metadata.evidenceClass === 'explicit')) authored.push(id); }
+    const authored: string[] = []; for (const id of evidence.slice(-60)) { const d = await view.read(vault, id); const hasUserTurn = d?.kind === 'chat_conversation' && Array.isArray(d.metadata.turns) && (d.metadata.turns as Array<{ role?: string }>).some(turn => turn.role === 'user'); if (d && d.kind !== 'user_insight' && d.kind !== 'profile' && (d.metadata.speaker === 'user' || d.metadata.evidenceClass === 'explicit' || hasUserTurn)) authored.push(id); }
     rec.evidenceIds = authored.slice(-20);
     if (!rec.evidenceIds.length) rec.extraction = 'NOT_NEEDED';
     else if (rec.extraction !== 'COMPLETED') {

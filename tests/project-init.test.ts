@@ -28,7 +28,8 @@ test('project init installs host memory capture and injects accepted preferences
   assert.match(instructions, /Keep this section\./);
   assert.match(instructions, /The user wants tests run and detailed feedback/);
   assert.doesNotMatch(instructions, /This applies only to another project/);
-  assert.match(instructions, /Do not create project-local notes/);
+  assert.match(instructions, /superseded for new notes: use Engram tools in workspace/);
+  assert.match(instructions, /Never delete or move existing local notes/);
   const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as { permissions: { allow: string[] }; hooks: Record<string, unknown[]> };
   assert.deepEqual(settings.permissions.allow, ['Read']);
   assert.ok(Object.keys(settings.hooks).length > 0);

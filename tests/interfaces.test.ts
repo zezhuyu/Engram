@@ -10,6 +10,7 @@ import { hostActor } from '../packages/mcp/index.js';
 import { createHttpCredential, revokeHttpCredential } from '../packages/mcp/credentials.js';
 import { createRegistration } from '../packages/memory/capture.js';
 import { drainRemoteCaptureSpool, queueRemoteCapture } from '../packages/memory/remote-spool.js';
+import { openAIConfig } from '../packages/dashboard/openai-tunnel.js';
 
 const CLI = resolve('bin/mdb.js'), MCP = resolve('bin/mdb-mcp.js');
 function cli(root: string, ...args: string[]): unknown {
@@ -145,7 +146,7 @@ test('remote-web MCP exposes bounded authorized tools and idempotent versioned c
     const request = (id: number, name: string, args: unknown) => httpPost(endpoint, token, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
     const listed = await httpPost(endpoint, token, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'Mcp-Session-Id': session, 'MCP-Protocol-Version': '2025-03-26' });
     const tools = ((await listed.json()) as { result: { tools: Array<{ name: string }> } }).result.tools;
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_chat_get', 'engram_chat_list', 'engram_chat_project_link', 'engram_chat_project_remap', 'engram_chat_project_resolve', 'engram_chat_project_unlink', 'engram_chat_projects', 'engram_chat_search', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_handoff_status', 'engram_handoff_write', 'engram_history', 'engram_note_upsert', 'engram_patch', 'engram_project_projection', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_session_context', 'engram_task_upsert', 'engram_timeline', 'engram_workspace_ensure'].sort());
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['engram_capabilities', 'engram_chat_find', 'engram_chat_get', 'engram_chat_list', 'engram_chat_project_link', 'engram_chat_project_remap', 'engram_chat_project_resolve', 'engram_chat_project_unlink', 'engram_chat_projects', 'engram_chat_recent', 'engram_chat_record', 'engram_chat_search', 'engram_context', 'engram_create', 'engram_get', 'engram_get_many', 'engram_handoff_status', 'engram_handoff_write', 'engram_history', 'engram_note_upsert', 'engram_patch', 'engram_preference_record', 'engram_project_projection', 'engram_profile_statement', 'engram_propose_insight', 'engram_recent', 'engram_search', 'engram_session_context', 'engram_task_upsert', 'engram_timeline', 'engram_workspace_ensure'].sort());
     const capability = await request(3, 'engram_capabilities', { scope: { type: 'workspace', workspaceId: 'remote' } });
     assert.deepEqual((JSON.parse((await capability.json() as Reply).result!.content![0]!.text) as { authorization: unknown }).authorization, { read: true, write: true });
     const denied = await request(4, 'engram_create', { scope: { type: 'workspace', workspaceId: 'secret' }, kind: 'note', title: 'Hidden', body: 'no leak', source: 'ChatGPT', idempotencyKey: 'denied-write' });
@@ -191,6 +192,77 @@ test('remote-web MCP supports stateless server discovery and authorized tool cal
     const called = await httpPost(endpoint, token, call(3, 'engram_capabilities', {}), { 'MCP-Protocol-Version': '2026-07-28' });
     assert.equal(called.status, 200); assert.equal((await called.json() as Reply).result?.isError, undefined);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('real keyed HTTP gateway records chat revisions, directly updates profile, and keeps projections ACL scoped', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdb-live-chat-gateway-'));
+  const owner = new Engram(root); await owner.init({ sqlite: false });
+  await owner.createWorkspace('personal'); await owner.createCollection('personal', 'chat'); await owner.createWorkspace('alpha');
+  const actorId = 'chatgpt-gateway';
+  await owner.grant('personal', actorId, ['read', 'write']); await owner.grant('alpha', actorId, ['read', 'write']);
+  const permissions = ['workspace:personal:read', 'workspace:personal:write', 'workspace:alpha:read', 'workspace:alpha:write', 'global:profile:read', 'global:profile:write'];
+  const credential = await createHttpCredential(owner.vault, actorId, permissions);
+  const { endpoint, token } = await spawnHttpMcp(root, t, { token: credential.token, actor: actorId, toolset: 'remote-web' });
+  const reserved = createServer(); await new Promise<void>(resolveListen => reserved.listen(0, '127.0.0.1', resolveListen));
+  const address = reserved.address(); assert.ok(address && typeof address !== 'string'); const port = address.port;
+  await new Promise<void>(resolveClose => reserved.close(() => resolveClose()));
+  const entry = { name: 'personal', tokenEnv: 'CHAT_TOKEN', scope: { type: 'workspace', workspaceId: 'personal' }, allowWrites: true };
+  const gateway = spawn(process.execPath, [resolve('scripts/hosted/keyed-gateway.mjs')], { stdio: ['ignore', 'ignore', 'pipe'], env: {
+    ...process.env, GATEWAY_PORT: String(port), ENGRAM_UPSTREAM: endpoint, GATEWAY_WORKSPACES: JSON.stringify([entry]),
+    GATEWAY_DYNAMIC_WORKSPACES: JSON.stringify(['personal', 'alpha']), GATEWAY_DYNAMIC_TOKEN_ENV: 'CHAT_TOKEN', GATEWAY_DYNAMIC_WRITABLE_WORKSPACES: JSON.stringify(['personal', 'alpha']), CHAT_TOKEN: token,
+  } });
+  let logs = ''; gateway.stderr.setEncoding('utf8'); gateway.stderr.on('data', (chunk: string) => { logs += chunk; });
+  t.after(async () => { if (gateway.exitCode === null) { gateway.kill('SIGTERM'); await new Promise<void>(resolveExit => gateway.once('exit', () => resolveExit())); } await rm(root, { recursive: true, force: true }); });
+  let base = ''; for (let attempt = 0; attempt < 50; attempt++) { try { const response = await fetch(`http://127.0.0.1:${port}/health`); if (response.ok) { base = `http://127.0.0.1:${port}`; break; } } catch { await new Promise(resolveDelay => setTimeout(resolveDelay, 25)); } }
+  assert.ok(base, logs);
+  const call = async (id: number, name: string, args: Record<string, unknown>) => fetch(`${base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }) }).then(response => response.json() as Promise<Reply>);
+  const chatArgs = { provider: 'chatgpt', turnId: 'turn-1', role: 'user', text: 'I prefer concise implementation plans.' };
+  const first = await call(1, 'engram_chat_record', chatArgs); assert.equal(first.result?.isError, undefined);
+  const firstDoc = JSON.parse(first.result!.content![0]!.text) as { id: string; uri: string; revisionId: string; metadata: { externalConversationId: string } };
+  const replay = await call(2, 'engram_chat_record', chatArgs); const replayDoc = JSON.parse(replay.result!.content![0]!.text) as { revisionId: string };
+  assert.equal(replayDoc.revisionId, firstDoc.revisionId);
+  const next = await call(3, 'engram_chat_record', { ...chatArgs, conversationId: firstDoc.metadata.externalConversationId, turnId: 'turn-2', role: 'assistant', text: 'The assistant response is not user evidence.' });
+  const nextDoc = JSON.parse(next.result!.content![0]!.text) as { uri: string; revisionId: string };
+  assert.notEqual(nextDoc.revisionId, firstDoc.revisionId);
+  const secondChat = await call(30, 'engram_chat_record', { ...chatArgs, turnId: 'turn-second-chat', text: 'A different chat starts a new document.' });
+  assert.equal(secondChat.result?.isError, undefined);
+  assert.notEqual(JSON.parse(secondChat.result!.content![0]!.text).id, firstDoc.id);
+  const unknown = await call(31, 'engram_chat_record', { ...chatArgs, conversationId: 'unknown-chat-id', turnId: 'turn-unknown', text: 'Do not silently create.' });
+  assert.equal(unknown.result?.isError, true); assert.match(unknown.result!.content![0]!.text, /Conversation not found/);
+  const recentChats = await call(32, 'engram_chat_recent', { workspace: 'personal', limit: 1 });
+  assert.equal(recentChats.result?.isError, undefined);
+  assert.equal(JSON.parse(recentChats.result!.content![0]!.text).length, 1);
+  const foundChat = await call(33, 'engram_chat_find', { workspace: 'personal', query: 'concise implementation plans', limit: 10 });
+  assert.equal(JSON.parse(foundChat.result!.content![0]!.text).length, 1);
+  const assistantOnlySearch = await call(34, 'engram_chat_find', { workspace: 'personal', query: 'assistant response is not user evidence', limit: 10 });
+  assert.equal(JSON.parse(assistantOnlySearch.result!.content![0]!.text).length, 0, 'discovery search does not expose assistant-only transcript text');
+  const chats = await owner.vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'personal', collectionId: 'chat' }] });
+  assert.equal(chats.filter(doc => doc.kind === 'chat_conversation').length, 2, 'a second chat without an ID creates a new conversation document'); assert.equal((await owner.vault.history(firstDoc.id)).length, 2);
+  const profile = await call(4, 'engram_profile_statement', { workspace: 'profile', category: 'preference', preferenceKey: 'implementation_plans', claim: 'The user prefers concise implementation plans.' });
+  assert.equal(profile.result?.isError, undefined, JSON.stringify(profile));
+  assert.match(await readFile(join(root, 'PROFILE.md'), 'utf8'), /concise implementation plans/);
+  const preference = await call(40, 'engram_preference_record', { workspace: 'personal', category: 'working_style', preferenceKey: 'concise_plans', claim: 'The user prefers concise plans.', source: { uri: firstDoc.uri, revisionId: firstDoc.revisionId, span: 'I prefer concise implementation plans.' } });
+  assert.equal(preference.result?.isError, undefined, JSON.stringify(preference));
+  const preferenceDoc = JSON.parse(preference.result!.content![0]!.text) as { uri: string; metadata: Record<string, unknown> };
+  assert.match(preferenceDoc.uri, /workspaces\/personal\/collections\/preferences/);
+  assert.equal(preferenceDoc.metadata.preferenceKey, 'concise_plans');
+  assert.match(await readFile(join(root, 'PROFILE.md'), 'utf8'), /concise plans/);
+  const assistantPreference = await call(41, 'engram_preference_record', { workspace: 'personal', category: 'working_style', preferenceKey: 'assistant_claim', claim: 'The user prefers verbose answers.', source: { uri: nextDoc.uri, revisionId: nextDoc.revisionId, span: 'The assistant response is not user evidence.' } });
+  assert.equal(assistantPreference.result?.isError, true, 'assistant text cannot be accepted as a personal preference');
+  const connectorConfig = await openAIConfig(root, owner.vault);
+  assert.ok(connectorConfig.recentWrites.some(write => write.revisionId === firstDoc.revisionId && write.target.includes('/workspaces/personal/collections/chat/objects/')));
+  assert.ok(connectorConfig.recentWrites.some(write => write.target.includes('mdb://profile/objects/')));
+  const projection = await call(5, 'engram_project_projection', { workspaceId: 'personal', maxTokens: 100 });
+  assert.ok(projection.result, `${JSON.stringify(projection)}\n${logs}`);
+  assert.equal(projection.result.isError, undefined, `${JSON.stringify(projection)}\n${logs}`);
+  const structured = projection.result.structuredContent as { result?: unknown } | undefined;
+  const projectionValue = structured?.result ?? JSON.parse(projection.result.content?.[0]?.text ?? '{}');
+  const projected = projectionValue as { preferences: Array<{ scope: string; claim: string }>; insights: Array<{ scope: string; claim: string }> };
+  assert.ok([...projected.preferences, ...projected.insights].every(item => ['global', 'personal'].includes(item.scope)));
+  const projectedTokens = [...projected.preferences, ...projected.insights].reduce((total, item) => total + Math.ceil(item.claim.length / 4) + 2, 0);
+  assert.ok(projectedTokens <= 100, `gateway projection token estimate ${projectedTokens} exceeds the requested 100-token cap`);
+  const forbidden = await call(6, 'engram_project_projection', { workspaceId: 'secret', maxTokens: 100 });
+  assert.equal(forbidden.result?.isError, true); assert.doesNotMatch(JSON.stringify(forbidden), /classified|private claim/);
 });
 
 test('two scoped remote agents passively deliver lifecycle observations to one authorized memory store', async t => {

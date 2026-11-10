@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { queryCommand, lineGrep, STREAM_COMMANDS, STREAMED } from './query.js';
 import { detectUnix, unixMain } from './unix.js';
 import { resolve } from 'node:path';
-import { initializeProject, refreshContext, type Host } from '../project-init.js';
+import { initializeProject, previewProjectInit, refreshContext, type Host } from '../project-init.js';
 import { projectDoctor } from '../memory/project-doctor.js';
 import { runContextHook } from '../memory/context-hook.js';
 import { trustEngramCodexHooks } from '../memory/codex-trust.js';
@@ -24,6 +24,11 @@ import { drainRemoteCaptureSpool, queueRemoteCapture } from '../memory/remote-sp
 import type { JobKind } from '../intelligence/index.js';
 import { Engram, Vault, MDBError, OWNER, resolveRoot, createAdapter, captureFromHook, readStdin, recordExplicit, drainSpool, sweepAbandoned, spoolStats, listRegistrations, type MemorySearchRequest, type MemoryEventType, type InsightCategory, recordFeedback, rateDiscovery, resetLearning, learnedParams, familyOf, type RankingLabel, staleDiscoveries, readStats, type DiscoveryOutcome, type DreamMode, createProviderFromConfig, refreshRelevance, readRanking, clearRanking, relevanceStatus, showModel, setModel, testModel, isBuiltinProvider, effectiveProvider, type ModelProvider, type Scope, type PutInput, type PatchInput, CHAT_PROVIDERS, importChatEvents, parseGenericJson, parseChatGptExport, parseChatGptZip, parseClaudeExport, parseClaudeZip, parseGeminiTakeoutActivity, parseGeminiTakeoutZip, parseGenericJsonl } from '../sdk/index.js';
 import { wikiImport } from './wiki-import.js';
+import { wikiRetireWorkspace } from './wiki-retire.js';
+import { manageShim } from './shim.js';
+import { activeDomains, parseDomains, sanitizeDomainProposal, seedRegistry, suggestDomains } from '../profile/domains.js';
+import { readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDomainRegistry } from '../profile/domain-registry.js';
+import { unbindProject } from '../project-unbind.js';
 
 /** Builds the vault-configured built-in provider (openai, ollama, openai-compatible). Returns undefined, with a stderr note, when unavailable. */
 async function configuredProvider(root: string): Promise<ModelProvider | undefined> {
@@ -39,6 +44,7 @@ Usage: mdb COMMAND [arguments] [--root PATH] [--json]
 mcp-proxy --url URL --token-env VAR [--workspace ID] [--outbox DIR] [--transport-trust tailscale]   stdio proxy for an agent host; keeps task/note/handoff writes locally while the server is unreachable and sends them when it returns
 remote mode: any client runs these against the server instead of a local vault when --server URL [--token-env VAR] [--workspace ID] is given, ENGRAM_URL is set, or the current project is bound to a server (--root or --local forces a local vault)
 service install|uninstall|status|start|stop|logs [--platform macos|linux] [--url URL --token-file F] [--workspace ID] [--project-dir D] [--dry-run]   manage the per-user outbox delivery daemon
+shim install|status|remove [--dir PATH] [--json] [--dry-run]   manage the PATH launcher; never replaces or removes a foreign command
 service dashboard-url [--role client|server]   print the safe local dashboard URL and first-time setup state as JSON
     search | grep | context | get | history | put | patch | workspace list|create | collection list | memory recent|timeline|search|get | chat account|project|import|list|get|search | insight search | capabilities
 chat account register|revoke|list --provider chatgpt|claude|gemini|generic --account ID [--label LABEL]
@@ -52,7 +58,8 @@ outbox [drain --url URL --token-env VAR [--workspace ID] | watch --url URL (--to
 dashboard [--host ADDR] [--port N] [--open] [--allow-remote] [--client] [--reset-password] | credential create|list|revoke  password dashboard; remote admin is opt-in with MDB_DASHBOARD_REMOTE_ADMIN=true
 storage status | breakdown | cleanup --dry-run   report logical storage paths/usage and preview only positively marked orphan scratch (nothing is deleted)
 wiki lint [--scope S ...] [--check CODE ...] [--min-severity error|warning|info] [--limit N] [--propose [--dry-run]]   deterministic ACL-safe wiki lint and pending proposal generation
-wiki import --from DIR [--raw DIR] --workspace ID [--wiki-collection ID] [--sources-collection ID] [--label TEXT] [--max-bytes N] [--dry-run] | wiki import verify --from DIR [--raw DIR] --workspace ID   owner-only, read-only source tree migration and hash verification
+wiki import [--target wiki --namespace SLUG | --workspace ID] --from DIR [--raw DIR] [--label TEXT] [--max-bytes N] [--dry-run] | wiki import verify --from DIR [--raw DIR] (--namespace SLUG | --workspace ID)   owner-only migration and hash verification
+wiki retire-workspace --workspace NAME --into-wiki-verified [--allow-leftovers] [--dry-run] | --restore NAME   verify, tombstone or restore imported workspace copies
 wiki propose retire --page ID --revision REV --reason TEXT | restore --page ID --to-revision REV --revision CURRENT --reason TEXT | rename --page ID --revision REV --title NEW | merge --target ID --revision REV --source ID:REV ... --title T (--body T | --file F) --evidence URI:REV[:SPAN] ... --reason TEXT
 wiki proposals [--status pending|approved|rejected]   list visible reviewed wiki changes; trusted host reviews with intelligence approve|reject
 model show | test | set (--local-agent [claude|codex|auto] | --api URL [--model NAME] [--api-key-env VAR|--api-key-ref NAME] [--allow-network]) [--allow-private-to-remote] [--no-check]
@@ -62,17 +69,17 @@ init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
 init --project --host claude-code|codex [--no-local-mcp] [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
-                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools]: writes .engram/project.json (gitignored), managed blocks, MCP config
+                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools] [--dry-run]: previews project file changes; never writes project or vault state
 setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...] [--include PATTERN,...] [--claude-instructions-path PATH] [--codex-instructions-path PATH]
                                One-time user-level capture for EVERY project (also --show --pause --resume --uninstall)
 instructions install|refresh|status|remove --host claude-code|codex|both [--dry-run] [--claude-instructions-path PATH] [--codex-instructions-path PATH] [--json]
 notes sync [--project-dir PATH] [--report]          Synchronize approved Markdown files (needs init --file-sync-consent)
-project trust-codex-hooks [--yes] [--project-dir PATH]   Codex runs project hooks only once trusted: show, then (with --yes) trust, this project's Engram hooks
+project trust-codex-hooks [--yes] [--project-dir PATH] | unbind --root DIR [--dry-run] [--json]   trust this project's hooks or reverse only manifest-recorded init changes
 project refresh-context [--project-dir PATH] [--remote]   Rewrite the managed blocks from the current accepted profile
 doctor --project [--project-dir PATH] [--no-probe]        Per-feature PASS/INCOMPLETE/DISABLED/FAIL/NOT_RUN report for this project
 doctor | verify | recover | reconcile
 credential permissions-template --agent [--workspace ID[,ID...]] | create --actor ID --permissions SCOPE:read,SCOPE:write | rotate ID [--permissions ...] | revoke ID | audit
-workspace create ID | list | info ID | grant ID ACTOR --permissions read,write | revoke ID ACTOR
+workspace create ID | list | info ID | reactivate NAME | grant ID ACTOR --permissions read,write | revoke ID ACTOR
 collection create ID --workspace ID | list --workspace ID | info ID --workspace ID
 put --scope workspace:ID[:COLLECTION] --kind note --title TITLE --body TEXT [--file PATH]
 get ID [--revision REV] | patch ID --revision REV [--body TEXT] | delete ID --revision REV
@@ -116,7 +123,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'no-instructions', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'agent', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'allow-network', 'allow-private-to-remote', 'no-check', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password']);
+  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'no-instructions', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'agent', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'allow-network', 'allow-private-to-remote', 'no-check', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'into-wiki-verified', 'allow-leftovers', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -375,9 +382,9 @@ export async function execute(argv: string[]): Promise<unknown> {
     return outboxStatus(directory);
   }
   // Remote mode: a client machine runs the same commands against the server (see cli/remote.ts). --root or --local keeps a command on a local vault.
-  if (command === 'wiki' && sub === 'import' && (flags.server || flags['token-env'] || (process.env.ENGRAM_URL && !flags.root && !flags.local))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'wiki import is owner-CLI only and requires a local vault');
+  if (command === 'wiki' && ['import', 'retire-workspace'].includes(sub ?? '') && (flags.server || flags['token-env'] || (process.env.ENGRAM_URL && !flags.root && !flags.local))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'wiki migration tools are owner-CLI only and require a local vault');
   if (usesServer(command, sub)) { const target = await remoteTarget(flags); if (target) return runRemote(target, args, flags); }
-  const root = resolveRoot(text(flags, 'root'));
+  const root = resolveRoot(command === 'project' && sub === 'unbind' ? undefined : text(flags, 'root'));
   const client = new Engram(root, OWNER, (['intelligence', 'dream', 'profile'].includes(command) || (command === 'model' && sub === 'test') || (command === 'project' && sub === 'relevance' && third === 'refresh')) ? await configuredProvider(root) : undefined);
   if (STREAM_COMMANDS.has(command)) return queryCommand(argv, client, root); // typed query AST and stream aliases (packages/cli/query.ts)
   if (command === 'grep' && (flags.path || flags.stdin)) return lineGrep(argv, client);
@@ -443,15 +450,23 @@ export async function execute(argv: string[]): Promise<unknown> {
       }
       return `${urls.join('\n')}\n`;
     }
+    case 'shim': {
+      const action = required(sub, 'install|status|remove');
+      if (!['install', 'status', 'remove'].includes(action)) throw new MDBError('INVALID_ARGUMENT', 'usage: mdb shim install|status|remove [--dir PATH] [--json] [--dry-run]');
+      try { return await manageShim({ action: action as 'install' | 'status' | 'remove', ...(text(flags, 'dir') ? { dir: text(flags, 'dir') } : {}), dryRun: !!flags['dry-run'], json: !!flags.json }); }
+      catch (error) { throw new MDBError('INVALID_ARGUMENT', (error as Error).message); }
+    }
     case 'init': {
       const mcpUrl = text(flags, 'mcp-url');
-      const initialized = flags.project && mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
-      if (!flags.project) return initialized;
+      if (!flags.project) return await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
       const hostsFlag = text(flags, 'hosts'); const singleHost = text(flags, 'host');
       if (hostsFlag && singleHost) throw new MDBError('INVALID_ARGUMENT', 'use --host or --hosts, not both');
       const hostList = hostsFlag === 'auto' ? 'auto' as const : (hostsFlag ?? required(singleHost, '--host or --hosts')).split(',').map(item => item.trim()).filter(Boolean) as Host[];
       if (hostList !== 'auto') for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host/--hosts must name claude-code and/or codex (or --hosts auto)');
-      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['offline-buffer'] ? { offlineBuffer: true } : {}), ...(flags['no-local-mcp'] ? { noLocalMcp: true } : {}), ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
+      const initialized = flags['dry-run'] ? { mode: mcpUrl ? 'remote-mcp' : 'local-preview' } : mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
+      const allowed = activeDomains(mcpUrl || flags['dry-run'] ? seedRegistry() : (await readDomainRegistry(v)).registry).map(d => d.slug);
+      if (flags['dry-run']) return previewProjectInit(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(flags['offline-buffer'] ? { offlineBuffer: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'domain') ? { domains: parseDomains(text(flags, 'domain')!, allowed) } : {}), ...(flags['no-local-mcp'] ? { noLocalMcp: true } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(flags.consent ? { consent: true } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}) });
+      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['offline-buffer'] ? { offlineBuffer: true } : {}), ...(flags['no-local-mcp'] ? { noLocalMcp: true } : {}), ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(text(flags, 'domain') ? { domains: parseDomains(text(flags, 'domain')!, allowed) } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
       return { initialized, project: setup };
     }
     case 'notes': {
@@ -473,7 +488,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (flags.show) return userStatus(instructionOverrides(flags));
       if (flags.pause) return setUserPaused(true);
       if (flags.resume) return setUserPaused(false);
-      if (flags.uninstall) return uninstallUser(instructionOverrides(flags));
+      if (flags.uninstall) { const removed = await uninstallUser(instructionOverrides(flags)); const shim = await manageShim({ action: 'remove' }); return { ...removed, shim }; }
       const hostList = required(text(flags, 'hosts'), '--hosts').split(',').map(item => item.trim()).filter(Boolean) as Host[];
       for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--hosts must name claude-code and/or codex');
       return setupUser({ hosts: hostList, mcpUrl: required(text(flags, 'mcp-url'), '--mcp-url'), tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')!, registrationId: required(text(flags, 'registration'), '--registration'), principalId: required(text(flags, 'principal'), '--principal'), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(list(flags, 'exclude') ? { exclude: list(flags, 'exclude')! } : {}), ...(list(flags, 'include') ? { include: list(flags, 'include')! } : {}), ...instructionOverrides(flags), noInstructions: !!flags['no-instructions'], consent: !!flags.consent });
@@ -488,7 +503,14 @@ export async function execute(argv: string[]): Promise<unknown> {
     }
     case 'doctor': if (flags.project) return projectDoctor(resolve(text(flags, 'project-dir', process.cwd())!), { ...(flags['no-probe'] ? { probeRemote: false } : {}) }); return v.doctor();
     case 'project': {
+      if (sub === 'unbind') {
+        const dir = resolve(text(flags, 'root') ?? text(flags, 'project-dir', process.cwd())!);
+        const result = await unbindProject(dir, { dryRun: !!flags['dry-run'], vaultRoot: root });
+        if (result.conflicts.length) throw new MDBError('CONFLICT', `Project unbind refused because these init-managed files changed: ${result.conflicts.join(', ')}`);
+        return result;
+      }
       if (sub === 'trust-codex-hooks') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const result = await trustEngramCodexHooks(dir, { confirm: !!flags.yes }); return flags.yes ? result : { ...result, note: 'Nothing was changed. These are the exact hook commands Codex would then run in this project; rerun with --yes to record trust for them (only these) in your Codex config.' }; }
+      if (sub === 'domains' && third === 'set') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const binding = await readBinding(dir); const allowed = activeDomains((await readDomainRegistry(v)).registry).map(d => d.slug); const domains = parseDomains(required(text(flags, 'domains'), '--domains'), allowed); const updated = { ...binding, domains }; const { writeBinding } = await import('../core/project-binding.js'); await writeBinding(dir, updated); const refreshed = await refreshContext(dir, flags.remote ? {} : { client }); return { projectDir: dir, domains, refreshed }; }
       if (sub === 'relevance') {
         const workspaceId = required(text(flags, 'workspace'), '--workspace');
         if (third === 'refresh') return refreshRelevance(client, workspaceId, await configuredProvider(root), await v.config());
@@ -496,7 +518,7 @@ export async function execute(argv: string[]): Promise<unknown> {
         if (third === 'show' || !third) return { workspaceId, status: await relevanceStatus(client, workspaceId), ranking: (await readRanking(client, workspaceId)) ?? null };
         throw new MDBError('INVALID_ARGUMENT', 'usage: project relevance refresh|show|clear --workspace ID');
       }
-      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project refresh-context | relevance refresh|show|clear | trust-codex-hooks [--yes] [--project-dir PATH]');
+      if (sub !== 'refresh-context') throw new MDBError('INVALID_ARGUMENT', 'usage: project domains set --domains a,b [--project-dir PATH] | refresh-context | relevance refresh|show|clear | trust-codex-hooks [--yes] [--project-dir PATH]');
       return refreshContext(resolve(text(flags, 'project-dir', process.cwd())!), flags.remote ? {} : { client });
     }
     case 'verify': return v.verify();
@@ -506,6 +528,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'daily') { const a = client.adaptive; const ws = required(text(flags, 'workspace'), '--workspace'); if (third === 'show') return a.dailyShow(ws, required(text(flags, 'date'), '--date')); return a.dailyList(ws, { ...(text(flags, 'from') ? { from: text(flags, 'from')! } : {}), ...(text(flags, 'to') ? { to: text(flags, 'to')! } : {}) }); }
       if (sub === 'changes') return client.adaptive.changesSince(required(text(flags, 'workspace'), '--workspace'), required(text(flags, 'since'), '--since'));
       if (sub === 'create') return v.createWorkspace(required(third, 'workspace ID'), text(flags, 'description', ''));
+      if (sub === 'reactivate') { const id = required(third, 'workspace name'); const workspace = await v.getWorkspace(id); if (!workspace.retired) throw new MDBError('INVALID_ARGUMENT', `Workspace ${id} is not retired; nothing to reactivate`); return v.setWorkspaceRetired(id, false); }
       if (sub === 'list') return v.listWorkspaces();
       if (sub === 'info') return (await v.listWorkspaces()).find(w => w.id === required(third, 'workspace ID')) ?? null;
       if (sub === 'grant') { const permissions = required(text(flags, 'permissions'), '--permissions').split(','); if (permissions.some(p => !['read', 'write', 'promote'].includes(p))) throw new MDBError('INVALID_ARGUMENT', 'Invalid grant permission'); return v.grant(required(third, 'workspace ID'), required(fourth, 'actor ID'), permissions as ('read' | 'write' | 'promote')[]); }
@@ -548,6 +571,39 @@ export async function execute(argv: string[]): Promise<unknown> {
       return setModel(v, { provider: text(flags, 'provider'), localAgent: localAgent as 'claude' | 'codex' | 'auto' | undefined, api: text(flags, 'api'), modelName: text(flags, 'model'), baseUrl: text(flags, 'base-url'), apiKeyEnv: text(flags, 'api-key-env'), apiKeyRef: text(flags, 'api-key-ref'), command: text(flags, 'command'), allowNetwork: bool('allow-network'), allowPrivateContentToRemote: bool('allow-private-to-remote'), redactPiiForLocal: bool('redact-pii-for-local'), timeoutMs: number(flags, 'timeout-ms'), maxOutputTokens: number(flags, 'max-output-tokens'), maxInputTokens: number(flags, 'max-input-tokens'), locality: text(flags, 'locality') as 'local' | 'remote' | undefined, check: flags['no-check'] ? false : true });
     }
     case 'profile':
+      if (sub === 'domains') {
+        const action = third;
+        const { registry, revisionId: registryRevision } = await readDomainRegistry(v);
+        const domainSlugs = activeDomains(registry).map(d => d.slug);
+        const docs = (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] })).filter(d => d.kind === 'user_insight' && d.status === 'accepted' && ['preference', 'working_style'].includes(String(d.metadata.category)));
+        if (action === 'registry' || action === 'list-domains') return { revisionId: registryRevision, autoApply: registry.autoApply, domains: registry.domains };
+        if (action === 'add') {
+          const proposal = { slug: required(text(flags, 'slug'), '--slug'), label: required(text(flags, 'label'), '--label'), description: required(text(flags, 'description'), '--description'), keywords: (text(flags, 'keywords') ?? '').split(',').map(x => x.trim()).filter(Boolean) };
+          const evidence = await verifyDomainEvidence(v, [required(text(flags, 'evidence'), '--evidence')]);
+          const candidate = sanitizeDomainProposal(proposal, evidence, registry, new Date().toISOString(), undefined, { maxActive: (await v.config()).profile?.domains?.maxActive, maxPerDreamCycle: (await v.config()).profile?.domains?.maxPerDreamCycle });
+          if (!candidate.record) throw new MDBError('INVALID_INPUT', candidate.reason ?? `Domain already exists; merge into ${candidate.mergeInto ?? 'an active domain'}`);
+          registry.domains.push({ ...candidate.record, origin: 'owner' });
+          const saved = await writeDomainRegistry(v, registry, registryRevision);
+          return { domain: candidate.record.slug, revisionId: saved.revisionId };
+        }
+        if (action === 'auto-apply') {
+          if (flags.yes !== true) return { dryRun: true, current: registry.autoApply, proposed: text(flags, 'enabled') === 'false' ? false : true, note: 'Pass --yes to save the registry revision.' };
+          registry.autoApply = text(flags, 'enabled') !== 'false'; await setDomainAutoApply(v, registry.autoApply);
+          const saved = await writeDomainRegistry(v, registry, registryRevision); return { autoApply: registry.autoApply, revisionId: saved.revisionId };
+        }
+        if (action === 'list') return docs.map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, domains: d.metadata.domains ?? ['general'] }));
+        if (action === 'suggest' || action === 'apply') { const suggestions = docs.map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, current: d.metadata.domains ?? ['general'], proposed: suggestDomains(d.body, registry) })); if (action === 'suggest' || !flags.yes) return { dryRun: true, suggestions, discoveredDomains: [], note: 'No provider-driven domain discovery is available from this deterministic classifier. Review tag proposals; pass --yes to apply.' }; const updated = []; for (const d of docs) if (d.metadata.tagSource !== 'owner') { const domains = suggestDomains(d.body, registry); updated.push(await v.patch({ objectId: d.id, expectedRevisionId: d.revisionId, metadataPatch: { domains, tagSource: 'classifier' } })); } return { dryRun: false, updated: updated.map(d => ({ id: d.id, revisionId: d.revisionId })) }; }
+        if (action === 'set') { const id = required(fourth, 'insight ID'); const domains = parseDomains(required(text(flags, 'domains'), '--domains'), domainSlugs); const d = await v.get(id); if (d.kind !== 'user_insight' || d.status !== 'accepted' || !['preference', 'working_style'].includes(String(d.metadata.category))) throw new MDBError('INVALID_INPUT', 'Domains can only be set on accepted preference or working_style insights'); const updated = await v.patch({ objectId: d.id, expectedRevisionId: d.revisionId, metadataPatch: { domains, tagSource: 'owner' } }); return { id: updated.id, revisionId: updated.revisionId, domains }; }
+        if (action === 'rename' || action === 'retire' || action === 'merge') {
+          const slug = required(fourth, 'domain slug'), record = registry.domains.find(d => d.slug === slug && d.status === 'active'); if (!record || slug === 'general') throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Active non-general domain not found');
+          if (action === 'rename') { record.label = required(text(flags, 'label'), '--label').slice(0, 40); record.origin = 'owner'; }
+          if ((action === 'retire' || action === 'merge') && !flags.retag) throw new MDBError('INVALID_INPUT', `${action} requires --retag to revise affected items`);
+          if (action === 'retire') { record.status = 'retired'; for (const insight of docs) { if (insight.metadata.tagSource === 'owner' || !Array.isArray(insight.metadata.domains) || !insight.metadata.domains.includes(slug)) continue; await v.patch({ objectId: insight.id, expectedRevisionId: insight.revisionId, metadataPatch: { domains: ['general'], tagSource: 'classifier' } }); } }
+          if (action === 'merge') { const target = required(text(flags, 'into'), '--into'); if (!domainSlugs.includes(target) || target === slug) throw new MDBError('INVALID_INPUT', `--into must be an active domain: ${domainSlugs.join(', ')}`); record.status = 'merged'; record.mergedInto = target; for (const insight of docs) { if (insight.metadata.tagSource === 'owner' || !Array.isArray(insight.metadata.domains) || !insight.metadata.domains.includes(slug)) continue; const domains = [...new Set((insight.metadata.domains as string[]).map(d => d === slug ? target : d))].slice(0, 3); await v.patch({ objectId: insight.id, expectedRevisionId: insight.revisionId, metadataPatch: { domains, tagSource: 'classifier' } }); } }
+          const saved = await writeDomainRegistry(v, registry, registryRevision); return { domain: slug, revisionId: saved.revisionId };
+        }
+        throw new MDBError('INVALID_ARGUMENT', 'usage: profile domains list|suggest|apply [--yes] | set ID --domains a,b | registry | add | rename|merge|retire SLUG');
+      }
       if (sub === 'show') return (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] }));
       if (sub === 'propose') return engine.enqueue('profile', { ...jsonInput(flags), scope: parseScope(flags) });
       if (sub === 'approve' || sub === 'reject') return engine.review(required(third, 'proposal ID'), sub === 'approve', text(flags, 'reason'), { confirmSensitive: !!flags['confirm-sensitive'], confirmHypothesis: !!flags['confirm-hypothesis'] });
@@ -642,9 +698,12 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'wiki':
       if (sub === 'import') {
         const verifyImport = third === 'verify';
-        if (third && !verifyImport) throw new MDBError('INVALID_ARGUMENT', 'usage: wiki import --from DIR [--raw DIR] --workspace ID | wiki import verify --from DIR [--raw DIR] --workspace ID');
-        return wikiImport(v, { from: required(text(flags, 'from'), '--from'), ...(text(flags, 'raw') ? { raw: text(flags, 'raw')! } : {}), workspace: required(text(flags, 'workspace'), '--workspace'), ...(text(flags, 'wiki-collection') ? { wikiCollection: text(flags, 'wiki-collection')! } : {}), ...(text(flags, 'sources-collection') ? { sourcesCollection: text(flags, 'sources-collection')! } : {}), ...(text(flags, 'label') ? { label: text(flags, 'label')! } : {}), ...(number(flags, 'max-bytes') !== undefined ? { maxBytes: number(flags, 'max-bytes')! } : {}), dryRun: !!flags['dry-run'], verify: verifyImport, progress: message => process.stderr.write(`${message}\n`) });
+        if (third && !verifyImport) throw new MDBError('INVALID_ARGUMENT', 'usage: wiki import [--target wiki --namespace SLUG | --workspace ID] --from DIR');
+        const target = text(flags, 'target') ?? (text(flags, 'workspace') ? 'workspace' : 'wiki');
+        if (!['wiki', 'workspace'].includes(target)) throw new MDBError('INVALID_ARGUMENT', '--target must be wiki or workspace');
+        return wikiImport(v, { from: required(text(flags, 'from'), '--from'), target: target as 'wiki'|'workspace', ...(text(flags, 'raw') ? { raw: text(flags, 'raw')! } : {}), ...(text(flags, 'workspace') ? { workspace: text(flags, 'workspace')! } : {}), ...(text(flags, 'namespace') ? { namespace: text(flags, 'namespace')! } : {}), ...(text(flags, 'wiki-collection') ? { wikiCollection: text(flags, 'wiki-collection')! } : {}), ...(text(flags, 'sources-collection') ? { sourcesCollection: text(flags, 'sources-collection')! } : {}), ...(text(flags, 'label') ? { label: text(flags, 'label')! } : {}), ...(number(flags, 'max-bytes') !== undefined ? { maxBytes: number(flags, 'max-bytes')! } : {}), dryRun: !!flags['dry-run'], verify: verifyImport, progress: message => process.stderr.write(`${message}\n`) });
       }
+      if (sub === 'retire-workspace') return wikiRetireWorkspace(v, { workspace: required(text(flags, 'workspace') ?? (typeof flags.restore === 'string' ? flags.restore : undefined), '--workspace or --restore NAME'), intoWikiVerified: flags['into-wiki-verified'] === true, restore: flags.restore === true || typeof flags.restore === 'string', allowLeftovers: flags['allow-leftovers'] === true, dryRun: flags['dry-run'] === true });
       if (sub === 'proposals') return (await engine.proposals()).filter(p => p.input.kind === 'wiki_change' && (!text(flags, 'status') || p.status === text(flags, 'status')));
       if (sub === 'propose') {
         const action = third; if (!['retire', 'restore', 'rename', 'merge'].includes(action ?? '')) throw new MDBError('INVALID_ARGUMENT', 'wiki propose requires retire, restore, rename, or merge');
@@ -679,7 +738,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); return { root: restored.root }; } return v.backup(resolve(id()));
   }
   throw new MDBError('INVALID_ARGUMENT', 'Unknown command. Run mdb help.');
-  } finally { process.removeListener('SIGINT', interrupt); try { if (!['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); } finally { await client.close(); } }
+  } finally { process.removeListener('SIGINT', interrupt); try { if (!(command === 'init' && flags['dry-run']) && !(command === 'project' && sub === 'unbind') && !['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); } finally { await client.close(); } }
 }
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const unix = detectUnix(argv); if (unix) { process.exitCode = await unixMain(unix.command, unix.rest, unix.root); process.stdin.destroy(); return; } // Unix-style text tools: own option parsing and exit codes (docs/unix.md)

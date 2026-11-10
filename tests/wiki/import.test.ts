@@ -6,6 +6,10 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { disposableVault } from '../helpers/disposable-vault.js';
 import { wikiImport } from '../../packages/cli/wiki-import.js';
+import { wikiRetireWorkspace } from '../../packages/cli/wiki-retire.js';
+import { execute } from '../../packages/cli/index.js';
+import { SearchEngine } from '../../packages/search-files/index.js';
+import { dreamPool } from '../../packages/intelligence/dream/context.js';
 import { Vault } from '../../packages/core/vault.js';
 
 const sha = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');
@@ -149,4 +153,130 @@ test('wiki links to imported raw sources become references and relink once the s
   const third = await wikiImport(vault, options);
   assert.equal(third.pages.relinked, 0);
   assert.equal((await vault.history(importedPage.id)).length, revisionCount);
+});
+
+test('global wiki imports namespace colliding paths, resolve links locally, preserve review provenance, and enforce ACLs', async t => {
+  const { root, vault } = await disposableVault(t); const fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-global-wiki-'));
+  t.after(() => fs.rm(fixture, { recursive: true, force: true }));
+  for (const [namespace, body, target] of [['kb', 'KB page', 'kb-only'], ['aegiswealth', 'Aegis page', 'aegis-only']] as const) {
+    const base = path.join(fixture, namespace), wiki = path.join(base, 'wiki'), raw = path.join(base, 'raw'); await fs.mkdir(wiki, { recursive: true }); await fs.mkdir(raw);
+    await fs.writeFile(path.join(wiki, 'same.md'), `---\ntitle: Same\n---\n${body} [[target]]`);
+    await fs.writeFile(path.join(wiki, 'target.md'), `---\ntitle: ${target}\n---\n${target}`);
+    await fs.writeFile(path.join(raw, 'same.bin'), Buffer.from(namespace));
+    const options = { from: wiki, raw, target: 'wiki' as const, namespace };
+    const first = await wikiImport(vault, options); assert.equal(first.pages.imported, 2); assert.equal(first.sources.imported, 1); assert.equal(first.wikiLinks.resolved, 1);
+    const verify = await wikiImport(vault, { ...options, verify: true }); assert.deepEqual(verify.pages.errors, []); assert.deepEqual(verify.sources.errors, []); assert.equal(verify.verification.pageHashes.length, 2); assert.equal(verify.verification.sourceHashes.length, 1); assert.ok(verify.verification.pageHashes.every(item => item.sourceSha256 === item.storedSha256)); assert.ok(verify.verification.sourceHashes.every(item => item.sourceSha256 === item.storedOriginalSha256)); assert.equal(verify.wikiLinks.unresolved.length, 0);
+    const before = (await vault.events()).length, second = await wikiImport(vault, options); assert.equal(second.pages.unchanged, 2); assert.equal(second.sources.unchanged, 1); assert.equal((await vault.events()).length, before);
+  }
+  const docs = await vault.listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] });
+  const samePages = docs.filter(doc => doc.kind === 'wiki_page' && doc.metadata.wikiOriginalPath === 'same.md');
+  assert.equal(samePages.length, 2); assert.equal(new Set(samePages.map(doc => doc.path)).size, 2);
+  assert.deepEqual(new Set(samePages.map(doc => doc.status)), new Set(['accepted']));
+  assert.ok(samePages.every(doc => doc.metadata.importProvenance === 'owner-curated'));
+  for (const page of samePages) assert.ok(page.links.some(link => link.type === 'wiki_link' && docs.find(other => other.uri === link.target)?.metadata.wikiNamespace === page.metadata.wikiNamespace));
+  const compiledDir = path.join(fixture, 'compiled'); await fs.mkdir(compiledDir);
+  await fs.writeFile(path.join(compiledDir, 'model.md'), '---\ntitle: Model page\ngenerated_by: local-model\n---\nDerived');
+  await wikiImport(vault, { from: compiledDir, target: 'wiki', namespace: 'compiled' });
+  const compiled = (await vault.listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] })).find(doc => doc.metadata.wikiNamespace === 'compiled')!;
+  assert.equal(compiled.status, 'candidate'); assert.equal(compiled.metadata.importProvenance, 'compiled-from-model');
+  const globalReader = new SearchEngine(new Vault(root, { actorId: 'wiki-reader', permissions: ['global:wiki:read'] }));
+  const workspaceReader = new SearchEngine(new Vault(root, { actorId: 'workspace-reader', permissions: ['workspace:only:read'] }));
+  const globalResults = await globalReader.query({ query: 'KB page', mode: 'keyword', scopes: [{ type: 'global', area: 'wiki' }] });
+  assert.equal(globalResults.hits.length, 1);
+  await vault.createWorkspace('only'); await vault.put({ scope: { type: 'workspace', workspaceId: 'only' }, kind: 'note', title: 'Workspace copy', body: 'KB page workspace-only' });
+  const workspaceResults = await new SearchEngine(new Vault(root, { actorId: 'workspace-reader', permissions: ['workspace:only:read'] })).query({ query: 'KB page', mode: 'keyword', scopes: [{ type: 'workspace', workspaceId: 'only' }] });
+  assert.equal(workspaceResults.hits.length, 1); assert.equal(workspaceResults.hits[0]!.title, 'Workspace copy');
+  const denied = await globalReader.query({ query: 'KB page', mode: 'keyword', scopes: [{ type: 'workspace', workspaceId: 'only' }] }); assert.equal(denied.hits.length, 0);
+  const noGlobalAccess = await workspaceReader.query({ query: 'KB page', mode: 'keyword', scopes: [{ type: 'global', area: 'wiki' }] }); assert.equal(noGlobalAccess.hits.length, 0);
+  assert.deepEqual(await new Vault(root, { actorId: 'workspace-reader', permissions: ['workspace:only:read'] }).listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] }), []);
+});
+
+test('retire-workspace dry-runs, refuses unverifiable originals, tombstones only through Vault, and restores history', async t => {
+  const { root, vault } = await disposableVault(t); const fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-wiki-retire-'));
+  t.after(() => fs.rm(fixture, { recursive: true, force: true }));
+  const oldWiki = path.join(fixture, 'wiki'), oldRaw = path.join(fixture, 'raw'), globalWiki = path.join(fixture, 'global');
+  await fs.mkdir(oldWiki); await fs.mkdir(oldRaw); await fs.mkdir(globalWiki);
+  const page = '# Legacy page\n'; const raw = Buffer.from('legacy original bytes');
+  await fs.writeFile(path.join(oldWiki, 'page.md'), page); await fs.writeFile(path.join(oldRaw, 'source.txt'), raw);
+  await wikiImport(vault, { from: oldWiki, raw: oldRaw, workspace: 'legacy' });
+  const oldDocs = await vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'legacy' }] });
+  const originals = path.join(fixture, 'global-raw'); await fs.mkdir(originals); await fs.writeFile(path.join(globalWiki, 'page.md'), page); await fs.writeFile(path.join(originals, 'source.txt'), raw);
+  await wikiImport(vault, { from: globalWiki, raw: originals, target: 'wiki', namespace: 'legacy' });
+  const before = (await vault.events()).length;
+  const dry = await execute(['wiki', 'retire-workspace', '--workspace', 'legacy', '--into-wiki-verified', '--dry-run', '--root', root]) as Awaited<ReturnType<typeof wikiRetireWorkspace>>;
+  assert.deepEqual(dry.errors, []); assert.equal(dry.verifiedSources, 1); assert.equal(dry.deleted.length, 2); assert.equal((await vault.events()).length, before);
+  const source = oldDocs.find(doc => doc.kind === 'source')!, sourceRev = source.revisionId;
+  const pageDoc = oldDocs.find(doc => doc.kind === 'wiki_page')!;
+  const retired = await wikiRetireWorkspace(vault, { workspace: 'legacy', intoWikiVerified: true });
+  assert.deepEqual(retired.errors, []); assert.equal(retired.deleted.length, 2); assert.ok(retired.deleted.every(item => item.revisionId));
+  assert.equal((await vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'legacy' }] })).length, 0);
+  const tombstone = await vault.get(source.id); assert.equal(tombstone.status, 'deleted');
+  const restored = await vault.restore(source.id, sourceRev, tombstone.revisionId); assert.equal(restored.status, source.status);
+  assert.deepEqual((await vault.history(pageDoc.id)).map(item => item.body), [page, '']);
+
+  const missingWorkspace = path.join(fixture, 'missing-wiki'); await fs.mkdir(missingWorkspace); await fs.writeFile(path.join(missingWorkspace, 'x.md'), '# x');
+  await wikiImport(vault, { from: missingWorkspace, raw: oldRaw, workspace: 'unverified' });
+  const refused = await wikiRetireWorkspace(vault, { workspace: 'unverified', intoWikiVerified: true });
+  assert.ok(refused.errors.some(error => /counterpart is missing/.test(error.reason))); assert.equal(refused.deleted.length, 0);
+  assert.equal((await vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'unverified' }] })).length, 2);
+
+  const badWiki = path.join(fixture, 'bad-global-wiki'), badRaw = path.join(fixture, 'bad-global-raw'), priorWiki = path.join(fixture, 'bad-prior-wiki'), priorRaw = path.join(fixture, 'bad-prior-raw');
+  await fs.mkdir(badWiki); await fs.mkdir(badRaw); await fs.mkdir(priorWiki); await fs.mkdir(priorRaw);
+  await fs.writeFile(path.join(badWiki, 'page.md'), '# Different page'); await fs.writeFile(path.join(badRaw, 'source.txt'), 'counterpart bytes');
+  await fs.writeFile(path.join(priorWiki, 'page.md'), '# Different page'); await fs.writeFile(path.join(priorRaw, 'source.txt'), 'counterpart bytes');
+  await wikiImport(vault, { from: priorWiki, raw: priorRaw, workspace: 'different' });
+  await wikiImport(vault, { from: badWiki, raw: badRaw, target: 'wiki', namespace: 'different' });
+  const badSource = (await vault.listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] })).find(doc => doc.kind === 'source' && doc.metadata.wikiNamespace === 'different')!;
+  await fs.writeFile(path.join(root, String(badSource.metadata.originalPath)), 'corrupted original bytes');
+  const different = await wikiRetireWorkspace(vault, { workspace: 'different', intoWikiVerified: true });
+  assert.ok(different.errors.some(error => /original bytes/.test(error.reason))); assert.equal(different.deleted.length, 0);
+});
+
+test('retirement accepts verified wiki-only pages, refuses mismatches and leftovers, marks workspace retired, and restores it', async t => {
+  const { root, vault } = await disposableVault(t);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-wiki-only-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const prior = path.join(dir, 'prior'), global = path.join(dir, 'global'); await fs.mkdir(prior); await fs.mkdir(global);
+  await fs.writeFile(path.join(prior, 'one.md'), '# Same\n'); await fs.writeFile(path.join(global, 'one.md'), '# Same\n');
+  await wikiImport(vault, { from: prior, workspace: 'stratamind' });
+  await wikiImport(vault, { from: global, target: 'wiki', namespace: 'stratamind' });
+  const globalPage = (await vault.listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] })).find(doc => doc.kind === 'wiki_page')!;
+  await vault.patch({ objectId: globalPage.id, expectedRevisionId: globalPage.revisionId, body: '# Relinked text\n' });
+  await vault.put({ scope: { type: 'workspace', workspaceId: 'stratamind' }, kind: 'note', title: 'late note', body: 'not imported' });
+  const blocked = await wikiRetireWorkspace(vault, { workspace: 'stratamind', intoWikiVerified: true });
+  assert.equal(blocked.verified, 1); assert.equal(blocked.leftovers.length, 1); assert.ok(blocked.errors.some(e => /leftovers/.test(e.reason)));
+  const before = await vault.events();
+  const dry = await wikiRetireWorkspace(vault, { workspace: 'stratamind', intoWikiVerified: true, allowLeftovers: true, dryRun: true });
+  assert.equal(dry.deleted.length, 1); assert.deepEqual(await vault.events(), before);
+  const done = await wikiRetireWorkspace(vault, { workspace: 'stratamind', intoWikiVerified: true, allowLeftovers: true });
+  assert.equal(done.verified, 1); assert.equal((await vault.listWorkspaces()).some(w => w.id === 'stratamind'), false);
+  const originalGrants = (await vault.getWorkspace('stratamind')).grants;
+  const repeated = await wikiRetireWorkspace(vault, { workspace: 'stratamind', intoWikiVerified: true, allowLeftovers: true }); assert.deepEqual(repeated.errors, []); assert.equal(repeated.deleted.length, 0);
+  assert.equal((await vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'stratamind' }] })).length, 1, 'leftover stays readable');
+  assert.equal((await dreamPool(vault)).some(entry => entry.scope.type === 'workspace' && entry.scope.workspaceId === 'stratamind'), false, 'retired workspace is omitted from Dream candidates');
+  const globalCount = (await vault.listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] })).length;
+  await execute(['workspace', 'reactivate', 'stratamind', '--root', root]);
+  assert.ok((await vault.listWorkspaces()).some(w => w.id === 'stratamind'), 'reactivated workspace is listed');
+  assert.deepEqual((await vault.getWorkspace('stratamind')).grants, originalGrants, 'reactivation preserves grants');
+  assert.equal((await vault.get((await vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'stratamind' }], includeHistory: true })).find(d => d.kind === 'wiki_page')!.id)).status, 'deleted', 'reactivation does not restore tombstones');
+  assert.equal((await vault.listDocuments({ scopes: [{ type: 'global', area: 'wiki' }] })).length, globalCount, 'global wiki namespace is untouched');
+  await assert.rejects(() => execute(['workspace', 'reactivate', 'stratamind', '--root', root]), /not retired/);
+  await assert.rejects(() => new Vault(root, { actorId: 'reader', permissions: ['workspace:stratamind:write'] }).setWorkspaceRetired('stratamind', false), /owner/i);
+  const retirementAudit = (await fs.readFile(path.join(root, '.mdb/workspace-retirement-audit.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(retirementAudit.at(-1).action, 'reactivated');
+  const restored = await wikiRetireWorkspace(vault, { workspace: 'stratamind', restore: true });
+  assert.equal(restored.restored, 1); assert.ok((await vault.listWorkspaces()).some(w => w.id === 'stratamind'));
+
+  await vault.createWorkspace('empty-wiki');
+  const empty = await wikiRetireWorkspace(vault, { workspace: 'empty-wiki', intoWikiVerified: true });
+  assert.ok(empty.errors.some(e => /no imported documents/.test(e.reason)));
+  await assert.rejects(() => wikiRetireWorkspace(new Vault(root, { actorId: 'guest', permissions: ['workspace:stratamind:write'] }), { workspace: 'stratamind', intoWikiVerified: true }), /owner-CLI only/);
+});
+
+test('retirement refuses a page whose recorded original hash differs from its namespace counterpart', async t => {
+  const { vault } = await disposableVault(t); const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-page-mismatch-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const old = path.join(dir, 'old'), next = path.join(dir, 'next'); await fs.mkdir(old); await fs.mkdir(next);
+  await fs.writeFile(path.join(old, 'page.md'), '# Original'); await fs.writeFile(path.join(next, 'page.md'), '# Changed');
+  await wikiImport(vault, { from: old, workspace: 'mismatch' }); await wikiImport(vault, { from: next, target: 'wiki', namespace: 'mismatch' });
+  const result = await wikiRetireWorkspace(vault, { workspace: 'mismatch', intoWikiVerified: true });
+  assert.equal(result.unverified, 1); assert.match(result.errors[0]!.reason, /SHA-256/); assert.equal(result.deleted.length, 0);
 });

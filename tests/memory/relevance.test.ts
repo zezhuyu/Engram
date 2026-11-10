@@ -9,6 +9,8 @@ import { fetchProjection } from '../../packages/project-init.js';
 import { toolsFor } from '../../packages/mcp/index.js';
 import type { RemoteSession } from '../../packages/memory/remote-client.js';
 import { buildSessionContext } from '../../packages/memory/session-context.js';
+import { buildProjection } from '../../packages/project-init.js';
+import { parseDomains, suggestDomains, validateDomains, type ProfileDomain } from '../../packages/profile/domains.js';
 
 const WS = 'proj-a';
 async function vault(t: TestContext) {
@@ -25,6 +27,66 @@ function fake(answer: (ids: string[]) => unknown, locality: 'local' | 'remote' =
 }
 const config = async (client: Engram, allowPrivate = false) => { const c = await client.vault.config(); return { ...c, model: { ...c.model, allowNetwork: true, allowPrivateContentToRemote: allowPrivate } }; };
 const claims = (p: { preferences: Array<{ claim: string }>; insights: Array<{ claim: string }> }) => [...p.preferences, ...p.insights].map(i => i.claim);
+
+test('domain taxonomy validates, classifies conservatively, and filters only opted-in projections', async t => {
+  assert.deepEqual(parseDomains('investing,coding'), ['coding', 'investing']);
+  assert.throws(() => validateDomains(['made-up']), /domains must be/);
+  assert.deepEqual(suggestDomains('The user prefers position sizing for stock investments.'), ['investing']);
+  assert.deepEqual(suggestDomains('The user prefers concise explanations.'), ['general']);
+  const rows: Array<{ id: string; scope: string; category: string; claim: string; domains: ProfileDomain[] }> = [
+    { id: 'g', scope: 'global', category: 'preference', claim: 'General style.', domains: ['general'] },
+    { id: 'c', scope: 'global', category: 'working_style', claim: 'Coding reviews.', domains: ['coding'] },
+    { id: 'i', scope: 'global', category: 'preference', claim: 'Investment risk.', domains: ['investing'] },
+  ];
+  assert.deepEqual(claims(buildProjection(rows, WS, 900, 'local', undefined, ['coding'])), ['Coding reviews.', 'General style.']);
+  assert.deepEqual(claims(buildProjection(rows, WS, 900, 'local', undefined, ['investing'])), ['Investment risk.', 'General style.']);
+  assert.deepEqual(claims(buildProjection(rows, WS, 900, 'local', undefined, ['coding', 'investing'])), ['Coding reviews.', 'Investment risk.', 'General style.']);
+  assert.equal(claims(buildProjection(rows, WS, 900, 'local')).length, 3, 'no domains preserves legacy unfiltered output');
+});
+
+test('synthetic fixtures cover the 19 profile claim shapes without copying vault text', () => {
+  const fixtures: Array<[string, ProfileDomain[]]> = [
+    ['The user prefers reviewed code changes with focused tests.', ['coding']],
+    ['The user wants repository instructions to stay concise.', ['coding']],
+    ['The user prefers TypeScript examples for software questions.', ['coding']],
+    ['The user wants coding agents to preserve existing project edits.', ['coding']],
+    ['The user prefers implementation plans before refactoring a repository.', ['coding']],
+    ['The user wants explicit risk limits for stock investments.', ['investing']],
+    ['The user prefers careful stock selection using durable growth.', ['investing']],
+    ['The user avoids leverage and wants position sizing explained.', ['investing']],
+    ['The user prefers portfolio rebalancing to follow stated risk tolerance.', ['investing']],
+    ['The user prefers subtitles that preserve the original lyrics.', ['media']],
+    ['The user likes music recommendations with a clear mood.', ['media']],
+    ['The user prefers concise video editing guidance.', ['media']],
+    ['The user wants job applications grounded in verified experience.', ['career']],
+    ['The user prefers resume edits that retain their own voice.', ['career']],
+    ['The user prefers direct, concise answers.', ['general']],
+    ['The user wants uncertainty stated clearly.', ['general']],
+    ['The user prefers evidence before confident claims.', ['general']],
+    ['The user wants sensitive details kept private.', ['general']],
+    ['The user prefers practical examples when useful.', ['general']],
+  ];
+  assert.equal(fixtures.length, 19);
+  for (const [claim, expected] of fixtures) assert.deepEqual(suggestDomains(claim), expected, claim);
+});
+
+test('changing an insight domain creates a revision without changing claim or review status', async t => {
+  const { client } = await vault(t);
+  const original = await client.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Risk controls', body: 'The user prefers explicit risk controls.', status: 'accepted', metadata: { category: 'preference', sensitivity: 'none', domains: ['general'] } });
+  const updated = await client.vault.patch({ objectId: original.id, expectedRevisionId: original.revisionId, metadataPatch: { domains: ['investing'] } });
+  assert.notEqual(updated.revisionId, original.revisionId);
+  assert.equal(updated.body, original.body); assert.equal(updated.status, 'accepted');
+  assert.deepEqual(await client.vault.history(original.id).then(history => history.map(d => d.revisionId)), [original.revisionId, updated.revisionId]);
+});
+
+test('SessionStart context uses the same domain filter and identifies selected domains', async t => {
+  const { client } = await vault(t);
+  await client.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Code reviews', body: 'The user prefers reviewing code before merging.', status: 'accepted', metadata: { category: 'preference', domains: ['coding'], sensitivity: 'none' } });
+  await client.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Investment risk', body: 'The user prefers explicit portfolio risk limits.', status: 'accepted', metadata: { category: 'preference', domains: ['investing'], sensitivity: 'none' } });
+  const context = await buildSessionContext(client, { workspaceId: WS, domains: ['coding'] });
+  assert.match(context.text, /preferences for: coding/);
+  assert.match(context.text, /reviewing code/); assert.doesNotMatch(context.text, /portfolio risk limits/);
+});
 
 test('a fresh model ranking reorders and drops irrelevant GLOBAL insights; project insights are kept and claims stay the vault\'s', async t => {
   const { client, insight } = await vault(t);
@@ -129,7 +191,7 @@ test('a remote client receives the finished projection from the server and compu
   const { client, insight } = await vault(t); const a = await insight('Global: A-LINE.', undefined); await insight('Global: B-LINE.', undefined); await insight('Project: P-LINE.', WS);
   await refreshRelevance(client, WS, fake(() => ({ relevant: [], irrelevant: [a] })).provider, await config(client));
   const { remote, names } = session(client);
-  const viaServer = await fetchProjection({ remote }, WS, 900), local = await fetchProjection({ client }, WS, 900);
+  const viaServer = await fetchProjection({ remote }, WS, 900, ['general']), local = await fetchProjection({ client }, WS, 900, ['general']);
   assert.deepEqual(names, ['mdb_project_projection'], 'the client must make exactly one call and fetch no insight rows or rankings');
   assert.deepEqual(claims(viaServer), claims(local)); assert.equal(viaServer.revision, local.revision); assert.equal(viaServer.ranking, 'model'); assert.equal(viaServer.source, 'remote');
   assert.ok(!claims(viaServer).some(c => c.includes('A-LINE')), 'the server-side ranking was applied');

@@ -11,7 +11,7 @@ import { assertDurableWriteCapacity } from './storage-lifecycle.js';
 import { isSensitive } from './sensitivity.js';
 import { MDBError, OWNER, type ActorContext, type Collection, type CommitEvent, type CommitJournalStore, type Document, type ObjectStore, type PatchInput, type PutInput, type Scope, type VaultConfig, type Workspace } from './types.js';
 
-const defaults: VaultConfig = { schemaVersion: 1, sqlite: { enabled: false }, postgres: { enabled: false }, capture: { enabled: false, allowedSources: [] }, model: { provider: 'auto', allowNetwork: false }, dream: { enabled: false, maxCandidates: 20 } };
+const defaults: VaultConfig = { schemaVersion: 1, sqlite: { enabled: false }, postgres: { enabled: false }, capture: { enabled: false, allowedSources: [] }, model: { provider: 'auto', allowNetwork: false }, dream: { enabled: false, maxCandidates: 20 }, profile: { domains: { autoApply: true, maxActive: 24, maxPerDreamCycle: 3 } } };
 export const BACKUP_MANIFEST = 'BACKUP_MANIFEST.json';
 const fold = (name: string) => name.normalize('NFC').toLowerCase();
 async function rejectCaseAlias(directory: string, name: string): Promise<void> { let entries: string[] = []; try { entries = await fs.readdir(directory); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; } if (entries.some(entry => entry !== name && fold(entry) === fold(name))) throw new MDBError('INVALID_INPUT', 'Identifier differs from an existing one only by letter case; this would alias one directory on case-insensitive filesystems'); }
@@ -38,7 +38,8 @@ function viewPath(doc: Pick<Document, 'scope' | 'kind' | 'id'> & {metadata?: Rec
   else if (doc.kind === 'session') directory = 'sessions';
   else if (doc.kind === 'working_memory') directory = 'working';
   else if (['insight','decision','procedure','reflection','analysis','finding','thinking'].includes(doc.kind)) directory = ({analysis:'analyses',thinking:'thinking'} as Record<string,string>)[doc.kind] ?? doc.kind+'s';
-  return `${root}/${directory}/${doc.id}.md`;
+  const namespace = doc.scope.type === 'global' && doc.scope.area === 'wiki' && typeof doc.metadata?.wikiNamespace === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(doc.metadata.wikiNamespace) ? `${doc.metadata.wikiNamespace}/` : '';
+  return `${root}/${directory}/${namespace}${doc.id}.md`;
 }
 export function serializeDocument(doc: Document): string {
   const metadata = { schema_version: 1, id: doc.id, revision_id: doc.revisionId, revision_number: doc.revisionNumber, previous_revision_id: doc.previousRevisionId, scope: doc.scope.type, ...(doc.scope.type === 'global' ? { area: doc.scope.area } : { workspace_id: doc.scope.workspaceId, collection_id: doc.scope.collectionId }), kind: doc.kind, title: doc.title, tags: doc.tags, relations: doc.links, provenance: { evidence: doc.evidence }, status: doc.status, created_at: doc.createdAt, updated_at: doc.updatedAt, created_by: doc.createdBy, metadata: doc.metadata, path: doc.path, uri: doc.uri };
@@ -130,7 +131,7 @@ export class Vault {
   }
   private async requireAccess(scope: Scope, action: 'read'|'write'|'promote'): Promise<void> { if (!(await this.canAccess(scope,action))) throw inaccessible(); if (scope.type === 'workspace') { try { await this.readJSON(`workspaces/${validId(scope.workspaceId)}/.mdb/workspace.json`); if (scope.collectionId) await this.readJSON(`workspaces/${scope.workspaceId}/collections/${validId(scope.collectionId)}/.mdb/collection.json`); } catch { throw inaccessible(); } } }
   async createWorkspace(workspaceId: string, description = '', grants: Workspace['grants'] = {}): Promise<Workspace> {
-    this.requireOwner(); validId(workspaceId); const workspace: Workspace = {id:workspaceId,description,grants};
+    this.requireOwner(); validId(workspaceId); if (['profile', 'user-insight', 'chat', 'wiki'].includes(workspaceId.toLowerCase())) throw new MDBError('INVALID_ARGUMENT', 'This workspace name is reserved for connector memory routing'); const workspace: Workspace = {id:workspaceId,description,grants};
     await withVaultLock(this.root, async () => { await this.createWorkspaceUnlocked(workspace); await this.appendWorkspaceCreateAudit(workspaceId, false); }); return workspace;
   }
   private async appendWorkspaceCreateAudit(workspaceId: string, autoCreated: boolean): Promise<void> { const auditPath = await safePath(this.root, '.mdb/workspace-create-audit.jsonl'); await fs.appendFile(auditPath, `${JSON.stringify({ actorId: this.actor.actorId, workspaceId, at: this.now().toISOString(), autoCreated })}\n`, { mode: 0o600 }); }
@@ -138,6 +139,7 @@ export class Vault {
   /** Explicit remote self-service: the caller receives only its own read/write grant. */
   async ensureWorkspaceForActor(workspaceId: string, description = '', perActorCap = Number(process.env.MDB_AUTO_WORKSPACE_CAP ?? 25)): Promise<'created' | 'exists'> {
     validId(workspaceId);
+    if (['profile', 'user-insight', 'chat', 'wiki'].includes(workspaceId.toLowerCase())) throw new MDBError('INVALID_ARGUMENT', 'This workspace name is reserved for connector memory routing');
     if (!Number.isSafeInteger(perActorCap) || perActorCap < 1 || perActorCap > 1000) throw new MDBError('INVALID_INPUT', 'MDB_AUTO_WORKSPACE_CAP must be an integer from 1 to 1000');
     const key = `workspaces/${workspaceId}/.mdb/workspace.json`;
     if (await this.store.stat(key)) {
@@ -162,15 +164,17 @@ export class Vault {
     if (this.remoteJournal()) {
       const ids = new Set<string>();
       for await (const entry of this.store.list('workspaces')) { const match = /^workspaces\/([^/]+)\/.mdb\/workspace\.json$/.exec(entry.key); if (match) ids.add(match[1]!); }
-      for (const id of ids) if (await this.canAccess({ type: 'workspace', workspaceId: id }, 'read')) result.push(await this.readJSON(`workspaces/${id}/.mdb/workspace.json`));
+      for (const id of ids) if (await this.canAccess({ type: 'workspace', workspaceId: id }, 'read')) { const workspace = await this.readJSON<Workspace>(`workspaces/${id}/.mdb/workspace.json`); if (!workspace.retired || id === 'personal') result.push(workspace); }
       return result;
     }
     let entries;
     try { entries = await fs.readdir(await safePath(this.root, 'workspaces'), { withFileTypes: true }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return result; throw error; }
-    for (const entry of entries) if (entry.isDirectory() && await this.canAccess({ type: 'workspace', workspaceId: entry.name }, 'read')) result.push(await this.readJSON(`workspaces/${entry.name}/.mdb/workspace.json`));
+    for (const entry of entries) if (entry.isDirectory() && await this.canAccess({ type: 'workspace', workspaceId: entry.name }, 'read')) { const workspace = await this.readJSON<Workspace>(`workspaces/${entry.name}/.mdb/workspace.json`); if (!workspace.retired || entry.name === 'personal') result.push(workspace); }
     return result;
   }
+  async getWorkspace(workspaceId: string): Promise<Workspace> { validId(workspaceId); await this.requireAccess({ type: 'workspace', workspaceId }, 'read'); return this.readJSON(`workspaces/${workspaceId}/.mdb/workspace.json`); }
+  async setWorkspaceRetired(workspaceId: string, retired: boolean): Promise<Workspace> { if (!this.actor.permissions.includes('*')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Workspace retirement and reactivation are owner-only'); validId(workspaceId); if (workspaceId === 'personal' && retired) throw new MDBError('INVALID_ARGUMENT', 'The personal workspace cannot be retired'); return withVaultLock(this.root, async () => { const key = `workspaces/${workspaceId}/.mdb/workspace.json`, old = await this.readJSON<Workspace>(key); if (!!old.retired === retired) return old; const at = this.now().toISOString(), next: Workspace = { ...old, retired, ...(retired ? { retiredAt: at } : {}) }; if (!retired) delete next.retiredAt; await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(next)) + 8192); if (this.remoteJournal()) { if (!await this.store.compareAndSwapPointer(key, JSON.stringify(old), JSON.stringify(next))) throw new MDBError('CONFLICT', 'Workspace metadata changed during retirement'); } else await atomicWrite(this.root, key, JSON.stringify(next)); await atomicWrite(this.root, `workspaces/${workspaceId}/db.yaml`, YAML.stringify(next)); const audit = await safePath(this.root, '.mdb/workspace-retirement-audit.jsonl'); await fs.appendFile(audit, `${JSON.stringify({ actorId: this.actor.actorId, workspaceId, action: retired ? 'retired' : 'reactivated', at })}\n`, { mode: 0o600 }); return next; }); }
   async grant(workspaceId:string,actorId:string,permissions:('read'|'write'|'promote')[]):Promise<Workspace> { this.requireOwner(); validId(workspaceId); if(permissions.some(p=>!['read','write','promote'].includes(p))) throw new MDBError('INVALID_INPUT','Invalid grant'); return withVaultLock(this.root,async()=>{const key=`workspaces/${workspaceId}/.mdb/workspace.json`;const old=await this.readJSON<Workspace>(key);const w={...old,grants:{...old.grants,[actorId]:permissions}};await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(w)) + 8192);if(this.remoteJournal()){if(!await this.store.compareAndSwapPointer(key,JSON.stringify(old),JSON.stringify(w)))throw new MDBError('CONFLICT','Workspace grants changed during update');}else await atomicWrite(this.root,key,JSON.stringify(w));await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(w));return w;}); }
   async revoke(workspaceId:string,actorId:string):Promise<Workspace> { return this.grant(workspaceId,actorId,[]); }
   async createCollection(workspaceId:string,collectionId:string,description='',grants?:Collection['grants']):Promise<Collection> { validId(workspaceId);validId(collectionId);await this.requireAccess({type:'workspace',workspaceId},'write'); if(grants && !this.owner()) throw inaccessible(); const collection:Collection={id:collectionId,workspaceId,description,...(grants?{grants}:{})}; await withVaultLock(this.root,async()=>{await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(collection)) + 12 * 1024);const key=`workspaces/${workspaceId}/collections/${collectionId}/.mdb/collection.json`;await rejectCaseAlias(await safePath(this.root,`workspaces/${workspaceId}/collections`),collectionId);if(await this.store.stat(key))throw new MDBError('CONFLICT','Collection already exists');await this.store.putImmutable(key,Buffer.from(JSON.stringify(collection))); for(const d of ['working','notes','observations','insights','sessions'])await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${d}`),{recursive:true,mode:0o700});for(const n of ['PROFILE','INDEX','state','retrospective'])await atomicWrite(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${n}.md`,`# ${n}\n`);});return collection; }

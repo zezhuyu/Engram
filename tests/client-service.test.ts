@@ -14,7 +14,7 @@ async function fixture(t: test.TestContext) {
   const fake = `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\ncase "$*" in *show*) printf 'LoadState=loaded\\nActiveState=active\\nMainPID=4321\\nExecMainStatus=0\\nResult=success\\n';; *print*) printf 'state = running\\npid = 4321\\nlast exit code = 0\\n';; esac\n`;
   for (const command of ['systemctl', 'launchctl', 'journalctl']) await fs.writeFile(path.join(bin, command), fake, { mode: 0o755 });
   const tokenFile = path.join(root, 'token'); await fs.writeFile(tokenFile, 'never-put-this-secret-in-a-unit\n', { mode: 0o600 });
-  const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, ENGRAM_AUTO_RECONNECT: '1' };
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.config'), PATH: `${bin}:${process.env.PATH}`, ENGRAM_AUTO_RECONNECT: '1' };
   return { root, home, bin, calls, tokenFile, env };
 }
 

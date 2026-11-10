@@ -19,6 +19,8 @@ sudo xattr -rd com.apple.quarantine "/Applications/Engram Client.app"
 
 Open the app afterwards. To update, replace the app in `/Applications`, run the same command on the new copy, and restart its background service. The app bundle contains only code: the vault (`~/.Engram` or `ENGRAM_DATA_DIR`) and the configuration in `~/.config/engram/` are never part of an update.
 
+On first launch and each subsequent app launch, the app best-effort installs or refreshes `~/.local/bin/mdb`. This managed shim resolves the current Server app first and then the Client app in `/Applications` or `~/Applications`; a Server launch uses `ENGRAM_DATA_DIR` from `server.env` when set, otherwise `~/.Engram`. It never replaces a command without the `# engram-managed-shim v1` header and does not block app startup if installation fails. `mdb shim status` reports installation and PATH state. If needed, add the displayed `export PATH=...` line to your shell configuration; Engram does not edit shell startup files. Run `mdb shim remove` before removing the final Engram app if you want the command deleted; it removes only a managed shim.
+
 ## Configuration and login startup
 
 Move the app to a stable location such as `/Applications` before first opening it. Each app creates a private configuration file and enables Start at Login by default. Both apps use separate launchd labels, configuration files, and logs:

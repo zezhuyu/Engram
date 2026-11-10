@@ -24,7 +24,7 @@ The principal internal stores are:
   intelligence/<actor-hash>.json           actor's jobs, cursor and proposals
 ```
 
-Current document paths are views, not independent sources of truth. Do not edit `.mdb/objects`, journal records or source originals. Imported originals are copied into a scope's `sources/originals/<sha256>/` area; the external input is left untouched. Binary attachments are preserved, with extraction marked unsupported instead of inventing text. Restore creates another revision; deletion creates a tombstone and preserves history.
+Current document paths are views, not independent sources of truth. Do not edit `.mdb/objects`, journal records or source originals. Imported originals are copied into a scope's `sources/originals/<sha256>/` area; the external input is left untouched. Global wiki imports with `metadata.wikiNamespace` use `wiki/pages/<namespace>/<object-id>.md` and `wiki/sources/manifests/<namespace>/<object-id>.md`; their namespace-prefixed import paths disambiguate identical relative source paths. Binary attachments are preserved, with extraction marked unsupported instead of inventing text. Restore creates another revision; deletion creates a tombstone and preserves history.
 
 ## Commit ordering
 

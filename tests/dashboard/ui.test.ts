@@ -35,6 +35,8 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /chat-context-source/);
   assert.match(assets['/assets/app.css']!.body, /\.chat-context-heading/);
   assert.match(assets['/assets/app.js']!.body, /location\.hash/);
+  assert.match(assets['/assets/app.js']!.body, /Profile domains/);
+  assert.match(assets['/assets/app.js']!.body, /expectedRevisionId:item\.revisionId/);
   assert.match(assets['/assets/app.js']!.body, /history\.replaceState/);
   assert.doesNotMatch(assets['/assets/app.js']!.body, /engram-chat-use-model|useModel/);
   assert.doesNotMatch(assets['/assets/app.js']!.body, /localStorage/);
@@ -59,7 +61,25 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /Workspace access/);
   assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/status/);
   assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/workspaces/);
+  assert.match(assets['/assets/app.js']!.body, /'Connected'/);
+  assert.match(assets['/assets/app.js']!.body, /Running, not ready/);
+  assert.match(assets['/assets/app.js']!.body, /connector-tunnel-details/);
+  assert.match(assets['/assets/app.js']!.body, /Tunnel connected/);
+  assert.match(assets['/assets/app.js']!.body, /Starting…/);
+  assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/writes/);
+  assert.match(assets['/assets/app.js']!.body, /name-only access means anyone who can reach the tunnel/);
+  assert.match(assets['/assets/app.js']!.body, /Recent ChatGPT writes/);
+  assert.match(assets['/assets/app.js']!.body, /personal\/chat/);
+  assert.match(assets['/assets/app.js']!.body, /Personal is shared memory for all chat AIs/);
+  assert.match(assets['/assets/app.js']!.body, /personal\/preferences/);
+  assert.match(assets['/assets/app.js']!.body, /New chats start in personal\/chat/);
+  assert.match(assets['/assets/app.js']!.body, /conversationId only when the user explicitly asks to continue/);
+  assert.match(assets['/assets/app.js']!.body, /profile, user-insight and wiki/);
+  assert.match(assets['/assets/app.js']!.body, /Global accepted wiki/);
+  assert.match(assets['/assets/app.js']!.body, /no deletion tool/);
   assert.match(assets['/assets/app.js']!.body, /apiKeySet/);
+  assert.match(assets['/assets/app.js']!.body, /connector-start-reason/);
+  assert.match(assets['/assets/app.js']!.body, /for\(const action of \['start','stop','restart'\]\)/);
   assert.match(assets['/assets/app.js']!.body, /Remove saved API key/);
   assert.match(assets['/assets/app.js']!.body, /cfg\.tunnelId\|\|''/);
   assert.match(assets['/assets/app.js']!.body, /cfg\.organizationId\|\|''/);
@@ -149,6 +169,55 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /No '\+title\.toLowerCase\(\)\+' yet/);
   assert.match(assets['/assets/app.css']!.body, /\.nav-link\{flex:0 0 calc\(\(100vw - 40px\)\/5\);min-width:0;white-space:normal\}/);
   assert.match(assets['/assets/app.css']!.body, /\.nav-list::after\{content:"";position:sticky/);
+});
+
+test('Dream Schedule UI has run states, keyed status patching, relative ticks, history, and read-only polling', () => {
+  const app = assets['/assets/app.js']!.body;
+  assert.match(app, /api\('\/api\/dream\/run-status'\)/);
+  assert.match(app, /No Dream run yet/);
+  assert.match(app, /No run predicted/);
+  assert.match(app, /Dream scheduling is off \(enable in Settings\)/);
+  assert.match(app, /Worker not running/);
+  assert.match(app, /data-key','dream-schedule/);
+  assert.match(app, /data-connector-live','true/);
+  assert.match(app, /data-relative-time/);
+  assert.match(app, /setInterval\(tickRelativeTimes,60000\)/);
+  assert.match(app, /View cycle history/);
+  assert.match(app, /Last five runs/);
+  assert.doesNotMatch(app, /api\('\/api\/dream\/run-status',\s*\{\s*method:\s*'POST'/);
+});
+
+test('connector polling patches only changed keyed status nodes and preserves typed form values', () => {
+  class TrackedNode {
+    nodeType: number; tagName: string; private text = ''; value = ''; attributes: Array<{ name: string; value: string }> = []; childNodes: TrackedNode[] = []; parentNode?: TrackedNode; writes = 0;
+    constructor(tag: string, text = '') { this.nodeType = tag === '#text' ? 3 : 1; this.tagName = tag; this.data = text; }
+    get data() { return this.text; }
+    set data(value: string) { if (this.text !== value) { this.text = value; this.writes++; } }
+    getAttribute(name: string) { return this.attributes.find(attr => attr.name === name)?.value ?? null; }
+    hasAttribute(name: string) { return this.attributes.some(attr => attr.name === name); }
+    setAttribute(name: string, value: string) { this.writes++; const attr = this.attributes.find(item => item.name === name); if (attr) attr.value = value; else this.attributes.push({ name, value }); }
+    removeAttribute(name: string) { this.writes++; this.attributes = this.attributes.filter(attr => attr.name !== name); }
+    append(...nodes: TrackedNode[]) { for (const node of nodes) { node.parentNode = this; this.childNodes.push(node); this.writes++; } }
+    replaceWith(node: TrackedNode) { if (!this.parentNode) return; const list = this.parentNode.childNodes, index = list.indexOf(this); list[index] = node; node.parentNode = this.parentNode; this.parentNode.writes++; }
+    remove() { if (!this.parentNode) return; this.parentNode.childNodes = this.parentNode.childNodes.filter(node => node !== this); this.parentNode.writes++; }
+  }
+  const app = assets['/assets/app.js']!.body, start = app.indexOf('function hasConnector('), end = app.indexOf('\nfunction patchContent', start);
+  assert.ok(start >= 0 && end > start, 'connector patch helpers are available in the served dashboard script');
+  const nodeSig = (node: TrackedNode): string => node.nodeType === 3 ? 't:' + node.data : node.tagName + JSON.stringify(node.attributes) + (node.tagName === 'INPUT' ? node.value : '') + '(' + node.childNodes.map(nodeSig).join('|') + ')';
+  const controlDirty = (node: TrackedNode): boolean => node.tagName === 'INPUT' && node.value !== node.getAttribute('value');
+  const context = { nodeSig, isFormControl: (node: TrackedNode) => node.tagName === 'INPUT', controlDirty, containsDirty: (node: TrackedNode) => node.tagName === 'INPUT' && controlDirty(node) };
+  const patchNode = vm.runInNewContext(`${app.slice(start, end)}; patchNode`, context) as (oldNode: TrackedNode, newNode: TrackedNode) => void;
+  const el = (tag: string, key?: string, text = '') => { const node = new TrackedNode(tag, text); if (key) node.setAttribute('data-key', key); node.writes = 0; return node; };
+  const current = el('SECTION'); current.setAttribute('data-connector-live', 'true'); const input = el('INPUT'); input.setAttribute('value', ''); input.value = 'half typed'; const status = el('SPAN', 'connector-status-gateway'); const statusText = el('#text', undefined, 'Gateway: Stopped'); status.append(statusText); const unrelated = el('DETAILS', 'connector-details'); current.append(input, status, unrelated);
+  current.writes = input.writes = status.writes = statusText.writes = unrelated.writes = 0;
+  const unchanged = el('SECTION'); unchanged.setAttribute('data-connector-live', 'true'); const nextInput = el('INPUT'); nextInput.setAttribute('value', ''); nextInput.value = ''; const sameStatus = el('SPAN', 'connector-status-gateway'); sameStatus.append(el('#text', undefined, 'Gateway: Stopped')); unchanged.append(nextInput, sameStatus, el('DETAILS', 'connector-details'));
+  patchNode(current, unchanged);
+  assert.equal(current.writes + input.writes + status.writes + statusText.writes + unrelated.writes, 0, 'unchanged polling performs zero section DOM writes');
+  const changed = el('SECTION'); changed.setAttribute('data-connector-live', 'true'); const freshInput = el('INPUT'); freshInput.setAttribute('value', ''); const changedStatus = el('SPAN', 'connector-status-gateway'); changedStatus.append(el('#text', undefined, 'Gateway: Running')); changed.append(freshInput, changedStatus, el('DETAILS', 'connector-details'));
+  patchNode(current, changed);
+  assert.equal(current.childNodes[0], input, 'form control node stays mounted'); assert.equal(input.value, 'half typed', 'half-typed form value survives refresh');
+  assert.equal(current.childNodes[1], status, 'the status badge node is patched in place'); assert.equal(status.childNodes[0]!.data, 'Gateway: Running');
+  assert.equal(current.childNodes[2], unrelated, 'open details node remains mounted');
 });
 
 class MockElement {
@@ -299,10 +368,13 @@ test('served dashboard assets parse and browser helpers preserve URL and line be
 
 test('settings navigation loads effective settings and has an actionable failure state', () => {
   const script = assets['/assets/app.js']!.body;
-  assert.match(script, /case'settings':if\(!settings\)\{try\{await loadSettings\(\)\}catch\(error\)\{view=settingsError\(error\);break\}\}view=settingsPage\(\);break;/);
+  assert.match(script, /case'settings':if\(!settings\)\{try\{await loadSettings\(\)\}catch\(error\)\{view=settingsError\(error\);break\}\}view=await settingsPage\(\);break;/);
   assert.match(script, /Effective settings could not be loaded:/);
   assert.match(script, /node\('button','primary','Retry'\)/);
   assert.match(script, /await loadSettings\(\);render\(\)/);
+  assert.match(script, /Command line/);
+  assert.match(script, /api\/shim\/status/);
+  assert.match(script, /navigator\.clipboard\.writeText\(info\.pathSuggestion\)/);
 });
 
 test('served dashboard script completes its first refresh and renders every screen', async () => {
@@ -353,6 +425,7 @@ test('served dashboard script completes its first refresh and renders every scre
       if (path === '/api/connectors/claude/web') return response({config:{url:'',mode:'authless',headerName:'x-api-key',keySet:false}});
       if (path === '/api/connectors') return response({connectors:{claude:Object.fromEntries(['publicUrl','tunnelName','tunnelId','tunnelToken','oauthClientId','oauthClientSecret'].map(key=>[key,{set:false,value:null}]))},credentials:[],authMode:'scoped MCP credentials'});
       if (path === '/api/settings') return response({ etag:'test', settings:{}, security:{passwordSet:true}, server:{host:'127.0.0.1',port:1} }, screen === 'settings-error' ? 500 : 200);
+      if (path === '/api/shim/status') return response({ path:'/tmp/home/.local/bin/mdb', installed:true, onPath:false, pathSuggestion:'export PATH="/tmp/home/.local/bin:$PATH"' });
       if (path === '/api/url-notes/settings') return response({ enabled:false, readiness:{claude:{found:false},codex:{found:false}} });
       if (path === '/api/chat/capabilities') return response({ modelConfigured:false, ready:false, remote:false, consentGiven:false });
       if (path.startsWith('/api/documents')) return response({ items:[], cursor:null });

@@ -14,7 +14,7 @@ export function classifySource(doc: Pick<Document, 'kind' | 'scope' | 'metadata'
   const m = doc.metadata;
   if (doc.kind === 'discovery' || (doc.scope.type === 'global' && doc.scope.area === 'discoveries')) return 'dream';
   if (m.explicitPreference === true || m.evidenceClass === 'explicit' || (doc.kind === 'user_insight' && m.profileRole === 'explicit')) return 'explicit';
-  if (m.speaker === 'user' || m.evidenceClass === 'user_authored') return 'user_conversation';
+  if (m.speaker === 'user' || m.evidenceClass === 'user_authored' || (doc.kind === 'chat_conversation' && m.chatSchema === 1 && typeof m.liveConversationKey === 'string' && Array.isArray(m.turns) && (m.turns as Array<{ role?: string }>).some(turn => turn.role === 'user'))) return 'user_conversation';
   if (m.speaker === 'assistant' || m.speaker === 'tool' || m.evidenceClass === 'agent_observation') return 'agent_observation';
   if (doc.kind === 'source' || doc.kind === 'wiki_page' || (doc.scope.type === 'global' && doc.scope.area === 'wiki')) return 'wiki_exposure';
   return 'agent_observation'; // unattributed material is never promoted to a statement by the user

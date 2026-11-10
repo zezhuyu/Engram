@@ -49,8 +49,12 @@ const clauseAround = (body: string, index: number, length: number): string => {
  */
 export function isVerifiedUserSpan(doc: Pick<Document, 'body' | 'metadata' | 'kind' | 'scope'>, span: string | undefined): boolean {
   const cls = classifySource(doc);
-  if (cls !== 'explicit' && !(cls === 'user_conversation' && doc.metadata.speaker === 'user')) return false;
+  if (cls !== 'explicit' && !(cls === 'user_conversation' && (doc.metadata.speaker === 'user' || doc.kind === 'chat_conversation'))) return false;
   const text = span ?? doc.body; const at = span ? doc.body.indexOf(span) : 0; if (at < 0) return false;
+  if (doc.kind === 'chat_conversation') {
+    const turns = Array.isArray(doc.metadata.turns) ? doc.metadata.turns as Array<{ role?: string; start?: number; end?: number; dreamDerived?: boolean }> : [];
+    if (!turns.some(turn => turn.role === 'user' && turn.dreamDerived !== true && Number.isInteger(turn.start) && Number.isInteger(turn.end) && at >= turn.start! && at + text.length <= turn.end!)) return false;
+  }
   const sentence = span ? sentenceAround(doc.body, at, span.length) : doc.body;
   if (INJECTION_PHRASE.test(doc.body) || INJECTION_PHRASE.test(sentence) || INJECTION_PHRASE.test(text)) return false; // instruction-like text anywhere in the source taints the whole message
   if (!FIRST_PERSON.test(sentence) && !FIRST_PERSON.test(text) && !isDirective(sentence)) return false;
@@ -168,6 +172,7 @@ export async function evaluateInsight(vault: Vault, input: PutInput, options: { 
     if (cls !== 'explicit') {
       if (!ref.span) return reject('Each non-explicit source must carry a verbatim span.', 'span_missing');
       if (!spanFound(doc.body, ref.span)) return reject('A cited span does not occur in its source.', 'span_not_in_source');
+      if (doc.kind === 'chat_conversation' && !isVerifiedUserSpan(doc, ref.span)) return reject('A cited chat span must come from a user-authored turn.', 'non_user_chat_evidence');
     } else if (ref.span && !spanFound(doc.body, ref.span)) return reject('A cited span does not occur in its source.', 'span_not_in_source');
     const citedText = ref.span ?? doc.body;
     if ((cls === 'user_conversation' || cls === 'explicit') && optedOut(doc.body, key, claim)) return reject('The user explicitly asked not to retain this information.', 'user_opt_out');
@@ -272,7 +277,7 @@ export async function commitInsight(vault: Vault, input: PutInput, proposalId: s
 }
 
 /** A direct statement or correction by the user. Accepted immediately; every earlier insight or explicit note on the same subject and scope is superseded, with its history intact. */
-export async function correctInsight(vault: Vault, input: { scope: Scope; preferenceKey: string; claim: string; category: InsightCategory; reason?: string; source?: { uri: string; revisionId: string; span?: string }; sensitive?: boolean }): Promise<Document> {
+export async function correctInsight(vault: Vault, input: { scope: Scope; storageScope?: Scope; preferenceKey: string; claim: string; category: InsightCategory; reason?: string; source?: { uri: string; revisionId: string; span?: string }; sensitive?: boolean }): Promise<Document> {
   if (!KEY.test(input.preferenceKey)) throw new MDBError('INVALID_INPUT', 'preferenceKey must be a lowercase slug');
   if (!CATEGORIES.includes(input.category)) throw new MDBError('INVALID_INPUT', 'Invalid category');
   const claim = input.claim.trim(); if (!claim || claim.length > 500) throw new MDBError('INVALID_INPUT', 'The claim must be one concise statement');
@@ -281,11 +286,12 @@ export async function correctInsight(vault: Vault, input: { scope: Scope; prefer
     const doc = await vault.get(objectIdFromUri(input.source.uri), input.source.revisionId); const cls = classifySource(doc);
     if (cls !== 'explicit' && cls !== 'user_conversation') throw new MDBError('INVALID_INPUT', 'A correction can only cite something the user wrote');
     if (input.source.span && !spanFound(doc.body, input.source.span)) throw new MDBError('INVALID_INPUT', 'The cited span does not occur in the source');
+    if (doc.kind === 'chat_conversation' && !isVerifiedUserSpan(doc, input.source.span)) throw new MDBError('INVALID_INPUT', 'A chat preference must cite a verified user-authored span');
     evidence.push({ uri: doc.uri, revisionId: doc.revisionId, ...(input.source.span ? { span: input.source.span } : {}) }); sources.push({ uri: doc.uri, revisionId: doc.revisionId, class: cls, ...(input.source.span ? { span: input.source.span } : {}) });
   }
   const label = input.scope.type === 'global' ? 'global' : input.scope.workspaceId; void scopeEqual;
   const earlier = (await loadDocuments(vault, await readableEntries(vault, { pk: input.preferenceKey }))).filter(d => applicability(d) === label && !['superseded', 'rejected', 'deleted'].includes(d.status) && (d.kind === 'user_insight' || d.metadata.explicitPreference === true) && normalize(d.body) !== normalize(claim));
-  const doc = await vault.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: claim.slice(0, 120), body: claim, status: 'accepted', evidence, tags: ['insight', input.category], metadata: { insightSchema: 1, category: input.category, preferenceKey: input.preferenceKey, evidenceClass: 'explicit', confidenceLabel: 'high', extractionConfidence: 0.95, factualCertainty: 'user_reported', sources, scopeLabel: label, validFrom: new Date().toISOString().slice(0, 10), visibility: 'user_private', sensitivity: input.sensitive ? 'sensitive' : 'none', origin: 'user_statement', reviewed: true, reviewReason: input.reason ?? 'Stated or corrected by the user', ...(earlier.length ? { supersedes: earlier.map(d => d.id) } : {}) } });
+  const doc = await vault.put({ scope: input.storageScope ?? { type: 'global', area: 'profile' }, kind: 'user_insight', title: claim.slice(0, 120), body: claim, status: 'accepted', evidence, tags: ['insight', input.category], metadata: { actorId: vault.actor.actorId, insightSchema: 1, category: input.category, preferenceKey: input.preferenceKey, evidenceClass: 'explicit', confidenceLabel: 'high', extractionConfidence: 0.95, factualCertainty: 'user_reported', sources, scopeLabel: label, validFrom: new Date().toISOString().slice(0, 10), visibility: 'user_private', sensitivity: input.sensitive ? 'sensitive' : 'none', origin: 'user_statement', reviewed: true, reviewReason: input.reason ?? 'Stated or corrected by the user', ...(earlier.length ? { supersedes: earlier.map(d => d.id) } : {}) } });
   for (const old of earlier) await vault.patch({ objectId: old.id, expectedRevisionId: old.revisionId, status: 'superseded', metadataPatch: { supersededBy: doc.uri, supersededByRevision: doc.revisionId, supersededReason: input.reason ?? 'corrected by the user' } });
   await projectProfile(vault).catch(() => undefined);
   return doc;
@@ -298,7 +304,8 @@ const clean = (t: string) => t.replace(/[\r\n]+/g, ' ').slice(0, 300);
  * deterministic (no timestamps), sensitive items are counted but never listed, and every line links the insight object whose revisions hold the history.
  */
 export async function projectProfile(owner: Vault, options: { now?: Date } = {}): Promise<{ global: number; workspaces: number }> {
-  if (!owner.actor.permissions.includes('*')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Projection requires the trusted owner');
+  const profileScope = { type: 'global' as const, area: 'profile' as const };
+  if (!(await owner.canAccess(profileScope, 'read')) || !(await owner.canAccess(profileScope, 'write'))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Projection requires global profile read and write access');
   const entries = await readableEntries(owner, { kinds: ['user_insight'] });
   const accepted = (await loadDocuments(owner, entries)).filter(d => isInsight(d) && d.status === 'accepted' && insightActiveAt(d.metadata, options.now)); // an expired time-limited instruction is not a profile fact
   // Supersession is committed as a new immutable insight before the old object

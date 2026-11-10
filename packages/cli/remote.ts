@@ -38,14 +38,15 @@ export async function remoteTarget(flags: Flags, cwd = process.cwd(), env: NodeJ
 }
 
 /** CLI commands that have a server equivalent. Everything else keeps working on a local vault. */
-export const REMOTE_COMMANDS = new Set(['search', 'grep', 'context', 'get', 'history', 'put', 'patch', 'workspace', 'collection', 'memory', 'insight', 'capabilities', 'task', 'note', 'handoff', 'remote', 'wiki']);
-const REMOTE_SUBCOMMANDS: Record<string, string[]> = { workspace: ['list', 'create'], collection: ['list'], memory: ['recent', 'timeline', 'search', 'get'], insight: ['search'], task: ['upsert'], note: ['upsert'], handoff: ['write'], remote: ['tools', 'call'], wiki: ['lint', 'propose', 'proposals'] };
+export const REMOTE_COMMANDS = new Set(['search', 'grep', 'context', 'get', 'history', 'put', 'patch', 'workspace', 'collection', 'memory', 'insight', 'profile', 'capabilities', 'task', 'note', 'handoff', 'remote', 'wiki']);
+const REMOTE_SUBCOMMANDS: Record<string, string[]> = { profile: ['domains'], workspace: ['list', 'create'], collection: ['list'], memory: ['recent', 'timeline', 'search', 'get'], insight: ['search'], task: ['upsert'], note: ['upsert'], handoff: ['write'], remote: ['tools', 'call'], wiki: ['lint', 'propose', 'proposals'] };
 export const usesServer = (command: string, sub: string | undefined): boolean => REMOTE_COMMANDS.has(command) && (!REMOTE_SUBCOMMANDS[command] || REMOTE_SUBCOMMANDS[command]!.includes(sub ?? ''));
 
 export async function mapCommand(command: string, args: string[], flags: Flags): Promise<{ tool: string; input: Record<string, unknown> } | 'list'> {
   const [, sub, third] = args; const scope = command === 'wiki' ? undefined : scopeFlag(flags);
   const searchArgs = () => compact({ query: need(command === 'context' ? text(flags, 'task', sub) : sub, 'query'), mode: text(flags, 'mode', command === 'grep' ? 'grep' : 'auto'), regex: !!flags.regex, caseSensitive: !!flags['case-sensitive'], allowFallback: !!flags['allow-fallback'], includeHistory: !!flags['include-history'], limit: num(flags, 'limit'), cursor: text(flags, 'cursor'), kinds: csv(flags, 'kinds'), tags: csv(flags, 'tags'), since: text(flags, 'since'), until: text(flags, 'until'), scopes: scope ? [scope] : undefined });
   switch (command) {
+    case 'profile': { const action = third; if (!['list','suggest','apply','set','registry','add','rename','merge','retire','auto-apply'].includes(action ?? '')) throw new MDBError('INVALID_ARGUMENT', 'profile domains list|suggest|apply|set|registry|add|rename|merge|retire|auto-apply'); return { tool: 'mdb_profile_domains', input: compact({ action, id: action === 'set' ? args[3] : undefined, slug: action === 'rename' || action === 'merge' || action === 'retire' ? args[3] : text(flags, 'slug'), domains: csv(flags, 'domains'), label: text(flags, 'label'), description: text(flags, 'description'), keywords: csv(flags, 'keywords'), evidence: text(flags, 'evidence') ? [text(flags, 'evidence')] : undefined, into: text(flags, 'into'), enabled: action === 'auto-apply' ? text(flags, 'enabled') !== 'false' : undefined, yes: !!flags.yes }) }; }
     case 'wiki': {
       if (sub === 'proposals') return { tool: 'mdb_wiki_proposals', input: compact({ status: text(flags, 'status') }) };
       if (sub === 'propose') {

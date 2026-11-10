@@ -7,11 +7,17 @@ import { readStats } from './lifecycle.js';
 import { learnedSuccess } from './learning.js';
 import type { Graph, PlanContext, Budgets } from './types.js';
 import { SearchEngine } from '../../search-sqlite/index.js';
+import { userOnlyChatDocument } from '../../chat/live.js';
 
 /** The knowledge a dream may draw on: readable, live, non-raw-log objects. Discoveries and anything derived from a dream never seed new dreams. */
 export async function dreamPool(vault: Vault, filter: { workspaceId?: string } = {}): Promise<ManifestEntry[]> {
-  const entries = await readableEntries(vault, { kinds: KNOWLEDGE_KINDS });
-  return entries.filter(e => !['superseded', 'rejected', 'deleted', 'tombstone'].includes(e.status) && e.ec !== 'dream' && (!filter.workspaceId || e.scope.type === 'global' || e.scope.workspaceId === filter.workspaceId));
+  const [entries, workspaces] = await Promise.all([readableEntries(vault, { kinds: [...KNOWLEDGE_KINDS, 'chat_conversation', 'user_insight'] }), vault.listWorkspaces()]);
+  const visibleWorkspaces = new Set(workspaces.map(workspace => workspace.id));
+  return entries.filter(e => !['superseded', 'rejected', 'deleted', 'tombstone'].includes(e.status) && e.ec !== 'dream'
+    && (e.scope.type !== 'workspace' || visibleWorkspaces.has(e.scope.workspaceId))
+    && (e.kind !== 'chat_conversation' || (e.scope.type === 'workspace' && e.scope.workspaceId === 'personal' && e.scope.collectionId === 'chat'))
+    && (e.kind !== 'user_insight' || (e.scope.type === 'workspace' && e.scope.workspaceId === 'personal' && e.scope.collectionId === 'preferences' && e.ex === true))
+    && (!filter.workspaceId || e.scope.type === 'global' || e.scope.workspaceId === filter.workspaceId));
 }
 export async function graphFor(vault: Vault, pool: ManifestEntry[], semantic = new Map<string, Set<string>>()): Promise<Graph> {
   const manifest = await manifestFor(vault); await manifest.sync();
@@ -42,7 +48,7 @@ export async function semanticAssociations(vault: Vault, pool: ManifestEntry[], 
     if (!(await search.vectors.status()).ready) return links;
     const publicEntries = pool.filter(e => e.scope.type === 'global').slice(0, 12);
     for (const entry of publicEntries) {
-      const doc = (await loadDocuments(vault, [entry]))[0]; if (!doc) continue;
+      const raw = (await loadDocuments(vault, [entry]))[0]; if (!raw) continue; const doc = userOnlyChatDocument(raw);
       const result = await search.query({ query: `${doc.title}\n${doc.body.slice(0, 1200)}`, mode: 'semantic', limit: 8 }, vault.actor);
       for (const hit of result.hits) {
         if (hit.objectId === entry.id || !pool.some(candidate => candidate.id === hit.objectId)) continue;
@@ -57,7 +63,7 @@ export async function planContext(vault: Vault, pool: ManifestEntry[], budgets: 
   const semantic = options.semantic === false ? new Map<string, Set<string>>() : await semanticAssociations(vault, pool, options.search);
   const recent = [...pool].sort((a, b) => a.at < b.at ? 1 : a.at > b.at ? -1 : a.id.localeCompare(b.id)).slice(0, 512);
   const [graph, stats, supp, documents] = await Promise.all([graphFor(vault, pool, semantic), readStats(vault), suppression(vault, pool), loadDocuments(vault, recent)]);
-  const bodyTerms = new Map(documents.map(doc => [doc.id, [...new Set(words(`${doc.title} ${doc.body.slice(0, 6000)}`))].slice(0, 80)]));
+  const bodyTerms = new Map(documents.map(raw => { const doc = userOnlyChatDocument(raw); return [doc.id, [...new Set(words(`${doc.title} ${doc.body.slice(0, 6000)}`))].slice(0, 80)]; }));
   return { pool, graph, budgets, rng, bodyTerms, success: await learnedSuccess(vault, stats), suppressed: supp.suppressed, knownDiscoveries: supp.known, semanticAssociationCount: [...semantic.values()].reduce((sum, ids) => sum + ids.size, 0) / 2 };
 }
 export type { Document };

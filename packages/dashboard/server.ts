@@ -42,8 +42,12 @@ import { readUserConfig } from '../memory/user-config.js';
 import { remoteCaptureSpoolStatus } from '../memory/remote-spool.js';
 import { trustFilePath } from '../core/project-trust.js';
 import { getClientServer, previewClientServer, applyClientServer } from './client-server.js';
-import { openAIConfig, openAIStatus, saveOpenAIConfig, upsertOpenAIWorkspace, removeOpenAIWorkspace, rotateOpenAIWorkspace, controlOpenAIServices, restartOpenAIServicesIfRunning } from './openai-tunnel.js';
+import { openAIConfig, openAIStatus, saveOpenAIConfig, upsertOpenAIWorkspace, removeOpenAIWorkspace, rotateOpenAIWorkspace, controlOpenAIServices, restartOpenAIServicesIfRunning, setOpenAIByNameEnabled, setOpenAIWorkspaceWriteAccess, setOpenAIWriteEnabled, serviceStatus } from './openai-tunnel.js';
 import { anthropicTunnelStatus, saveAnthropicTunnel, generateAnthropicCertificates, controlAnthropicTunnel } from './anthropic-tunnel.js';
+import { readDreamRunStatus } from '../adaptive/dream-status.js';
+import { PROFILE_DOMAINS, validateDomains } from '../profile/domains.js';
+import { activeDomains, sanitizeDomainProposal } from '../profile/domains.js';
+import { readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDomainRegistry } from '../profile/domain-registry.js';
 
 const BODY_LIMIT = 64 * 1024, DOCUMENT_BODY_LIMIT = 256 * 1024, ACTION_TIMEOUT_MS = 120_000;
 const captureReachabilityCache = new Map<string, { checkedAt: number; reachable: boolean }>();
@@ -476,33 +480,46 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
     if (req.method === 'POST' && path === '/api/connectors/claude/web/probe') {
       try { return send(res, 200, await claudeWebProbe(root, options.resolveHost)); } catch (error) { return fail(res, 502, 'REACHABILITY_FAILED', (error as Error).message); }
     }
-    if (req.method === 'GET' && path === '/api/connectors/openai/status') return send(res, 200, { config: await openAIConfig(root), status: await openAIStatus(root) });
+    if (req.method === 'GET' && path === '/api/connectors/openai/status') return send(res, 200, { config: await openAIConfig(root, options.engram.vault), status: await openAIStatus(root) });
     if (req.method === 'POST' && path === '/api/connectors/openai/config') {
-      try { const body = await readBody(req) as Record<string, unknown>; await saveOpenAIConfig(root, body); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.config', oldValue: null, newValue: { fields: Object.keys(body).filter(key => ['tunnelId','apiKey','organizationId','profileName'].includes(key)) }, result: 'applied' }); await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { config: await openAIConfig(root) }); }
+      try { const body = await readBody(req) as Record<string, unknown>; await saveOpenAIConfig(root, body, options.engram.vault); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.config', oldValue: null, newValue: { fields: Object.keys(body).filter(key => ['tunnelId','apiKey','organizationId','profileName'].includes(key)) }, result: 'applied' }); await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { config: await openAIConfig(root, options.engram.vault) }); }
       catch (error) { return fail(res, 400, 'INVALID_INPUT', (error as Error).message); }
     }
     if (req.method === 'POST' && path === '/api/connectors/openai/workspaces') {
-      try { await upsertOpenAIWorkspace(root, options.engram.vault, await readBody(req)); await restartOpenAIServicesIfRunning(root).catch(() => undefined); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.workspace.upsert', oldValue: null, newValue: { changed: true }, result: 'applied' }); return send(res, 201, { config: await openAIConfig(root) }); }
+      try { await upsertOpenAIWorkspace(root, options.engram.vault, await readBody(req)); await restartOpenAIServicesIfRunning(root).catch(() => undefined); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.workspace.upsert', oldValue: null, newValue: { changed: true }, result: 'applied' }); return send(res, 201, { config: await openAIConfig(root, options.engram.vault) }); }
       catch (error) { return fail(res, 400, 'INVALID_INPUT', (error as Error).message); }
     }
     if (req.method === 'DELETE' && openAIWorkspace?.[1]) {
-      try { const removed = await removeOpenAIWorkspace(root, options.engram.vault, decodeURIComponent(openAIWorkspace[1])); if (removed) await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { removed, config: await openAIConfig(root) }); }
+      try { const removed = await removeOpenAIWorkspace(root, options.engram.vault, decodeURIComponent(openAIWorkspace[1])); if (removed) await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { removed, config: await openAIConfig(root, options.engram.vault) }); }
       catch { return fail(res, 400, 'WORKSPACE_REMOVE_FAILED', 'Workspace could not be removed safely'); }
     }
     const rotateWorkspace = /^\/api\/connectors\/openai\/workspaces\/([^/]+)\/rotate$/.exec(path)?.[1];
     if (req.method === 'POST' && rotateWorkspace) {
-      try { const rotated = await rotateOpenAIWorkspace(root, options.engram.vault, decodeURIComponent(rotateWorkspace)); if (rotated) await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { rotated, config: await openAIConfig(root) }); }
+      try { const rotated = await rotateOpenAIWorkspace(root, options.engram.vault, decodeURIComponent(rotateWorkspace)); if (rotated) await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { rotated, config: await openAIConfig(root, options.engram.vault) }); }
       catch { return fail(res, 400, 'WORKSPACE_ROTATE_FAILED', 'Workspace credential could not be rotated safely'); }
+    }
+    if (req.method === 'POST' && path === '/api/connectors/openai/by-name') {
+      try { const body = await readBody(req) as { enabled?: unknown }; if (typeof body.enabled !== 'boolean') return fail(res, 400, 'INVALID_INPUT', 'enabled must be a boolean'); await setOpenAIByNameEnabled(root, options.engram.vault, body.enabled); await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { config: await openAIConfig(root, options.engram.vault) }); }
+      catch (error) { return fail(res, 400, 'INVALID_INPUT', (error as Error).message); }
+    }
+    if (req.method === 'POST' && path === '/api/connectors/openai/writes') {
+      try { const body = await readBody(req) as { enabled?: unknown }; if (typeof body.enabled !== 'boolean') return fail(res, 400, 'INVALID_INPUT', 'enabled must be a boolean'); const old = (await openAIConfig(root, options.engram.vault)).chatGPTMayWrite; await setOpenAIWriteEnabled(root, options.engram.vault, body.enabled); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.chatGPTMayWrite', oldValue: old, newValue: body.enabled, result: 'applied' }); await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { config: await openAIConfig(root, options.engram.vault) }); }
+      catch (error) { return fail(res, 400, 'INVALID_INPUT', (error as Error).message); }
+    }
+    const openAIWorkspaceWrite = /^\/api\/connectors\/openai\/workspaces\/([^/]+)\/write$/.exec(path)?.[1];
+    if (req.method === 'POST' && openAIWorkspaceWrite) {
+      try { const body = await readBody(req) as { allowWrites?: unknown }; if (typeof body.allowWrites !== 'boolean') return fail(res, 400, 'INVALID_INPUT', 'allowWrites must be a boolean'); await setOpenAIWorkspaceWriteAccess(root, options.engram.vault, decodeURIComponent(openAIWorkspaceWrite), body.allowWrites); await restartOpenAIServicesIfRunning(root).catch(() => undefined); return send(res, 200, { config: await openAIConfig(root, options.engram.vault) }); }
+      catch (error) { return fail(res, 400, 'INVALID_INPUT', (error as Error).message); }
     }
     const serviceAction = /^\/api\/connectors\/openai\/(start|stop|restart)$/.exec(path)?.[1];
     if (req.method === 'POST' && serviceAction) {
       if (!await verifyPassword(root, req.headers['x-engram-reauth-password'], options.authLocation)) return fail(res, 401, 'REAUTH_REQUIRED', 'Re-enter the local dashboard password to control tunnel services');
-      try { await controlOpenAIServices(root, serviceAction as 'start'|'stop'|'restart'); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.service.' + serviceAction, oldValue: null, newValue: { action: serviceAction }, result: 'applied' }); return send(res, 200, { status: await openAIStatus(root) }); }
+      try { const alreadyRunning = await controlOpenAIServices(root, serviceAction as 'start'|'stop'|'restart', options.engram.vault); await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.openai.service.' + serviceAction, oldValue: null, newValue: { action: serviceAction }, result: 'applied' }); return send(res, 200, { message: alreadyRunning ? 'Tunnel services are already running.' : 'Tunnel services ' + serviceAction + ' completed.', status: await openAIStatus(root) }); }
       catch (error) { return fail(res, 400, 'SERVICE_ACTION_FAILED', (error as Error).message || 'OpenAI tunnel service action failed'); }
     }
     if (req.method === 'GET' && path === '/api/connectors') {
       const credentials = await listHttpCredentials(options.engram.vault), activeCredentials = credentials.some(item => !item.expiresAt || Date.parse(item.expiresAt) > Date.now()), configuredAuth = [process.env.MDB_MCP_OAUTH_ISSUER && 'OAuth resource validation', process.env.MDB_MCP_HTTP_TOKEN && 'legacy shared token', activeCredentials && 'scoped MCP credentials'].filter(Boolean);
-      const connectors = await connectorConfig(root); return send(res, 200, { connectors: { ...connectors, openai: await openAIConfig(root), claudeWeb: await claudeWebConfig(root) }, credentials, remoteAdminEnabled, authMode: configuredAuth.join(' + ') || 'No MCP HTTP authentication configured in this process' });
+      const connectors = await connectorConfig(root); return send(res, 200, { connectors: { ...connectors, openai: await openAIConfig(root, options.engram.vault), claudeWeb: await claudeWebConfig(root) }, credentials, remoteAdminEnabled, authMode: configuredAuth.join(' + ') || 'No MCP HTTP authentication configured in this process' });
     }
     if (req.method === 'GET' && path === '/api/connectors/credentials') return send(res, 200, await listHttpCredentials(options.engram.vault));
     if (req.method === 'POST' && (path === '/api/connectors/config' || path === '/api/connectors/test' || path === '/api/connectors/credentials' || connectorCredential)) {
@@ -541,6 +558,12 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
     }
     if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'PUT' && req.method !== 'DELETE' && req.method !== 'PATCH') return fail(res, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
     if (path === '/api/status' && req.method !== 'GET') return fail(res, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+    if (path === '/api/dream/run-status' && req.method !== 'GET') return fail(res, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+    if (req.method === 'GET' && path === '/api/dream/run-status') {
+      if (!options.engram.vault.actor.permissions.includes('*') || dashboardCredential?.mode === 'view') return fail(res, 403, 'FORBIDDEN', 'Dream schedule details require owner or admin access');
+      const worker = await serviceStatus('dev.engram.intelligence-worker');
+      return send(res, 200, await readDreamRunStatus({ vault: options.engram.vault, store: options.engram.adaptive.store, worker: { loaded: worker.loaded, running: worker.running, pid: worker.pid } }));
+    }
     if (req.method === 'GET' && path === '/api/status') {
       const now = Date.now(); if (!statusCache || now - statusCache.at >= 5000) statusCache = { at: now, value: await readDashboardStatus(options.engram, now) };
       return send(res, 200, statusCache.value);
@@ -552,6 +575,10 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       return section === undefined ? fail(res, 404, 'NOT_FOUND', 'Unknown status section') : send(res, 200, section);
     }
     if (req.method === 'GET' && path === '/api/settings') return send(res, 200, { ...await readSettings(options.engram), security: { passwordSet }, server: { host, port: addressPort(server), restartRequired: true, dashboardEnabled: true, remoteAdminEnabled, dashboardEnvOverride: !!process.env.MDB_DASHBOARD_ENABLED?.trim() } });
+    if (req.method === 'GET' && path === '/api/shim/status') {
+      const { manageShim } = await import('../cli/shim.js');
+      return send(res, 200, await manageShim({ action: 'status' }));
+    }
     if (req.method === 'GET' && (path === '/api/models/list' || path === '/api/embedding/models')) {
       if (!sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'Sign in to view provider model lists');
       const query = new URL(req.url ?? '/', 'http://localhost').searchParams, provider = query.get('provider'), refresh = query.get('refresh') === '1';
@@ -686,7 +713,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
     if (req.method === 'GET' && path === '/api/audit') return send(res, 200, await readAudit(options.engram.vault.root));
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const docMatch = /^\/api\/documents\/([^/]+)(?:\/(history|diff|links|restore))?$/.exec(path);
-    const writeRoute = req.method !== 'GET' && (path === '/api/documents' || !!docMatch || path === '/api/workspaces' || path === '/api/wiki/proposals' || /^\/api\/proposals\/[^/]+\/review$/.test(path));
+    const writeRoute = req.method !== 'GET' && (path === '/api/profile/domains' || path === '/api/documents' || !!docMatch || path === '/api/workspaces' || path === '/api/wiki/proposals' || /^\/api\/proposals\/[^/]+\/review$/.test(path));
     const auditWrite = async (operation: string, body: any, work: () => Promise<unknown>, status = 200) => {
       const title = typeof body?.title === 'string' ? body.title.slice(0, 80) : undefined;
       const summary = { id: docMatch?.[1]?.slice(0, 128), revisionId: typeof body?.expectedRevisionId === 'string' ? body.expectedRevisionId.slice(0, 128) : undefined, title, operation };
@@ -695,6 +722,49 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       catch (error) { await appendAudit(root, { at: new Date().toISOString(), key: `knowledge.${operation}`, oldValue: null, newValue: summary, result: 'failed' }).catch(() => undefined); throw error; }
     };
     const routeError = (error: unknown) => { const e = error as Error & { code?: string }; const code = e.code ?? 'INTERNAL_ERROR'; const status = code === 'CONFLICT' ? 409 : code === 'NOT_FOUND_OR_FORBIDDEN' ? 404 : code === 'INVALID_INPUT' ? 400 : 500; return fail(res, status, code, status === 500 ? 'Knowledge request failed' : e.message); };
+    if (req.method === 'GET' && path === '/api/profile/domains') {
+      try {
+        if (!(await options.engram.vault.canAccess({ type: 'global', area: 'profile' }, 'read'))) return fail(res, 403, 'FORBIDDEN', 'Profile access is owner-only');
+        const docs = await options.engram.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] });
+        const items = docs.filter(d => d.kind === 'user_insight' && d.status === 'accepted' && ['preference', 'working_style'].includes(String(d.metadata.category)) && d.metadata.sensitivity !== 'sensitive').map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, domains: Array.isArray(d.metadata.domains) ? d.metadata.domains : ['general'] }));
+        const { registry, revisionId } = await readDomainRegistry(options.engram.vault);
+        const counts = new Map<string, number>(); for (const item of items) for (const domain of Array.isArray(item.domains) ? item.domains : ['general']) counts.set(domain, (counts.get(domain) ?? 0) + 1);
+        return send(res, 200, { domains: activeDomains(registry).map(domain => ({ ...domain, itemCount: counts.get(domain.slug) ?? 0 })), registry: registry.domains, registryRevisionId: revisionId, autoApply: registry.autoApply, items });
+      } catch (error) { return routeError(error); }
+    }
+    if (req.method === 'POST' && path === '/api/profile/domains') {
+      const body = parsedBodies.get(req) as any;
+      return auditWrite('profile-domain-update', body, async () => {
+        if (!(await options.engram.vault.canAccess({ type: 'global', area: 'profile' }, 'write'))) throw Object.assign(new Error('Profile access is owner-only'), { code: 'NOT_FOUND_OR_FORBIDDEN' });
+        if (typeof body?.operation === 'string') {
+          const { registry, revisionId } = await readDomainRegistry(options.engram.vault);
+          if (body.expectedRegistryRevisionId !== revisionId) throw Object.assign(new Error('Domain registry changed; reload before saving'), { code: 'CONFLICT' });
+          const slugs = activeDomains(registry).map(domain => domain.slug);
+          if (body.operation === 'autoApply') { if (typeof body.enabled !== 'boolean') throw Object.assign(new Error('enabled must be boolean'), { code: 'INVALID_INPUT' }); registry.autoApply = body.enabled; await setDomainAutoApply(options.engram.vault, body.enabled); }
+          else if (body.operation === 'add') {
+            const evidence = await verifyDomainEvidence(options.engram.vault, Array.isArray(body.evidence) ? body.evidence.filter((x: unknown): x is string => typeof x === 'string') : []);
+            const proposal = sanitizeDomainProposal(body, evidence, registry, new Date().toISOString(), undefined, { maxActive: (await options.engram.config()).profile?.domains?.maxActive, maxPerDreamCycle: (await options.engram.config()).profile?.domains?.maxPerDreamCycle });
+            if (!proposal.record) throw Object.assign(new Error(proposal.mergeInto ? `Near duplicate; merge into ${proposal.mergeInto}` : proposal.reason ?? 'Invalid domain'), { code: 'INVALID_INPUT' });
+            registry.domains.push({ ...proposal.record, origin: 'owner' });
+          } else {
+            const record = registry.domains.find(domain => domain.slug === body.slug && domain.status === 'active');
+            if (!record || record.slug === 'general') throw Object.assign(new Error('Active non-general domain not found'), { code: 'NOT_FOUND_OR_FORBIDDEN' });
+            if (body.operation === 'rename') { if (typeof body.label !== 'string' || !body.label.trim() || body.label.length > 40) throw Object.assign(new Error('Invalid label'), { code: 'INVALID_INPUT' }); record.label = body.label.trim(); record.origin = 'owner'; }
+            else if (body.operation === 'merge') { if (!slugs.includes(body.into) || body.into === body.slug) throw Object.assign(new Error(`into must be one of ${slugs.join(', ')}`), { code: 'INVALID_INPUT' }); record.status = 'merged'; record.mergedInto = body.into; }
+            else if (body.operation === 'retire') { record.status = 'retired'; }
+            else throw Object.assign(new Error('Unknown domain operation'), { code: 'INVALID_INPUT' });
+          }
+          const saved = await writeDomainRegistry(options.engram.vault, registry, revisionId);
+          return { registryRevisionId: saved.revisionId, registry: registry.domains, autoApply: registry.autoApply };
+        }
+        if (typeof body?.id !== 'string' || typeof body?.expectedRevisionId !== 'string') throw Object.assign(new Error('id and expectedRevisionId are required'), { code: 'INVALID_INPUT' });
+        const current = await options.engram.vault.get(body.id);
+        if (current.kind !== 'user_insight' || current.status !== 'accepted' || !['preference', 'working_style'].includes(String(current.metadata.category))) throw Object.assign(new Error('Only accepted preferences can be tagged'), { code: 'INVALID_INPUT' });
+        const { registry } = await readDomainRegistry(options.engram.vault);
+        const domains = validateDomains(body.domains, activeDomains(registry).map(domain => domain.slug));
+        return options.engram.vault.patch({ objectId: current.id, expectedRevisionId: body.expectedRevisionId, metadataPatch: { domains, tagSource: 'owner' } });
+      }).catch(routeError);
+    }
     if (req.method === 'GET' && path === '/api/documents') {
       try {
         const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') ?? 25)));

@@ -50,8 +50,8 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     // A binding this machine did not create is never obeyed: it could name any server and any environment variable as the credential.
     if (found && !found.trusted && !options.user) return { outcome: 'disabled', output: '', reason: 'this project binding is not trusted on this machine (run mdb init here)' };
     const bound = found?.trusted ? found : undefined;
-    let workspaceId: string, serverUrl: string | undefined, tokenEnv: string | undefined, maxTokens = 2500;
-    if (bound) { if (options.user) return { outcome: 'disabled', output: '', reason: 'project hook handles this project' }; workspaceId = bound.binding.workspaceId; serverUrl = bound.binding.serverUrl; tokenEnv = bound.binding.credentialRef; maxTokens = bound.binding.sessionContextMaxTokens; }
+    let workspaceId: string, serverUrl: string | undefined, tokenEnv: string | undefined, maxTokens = 2500, domains: import('../profile/domains.js').ProfileDomain[] | undefined;
+    if (bound) { if (options.user) return { outcome: 'disabled', output: '', reason: 'project hook handles this project' }; workspaceId = bound.binding.workspaceId; serverUrl = bound.binding.serverUrl; tokenEnv = bound.binding.credentialRef; maxTokens = bound.binding.sessionContextMaxTokens; domains = bound.binding.domains; }
     else if (options.user) {
       const config = await readUserConfig(env); if (!config || config.paused) return { outcome: 'disabled', output: '', reason: 'user-level capture is not active' };
       if (config.excludeProjects.some(pattern => new RegExp(pattern, 'i').test(cwd))) return { outcome: 'disabled', output: '', reason: 'project is excluded' };
@@ -60,7 +60,7 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     } else return { outcome: 'disabled', output: '', reason: 'project is not initialized' };
     if (!serverUrl) { // local mode: read the local vault directly, no network
       if (!options.root) return { outcome: 'none', output: '', workspaceId, reason: 'no vault root given for local mode' };
-      const context = await buildSessionContext(new Engram(options.root), { workspaceId, maxTokens, now });
+      const context = await buildSessionContext(new Engram(options.root), { workspaceId, maxTokens, now, ...(domains ? { domains } : {}) });
       return finish({ outcome: 'fresh', output: render(options.host, context.text, format), workspaceId });
     }
     const token = tokenEnv ? env[tokenEnv] : undefined; if (!token) return finish({ outcome: 'none', output: '', workspaceId, reason: `$${tokenEnv} is not set; no context without authentication` });
@@ -71,7 +71,7 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     const file = cacheFile(env, serverUrl, workspaceId, credential);
     try {
       const session = await openRemoteSession({ url: serverUrl, token, workspaceId, timeoutMs: options.timeoutMs ?? 1500 });
-      const reply = await session.call('engram_session_context', { maxTokens });
+      const reply = await session.call('engram_session_context', { maxTokens, ...(domains ? { domains } : {}) });
       const value = reply.value as { text?: string; revision?: string } | undefined;
       if (reply.isError || !value?.text) { if (/NOT_FOUND_OR_FORBIDDEN/.test(JSON.stringify(reply.value))) throw new RemoteError('workspace', 'access refused'); return finish({ outcome: 'none', output: '', workspaceId, reason: 'the server returned no context' }); }
       const sections = { profile: /## Accepted user (?:preferences|insights)/.test(value.text), shared: /## Shared notes/.test(value.text), wiki: /## Accepted wiki pages/.test(value.text) };

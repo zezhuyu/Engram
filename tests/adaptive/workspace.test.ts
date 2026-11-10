@@ -6,8 +6,58 @@ import { world, ws } from './helpers.js';
 import { Vault } from '../../packages/core/vault.js';
 import { AdaptiveIntelligence } from '../../packages/adaptive/index.js';
 import { readableEntries, loadDocuments } from '../../packages/intelligence/corpus.js';
+import { recordLiveChatTurn } from '../../packages/chat/live.js';
+import { correctInsight, projectProfile } from '../../packages/intelligence/insights.js';
+import { dreamPool } from '../../packages/intelligence/dream/context.js';
+import { IntelligenceEngine } from '../../packages/intelligence/index.js';
+import { readFile } from 'node:fs/promises';
 
 const summariesOf = async (vault: Awaited<ReturnType<typeof world>>['vault'], workspaceId: string) => (await vault.listDocuments()).filter(d => d.kind === 'workspace_daily_summary' && d.scope.type === 'workspace' && d.scope.workspaceId === workspaceId);
+
+test('adaptive Dream processes personal chat and preferences with evidence, masking, review, and workspace isolation', async t => {
+  const w = await world(t, { workspaces: ['personal', 'alpha'] });
+  const personalTurn = await recordLiveChatTurn(w.vault, { provider: 'chatgpt', turnId: 'personal-1', role: 'user', text: 'I prefer concise plans [key:concise_plans].' });
+  await recordLiveChatTurn(w.vault, { provider: 'chatgpt', conversationId: String(personalTurn.metadata.externalConversationId), turnId: 'personal-2', role: 'assistant', text: 'I prefer verbose plans [key:assistant_only].' });
+  const source = await w.vault.get(personalTurn.id);
+  await w.vault.createCollection('personal', 'preferences', 'Accepted user preferences');
+  const existing = await correctInsight(w.vault, { scope: { type: 'global', area: 'profile' }, storageScope: { type: 'workspace', workspaceId: 'personal', collectionId: 'preferences' }, category: 'working_style', preferenceKey: 'formatting', claim: 'The user prefers bullet lists.' });
+  const pool = await dreamPool(w.vault);
+  assert.ok(pool.some(entry => entry.id === existing.id), 'explicit personal/preferences are Dream inputs');
+  assert.ok(pool.some(entry => entry.id === source.id), 'personal/chat is a Dream input');
+  await w.say('alpha', 'I prefer Python for scripts [key:alpha_only]');
+  const cycle = (await w.ai.runCycle({ kind: 'manual', idempotencyKey: 'personal-dream', respectActivity: false })).cycle!;
+  assert.ok(['COMPLETED', 'RETRY_WAIT'].includes(cycle.state), JSON.stringify({ error: cycle.error, personal: cycle.workspaces.personal }));
+  assert.equal(cycle.workspaces.personal?.status, 'SUCCEEDED', JSON.stringify({ error: cycle.error, personal: cycle.workspaces.personal }));
+  const personalCall = w.provider.profileCalls().find(request => request.documents.some(doc => doc.id === source.id));
+  assert.ok(personalCall, 'profile extraction runs over user-authored personal chat');
+  assert.doesNotMatch(JSON.stringify(personalCall.documents), /verbose plans|assistant_only/, 'assistant text is masked before model input');
+  const alphaCall = w.provider.profileCalls().find(request => request.documents.some(doc => doc.metadata.speaker === 'user'));
+  assert.ok(alphaCall);
+  assert.doesNotMatch(JSON.stringify(alphaCall.documents), /concise plans|personal-1|assistant_only/, 'personal text is not copied into another workspace profile input');
+  const engine = new IntelligenceEngine(w.vault, w.provider);
+  const proposals = await engine.proposals();
+  const fromChat = proposals.find(proposal => proposal.input.kind === 'user_insight' && proposal.input.evidence?.some(ref => ref.uri === source.uri && ref.revisionId === source.revisionId));
+  assert.ok(fromChat, 'profile proposal cites exact personal chat URI and revision');
+  assert.equal(fromChat.input.scope.type, 'workspace');
+  assert.equal(fromChat.input.scope.type === 'workspace' && fromChat.input.scope.collectionId, 'preferences', 'personal preference output targets personal/preferences');
+  assert.equal(fromChat.status, 'approved', 'low-risk explicit preferences use the existing review rules');
+  const accepted = await w.vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'personal', collectionId: 'preferences' }] });
+  assert.ok(accepted.some(doc => doc.status === 'accepted' && doc.metadata.preferenceKey === 'concise_plans'));
+  const profileBefore = await readFile(`${w.root}/PROFILE.md`, 'utf8');
+  const insightBefore = await readFile(`${w.root}/USER_INSIGHT.md`, 'utf8');
+  await projectProfile(w.vault);
+  assert.equal(await readFile(`${w.root}/PROFILE.md`, 'utf8'), profileBefore);
+  assert.equal(await readFile(`${w.root}/USER_INSIGHT.md`, 'utf8'), insightBefore);
+});
+
+test('adaptive personal extraction without a provider makes no model call and reports the unavailable capability', async t => {
+  const w = await world(t, { workspaces: ['personal'], provider: false });
+  await recordLiveChatTurn(w.vault, { provider: 'chatgpt', turnId: 'no-provider-turn', role: 'user', text: 'I prefer simple answers.' });
+  const cycle = (await w.ai.runCycle({ kind: 'manual', idempotencyKey: 'personal-no-provider', respectActivity: false })).cycle!;
+  assert.equal(cycle.workspaces.personal?.status, 'BLOCKED');
+  assert.equal(cycle.workspaces.personal?.error?.category, 'MODEL_UNAVAILABLE');
+  assert.equal((await w.vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'personal', collectionId: 'preferences' }] })).length, 0, 'without a model there are no inferred preference outputs');
+});
 
 test('multiple active workspaces get evidence-linked summaries; an inactive workspace is an explicit NO_ELIGIBLE_CHANGES success; no cross-workspace text leaks', async t => {
   const w = await world(t, { workspaces: ['alpha', 'beta', 'gamma'] });

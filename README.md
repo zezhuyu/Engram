@@ -15,6 +15,8 @@ sudo xattr -rd com.apple.quarantine "/Applications/Engram Client.app"
 
 4. Open the app. It appears in the menu bar and starts its background service at login. Configure it as described in [macos/README.md](macos/README.md) and [docs/client-daemon.md](docs/client-daemon.md).
 
+The first launch installs or refreshes the `mdb` command at `~/.local/bin/mdb`. If `~/.local/bin` is not on your shell's `PATH`, the dashboard Settings page and `mdb shim status` show the exact `export PATH=...` line to add to your shell configuration. Engram does not edit shell startup files or overwrite a command that lacks its managed header.
+
 The app only contains code. Your data stays outside it: the vault in `~/.Engram` (or `ENGRAM_DATA_DIR`), configuration and tokens in `~/.config/engram/`. To update, download the new release, replace the app in `/Applications`, run the `xattr` command again for the new copy, and restart the background service. The vault and configuration are not touched.
 
 ## Build from source
@@ -147,3 +149,7 @@ Read [architecture](docs/architecture.md), [storage and recovery](docs/storage-f
 Owners migrating an existing Markdown wiki can use [`mdb wiki import`](docs/wiki-import.md) to preserve original sources and pages in workspace collections, then verify the hashes without modifying the source tree.
 
 Semantic search can use a separately configured Ollama, OpenAI or OpenAI-compatible embedding endpoint, or the optional built-in multilingual bge-m3 model. Built-in weights are downloaded only after an explicit dashboard action, checksum verified, cached outside the vault, and run locally in an on-demand child process. See [Search and context](docs/search.md) for setup, resource requirements and privacy behavior.
+
+Project preference domains: `mdb init --project --domain coding` (or omit `--domain` to use manifest/name hints), then `mdb project domains set --domains investing --project-dir PATH` to change a binding. Legacy bindings without domains keep their existing unfiltered preference projection. Tag accepted preferences with `mdb profile domains list`, `suggest`, `set ID --domains coding`, or `apply --yes`; `suggest` and `apply` preview by default.
+
+Project onboarding supports preview with `mdb init --project --dry-run`, reversible removal with `mdb project unbind --root DIR`, and workspace reactivation after wiki retirement with `mdb workspace reactivate NAME`. For a gated multi-project rollout, use `scripts/project-migration.mjs`; it requires `--apply` before changing a project. See [memory setup](docs/memory.md), [remote client setup](docs/remote-client-setup.md), and [operations](docs/operations.md).

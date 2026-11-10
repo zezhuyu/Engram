@@ -14,6 +14,17 @@ test('standalone runtime copies the keyed gateway into its private app bundle', 
   assert.match(gateway, /127\.0\.0\.1/);
 });
 
+test('macOS app source installs the managed CLI on every app launch and exposes the shim in standalone runtime', async () => {
+  const swift = await readFile(new URL('../macos/EngramApp.swift', import.meta.url), 'utf8');
+  const standalone = await readFile(new URL('../scripts/standalone.mjs', import.meta.url), 'utf8');
+  const shim = await readFile(new URL('../packages/cli/shim.ts', import.meta.url), 'utf8');
+  assert.match(swift, /installCommandLineShim\(\)/);
+  assert.match(swift, /"shim", "install"/);
+  assert.match(swift, /FileHandle\.nullDevice/);
+  assert.match(standalone, /'shim', 'install'/);
+  assert.match(shim, /engram-managed-shim v1/);
+});
+
 async function fixture(role, config, mode = 0o600) {
   const root = await mkdtemp(join(tmpdir(), 'engram mac test '));
   const home = join(root, 'home');
@@ -94,11 +105,15 @@ test('native packaging fixture creates both signed app bundles and directly moun
   const root = await mkdtemp(join(tmpdir(), 'engram app fixture '));
   try {
     const backend = join(root, 'backend'); await mkdir(backend);
+    await mkdir(join(backend, 'runtime/bin'), { recursive: true }); await mkdir(join(backend, 'app/bin'), { recursive: true });
+    await writeFile(join(backend, 'runtime/bin/node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    await writeFile(join(backend, 'app/bin/mdb.js'), 'fixture CLI');
     await writeFile(join(backend, 'fixture.txt'), 'fixture backend, not a production app');
     await packageMacApps(join(root, 'output'), backend);
     for (const role of ['Client', 'Server']) {
       const contents = join(root, 'output', `Engram ${role}.app/Contents`);
       for (const file of ['MacOS/Engram', 'MacOS/engram-worker', 'Resources/Engram.icns', 'Resources/menu_bar.png']) await access(join(contents, file));
+      for (const file of ['Resources/backend/runtime/bin/node', 'Resources/backend/app/bin/mdb.js']) await access(join(contents, file));
       const plist = await readFile(join(contents, 'Info.plist'), 'utf8');
       assert.match(plist, /LSUIElement/);
       assert.match(plist, new RegExp(`<key>EngramRole</key><string>${role.toLowerCase()}</string>`));
