@@ -60,7 +60,7 @@ export async function upsertTyped(client: Engram, input: Upsert): Promise<TypedR
   const done = (doc: Document, created: boolean, unchanged: boolean): TypedResult => ({ persistence: 'COMMITTED', kind: input.kind, stableId, objectId: doc.id, revisionId: doc.revisionId, revisionNumber: doc.revisionNumber, created, unchanged, contentHash, redactions, uri: doc.uri });
   if (input.offline && existing) {
     const prior = (await client.vault.history(existing.id)).find(doc => (doc.metadata.merge as { entryId?: string } | undefined)?.entryId === input.offline!.entryId);
-    if (prior) return done(prior, false, true);
+    if (prior) return { ...done(prior, false, true), merge: { outcome: 'ALREADY_APPLIED' } };
   }
   if (input.offline && existing) return mergeOfflineWrite(client, input, { existing, createKey, title: input.title, body, tags, contentHash, done });
   if (!existing) {

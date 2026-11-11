@@ -28,7 +28,7 @@ test('replaying the same queued write is idempotent, also after the record has m
   await upsertNote(c, { scope, noteId: 'n', title: 'N', body: PLAN.replace('step 5', 'step 5 (server)') });
   const write = { scope, noteId: 'n', title: 'N', body: PLAN.replace('step 1', 'step 1 (local)'), offline: offline('entry-0002', { baseRevisionId: base.revisionId }) };
   const first = await upsertNote(c, write); await upsertNote(c, { scope, noteId: 'n', title: 'N', body: (await record(c, 'n')).body + 'later line\n' });
-  const again = await upsertNote(c, write); assert.equal(again.merge!.outcome, 'ALREADY_APPLIED'); assert.equal(again.revisionId !== undefined, true);
+  const again = await upsertNote(c, write); assert.equal(again.merge!.outcome, 'ALREADY_APPLIED'); assert.equal(again.revisionId, first.revisionId, 'a replay after the head moved returns the original applied revision'); assert.equal(again.created, false); assert.equal(again.unchanged, true);
   const doc = await record(c, 'n'); assert.equal(doc.revisionNumber, 4, 'the replay added no revision'); assert.ok(first.merge!.outcome === 'MERGED');
   recordCase({ suite: 'memory', name: 'offline-merge-idempotent', status: 'PASS' });
 });
