@@ -63,7 +63,7 @@ The replication capability is internal to Vault and replication code; CLI, MCP, 
 | Epoch changed | The client must explicitly resync before transferring. |
 | Daemon stopped | The daemon is not live or its status is older than three polling intervals. |
 
-The client dashboard's Cached projects tab shows enrolled workspace counts and conflict controls. The owner Clients screen shows the latest client-reported replica fields alongside the authoritative server heartbeat receive time and device enrollment registry.
+The client dashboard's Cached projects tab always lists every trusted project directory on the device, including local and remote bindings that are not enrolled in a replica. Replica workspace counts and conflict controls appear below the directory table. An unavailable external volume is shown as unmounted, not empty. Remote SessionStart cache age, stale state and queued outbox counts are metadata only; cached context text and queued write bodies are never sent to the dashboard. The owner Clients screen shows the latest client-reported replica fields alongside the authoritative server heartbeat receive time and device enrollment registry.
 
 ## Phases
 0. This record (done) and the owner questions it resolves.

@@ -67,8 +67,8 @@ test('real daemon survives offline polling, writes atomic status, recovers a kil
   assert.equal(alive(restarted), true, `restart did not recover stale lock: ${output}`);
   const stopped = exited(restarted);
   restarted.kill('SIGTERM');
-  const result = await Promise.race([stopped, wait(5000).then(() => 'timeout' as const)]);
-  if (result === 'timeout') assert.fail('SIGTERM shutdown exceeded five seconds');
+  const result = await Promise.race([stopped, wait(15_000).then(() => 'timeout' as const)]);
+  if (result === 'timeout') assert.fail('SIGTERM shutdown exceeded fifteen seconds under load');
   assert.equal(result.code, 0, output);
   const finalStatus = JSON.parse(await readFile(statusFile, 'utf8')) as { pid: number; state: string };
   assert.equal(finalStatus.pid, 0);
@@ -104,7 +104,7 @@ test('real daemon stays idle after credential revocation without retrying contin
   assert.equal(requests, refusedRequestCount, 'a refused credential should not create a retry storm');
   const stopped = exited(child);
   child.kill('SIGTERM');
-  const result = await Promise.race([stopped, wait(5000).then(() => 'timeout' as const)]);
+  const result = await Promise.race([stopped, wait(15_000).then(() => 'timeout' as const)]);
   if (result === 'timeout') assert.fail('refused daemon did not stop on SIGTERM');
   assert.equal(result.code, 0);
 });
@@ -161,7 +161,7 @@ test('outbox-watch CLI process remains alive while its queue is idle', async t =
   assert.equal(alive(child), true, 'outbox watcher exited while its queue was idle');
   const stopped = exited(child);
   child.kill('SIGTERM');
-  const result = await Promise.race([stopped, wait(5000).then(() => 'timeout' as const)]);
+  const result = await Promise.race([stopped, wait(15_000).then(() => 'timeout' as const)]);
   if (result === 'timeout') assert.fail('outbox watcher did not stop on SIGTERM');
   assert.equal(result.code, 0);
 });

@@ -48,6 +48,8 @@ import { readUserConfig } from '../memory/user-config.js';
 import { remoteCaptureSpoolStatus } from '../memory/remote-spool.js';
 import { trustFilePath, bindingFingerprint } from '../core/project-trust.js';
 import { readBinding } from '../core/project-binding.js';
+import { cacheDir } from '../memory/context-hook.js';
+import { resolveStoragePath } from '../core/root.js';
 import { getClientServer, previewClientServer, applyClientServer } from './client-server.js';
 import { openAIConfig, openAIStatus, saveOpenAIConfig, upsertOpenAIWorkspace, removeOpenAIWorkspace, rotateOpenAIWorkspace, controlOpenAIServices, restartOpenAIServicesIfRunning, setOpenAIByNameEnabled, setOpenAIWorkspaceWriteAccess, setOpenAIWriteEnabled, serviceStatus } from './openai-tunnel.js';
 import { anthropicTunnelStatus, saveAnthropicTunnel, generateAnthropicCertificates, controlAnthropicTunnel } from './anthropic-tunnel.js';
@@ -58,6 +60,7 @@ import { readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDoma
 
 const BODY_LIMIT = 64 * 1024, DOCUMENT_BODY_LIMIT = 256 * 1024, ACTION_TIMEOUT_MS = 120_000;
 const captureReachabilityCache = new Map<string, { checkedAt: number; reachable: boolean }>();
+const clientFoldersCache = new Map<string, { at: number; value: unknown }>();
 const parsedBodies = new WeakMap<IncomingMessage, unknown>();
 type Action = { id: string; type: string; state: 'running' | 'complete' | 'failed' | 'cancelled'; startedAt: string; result?: unknown; error?: string; timer?: NodeJS.Timeout; controller: AbortController };
 export interface DashboardOptions { engram: Engram; host?: string; allowRemote?: boolean; port?: number; token?: string; idleMs?: number; actionTimeoutMs?: number; chatTimeoutMs?: number; rateLimit?: number; failedTokenLimit?: number; sessionIdleMs?: number; sessionMaxAgeMs?: number; maxSessions?: number; urlNoteEnv?: NodeJS.ProcessEnv; authLocation?: DashboardAuthLocationOptions; tlsCert?: string; tlsKey?: string; clientMode?: boolean; resolveHost?: HostResolver; serviceManager?: (action: 'install') => Promise<unknown> }
@@ -121,6 +124,91 @@ async function localClientConfig(): Promise<{ ENGRAM_MCP_URL?: string; ENGRAM_TO
     if (value && match[1] === 'ENGRAM_TOKEN_FILE') result.ENGRAM_TOKEN_FILE = value;
   }
   return result;
+}
+
+type ClientFolderRow = { folderName: string; path: string; workspaceId: string; mode: 'local' | 'remote' | 'replica'; trusted: true; mounted: boolean; domains: string[]; hooksInstalled: boolean; contextCache: { ageMs: number | null; stale: boolean }; queuedWrites: number; queuedBytes: number; replica: { state: string | null; pending: number; conflicts: number } };
+async function clientFolderSnapshot(): Promise<{ rows: ClientFolderRow[]; approximate: boolean }> {
+  const started = Date.now(), deadline = started + 200;
+  const key = `${trustFilePath()}\0${cacheDir()}\0${defaultOutboxDirectory()}`;
+  const cached = clientFoldersCache.get(key);
+  if (cached && started - cached.at < 10_000) return cached.value as { rows: ClientFolderRow[]; approximate: boolean };
+  let approximate = false;
+  const registry = await fsPromises.readFile(trustFilePath(), 'utf8').then(JSON.parse).catch(() => undefined) as { schemaVersion?: number; entries?: Array<Record<string, unknown>> } | undefined;
+  const entries = registry?.schemaVersion === 1 && Array.isArray(registry.entries) ? registry.entries.slice(0, 2000) : [];
+  if (entries.length > 200) approximate = true;
+  const rows: ClientFolderRow[] = [];
+  const serverUrls = new Map<string, string>();
+  const replicaIdsByRoot = new Map<string, string>();
+  for (const entry of entries) {
+    if (rows.length >= 200 || Date.now() >= deadline) { approximate = true; break; }
+    if (typeof entry.root !== 'string' || !pathUtil.isAbsolute(entry.root) || typeof entry.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(entry.fingerprint)) continue;
+    const root = entry.root, pathExists = await fsPromises.stat(root).then(info => info.isDirectory(), () => false);
+    let binding: Awaited<ReturnType<typeof readBinding>> | undefined;
+    try { binding = await readBinding(root); } catch { /* an absent volume retains its last trusted registry metadata */ }
+    if (binding && entry.fingerprint !== bindingFingerprint(binding)) continue;
+    const mounted = pathExists && !!binding;
+    const mode = binding?.mode ?? entry.mode, workspaceId = binding?.workspaceId ?? entry.workspaceId;
+    if (!['local', 'remote', 'replica'].includes(String(mode)) || typeof workspaceId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(workspaceId)) continue;
+    const folderName = pathUtil.basename(root).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 120) || '(project folder)';
+    let hooksInstalled = false;
+    if (mounted) for (const file of [pathUtil.join(root, '.claude', 'settings.json'), pathUtil.join(root, '.codex', 'hooks.json')]) {
+      const info = await fsPromises.stat(file).catch(() => undefined);
+      if (!info?.isFile() || info.size > 1024 * 1024) continue;
+      const config = await fsPromises.readFile(file, 'utf8').then(JSON.parse).catch(() => undefined) as { hooks?: unknown } | undefined;
+      if (config?.hooks && typeof config.hooks === 'object') { hooksInstalled = true; break; }
+    }
+    if (binding?.serverUrl) serverUrls.set(root, binding.serverUrl);
+    const replicaId = binding?.replicaId ?? entry.replicaId;
+    if (typeof replicaId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(replicaId)) replicaIdsByRoot.set(root, replicaId);
+    rows.push({ folderName, path: root.slice(0, 4096), workspaceId, mode: mode as ClientFolderRow['mode'], trusted: true, mounted, domains: binding?.domains ?? [], hooksInstalled, contextCache: { ageMs: null, stale: false }, queuedWrites: 0, queuedBytes: 0, replica: { state: null, pending: 0, conflicts: 0 } });
+  }
+
+  const replicaByWorkspace = new Map<string, { state: string | null; pending: number; conflicts: number }>();
+  const replicaIds = [...new Set(rows.filter(row => row.mode === 'replica').map(row => replicaIdsByRoot.get(row.path)).filter((id): id is string => typeof id === 'string'))].slice(0, 20);
+  if (replicaIds.length < rows.filter(row => row.mode === 'replica').length) approximate = true;
+  for (const replicaId of replicaIds) {
+    if (Date.now() >= deadline) { approximate = true; break; }
+    try {
+      const { replicaStatus } = await import('../replication/client.js');
+      const status = await replicaStatus(replicaId);
+      const state = status.state === 'offline' || status.state === 'refused' || status.state === 'paused' || status.state === 'epoch-changed' || !status.daemonRunning ? 'offline' : status.state === 'synced' || status.state === 'ready' ? 'synced' : 'stale';
+      for (const item of status.workspaceStatus) replicaByWorkspace.set(`${replicaId}\0${item.workspaceId}`, { state, pending: item.pendingPush, conflicts: item.diverged });
+    } catch { /* missing or damaged replica status remains unavailable */ }
+  }
+
+  const cacheEntries = await fsPromises.readdir(pathUtil.join(cacheDir(), 'context')).catch(() => [] as string[]);
+  const cacheMetadata: Array<{ workspaceId: string; serverUrl: string; fetchedAt: string }> = [];
+  for (const name of cacheEntries.slice(0, 2000)) {
+    if (Date.now() >= deadline) { approximate = true; break; }
+    if (!/^[a-f0-9]{24}\.json$/.test(name)) continue;
+    const value = await fsPromises.readFile(pathUtil.join(cacheDir(), 'context', name), 'utf8').then(JSON.parse).catch(() => undefined) as { workspaceId?: unknown; serverUrl?: unknown; fetchedAt?: unknown } | undefined;
+    if (value && typeof value.workspaceId === 'string' && typeof value.serverUrl === 'string' && typeof value.fetchedAt === 'string') cacheMetadata.push(value as { workspaceId: string; serverUrl: string; fetchedAt: string });
+  }
+  const staleStates = await fsPromises.readFile(pathUtil.join(resolveStoragePath('state'), 'context-state.json'), 'utf8').then(JSON.parse).catch(() => ({})) as Record<string, { workspaceId?: string; outcome?: string }>;
+  const queuedEntries = (await fsPromises.readdir(defaultOutboxDirectory()).catch(() => [] as string[])).filter(name => /^\d{14}-[0-9a-f-]{36}\.json$/.test(name)).slice(0, 5000);
+  const queueTotals = new Map<string, { count: number; bytes: number }>();
+  for (const name of queuedEntries) {
+    if (Date.now() >= deadline) { approximate = true; break; }
+    const file = pathUtil.join(defaultOutboxDirectory(), name), info = await fsPromises.stat(file).catch(() => undefined);
+    if (!info?.isFile()) continue;
+    const item = await fsPromises.readFile(file, 'utf8').then(JSON.parse).catch(() => undefined) as { version?: unknown; workspaceId?: unknown } | undefined;
+    if (item?.version !== 1 || typeof item.workspaceId !== 'string') continue;
+    const total = queueTotals.get(item.workspaceId) ?? { count: 0, bytes: 0 }; total.count++; total.bytes += info.size; queueTotals.set(item.workspaceId, total);
+  }
+  for (const row of rows) {
+    const serverUrl = serverUrls.get(row.path);
+    const cache = row.mode === 'remote' && serverUrl ? cacheMetadata.filter(item => item.workspaceId === row.workspaceId && item.serverUrl === serverUrl).sort((a, b) => Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt))[0] : undefined;
+    row.contextCache.ageMs = cache && Number.isFinite(Date.parse(cache.fetchedAt)) ? Math.max(0, Date.now() - Date.parse(cache.fetchedAt)) : null;
+    row.contextCache.stale = Object.values(staleStates).some(item => item?.workspaceId === row.workspaceId && item.outcome === 'stale');
+    row.queuedWrites = queueTotals.get(row.workspaceId)?.count ?? 0;
+    row.queuedBytes = queueTotals.get(row.workspaceId)?.bytes ?? 0;
+    const replicaId = replicaIdsByRoot.get(row.path);
+    row.replica = replicaId ? replicaByWorkspace.get(`${replicaId}\0${row.workspaceId}`) ?? row.replica : row.replica;
+  }
+  const value = { rows, approximate };
+  if (clientFoldersCache.size >= 32) clientFoldersCache.delete(clientFoldersCache.keys().next().value!);
+  clientFoldersCache.set(key, { at: Date.now(), value });
+  return value;
 }
 
 export async function createDashboardServer(options: DashboardOptions): Promise<DashboardHandle> {
@@ -297,6 +385,10 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       if (!options.clientMode && path === '/api/client/status') return fail(res, 404, 'NOT_FOUND', 'Client dashboard mode is not enabled');
       if (!sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'Sign in with the local dashboard password to manage connections');
       if (!options.clientMode && (path === '/api/client/settings' || path.startsWith('/api/client/service') || path === '/api/client/outbox/drain' || path.startsWith('/api/client/server'))) return fail(res, 404, 'NOT_FOUND', 'Client dashboard mode is not enabled');
+      if (req.method === 'GET' && path === '/api/client/folders') {
+        if (!options.clientMode) return fail(res, 404, 'NOT_FOUND', 'Client dashboard mode is not enabled');
+        return send(res, 200, await clientFolderSnapshot());
+      }
       if (path.startsWith('/api/client/replica')) {
         if (!options.clientMode) return fail(res, 404, 'NOT_FOUND', 'Replica dashboard routes are available only in client mode');
         const base = undefined;

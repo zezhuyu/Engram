@@ -365,7 +365,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     else process.stderr.write(`Dashboard password: ${passwordSet ? 'set' : 'not set; use the printed one-time URL for first setup'}\n`);
     const url = `http://127.0.0.1:${dashboard.port}/#t=${dashboard.token}`;
     (await import('../dashboard/announce.js')).announceDashboard({ urls: [url], passwordSet });
-    return `${url}\n`;
+    return `${passwordSet ? url.split('#')[0] : url}\n`;
   }
   if (command === 'service') {
     if (sub === 'daemon') return runClientDaemon({ url: required(text(flags, 'url'), '--url'), tokenFile: resolve(required(text(flags, 'token-file'), '--token-file')), allowRoot: !!flags['allow-root'], ...(text(flags, 'log-file') ? { logFile: resolve(text(flags, 'log-file')!) } : {}), ...(text(flags, 'workspace') ? { workspace: text(flags, 'workspace') } : {}), ...(text(flags, 'outbox') ? { outbox: resolve(text(flags, 'outbox')!) } : {}), ...(text(flags, 'project-dir') ? { projectDir: resolve(text(flags, 'project-dir')!) } : {}) });
@@ -470,14 +470,15 @@ export async function execute(argv: string[]): Promise<unknown> {
         ? [...(await import('../dashboard/server.js')).dashboardIPv4Addresses().map(urlFor), urlFor('127.0.0.1')]
         : [urlFor(dashboard.host)];
       const url = urls[0]!;
-      (await import('../dashboard/announce.js')).announceDashboard({ urls, passwordSet: await passwordIsSet(root) });
+      const passwordAlreadySet = await passwordIsSet(root);
+      (await import('../dashboard/announce.js')).announceDashboard({ urls, passwordSet: passwordAlreadySet });
       if (remote && scheme === 'http') process.stderr.write('WARNING: Remote dashboard uses plain HTTP on the network. Anyone who can reach this port and has the token gets owner-level settings access. Prefer a trusted LAN or VPN. Keep the token private.\n');
       if (flags.open) {
         const { spawn } = await import('node:child_process');
         const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
-        spawn(opener, process.platform === 'win32' ? ['/c', 'start', '', url] : [url], { detached: true, stdio: 'ignore' }).on('error', () => undefined).unref();
+        spawn(opener, process.platform === 'win32' ? ['/c', 'start', '', passwordAlreadySet ? url.split('#')[0]! : url] : [passwordAlreadySet ? url.split('#')[0]! : url], { detached: true, stdio: 'ignore' }).on('error', () => undefined).unref();
       }
-      return `${urls.join('\n')}\n`;
+      return `${(passwordAlreadySet ? urls.map(item => item.split('#')[0]) : urls).join('\n')}\n`;
     }
     case 'shim': {
       const action = required(sub, 'install|status|remove');

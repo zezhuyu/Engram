@@ -612,6 +612,32 @@ test('replica poll leaves unchanged area untouched, patches only changed keyed r
   assert.equal(textarea.value, 'draft from user');
 });
 
+test('Cached projects renders folders while replica sync is disabled and patches folder rows by key', async () => {
+  const js = assets['/assets/app.js']!.body, start = js.indexOf('let clientFoldersSnapshot=null'), end = js.indexOf("setInterval(()=>{for(const age", start);
+  assert.ok(start >= 0 && end > start);
+  const makePage = async (folders: unknown[]) => {
+    const makeNode = (tag: string, className = '', text = '') => ({ tag, className, text, children: [] as any[], attrs: {} as Record<string,string>, append(...nodes: any[]) { this.children.push(...nodes); }, setAttribute(name: string, value: string) { this.attrs[name] = value; } });
+    const api = async (route: string) => route === '/api/client/folders' ? { rows: folders, approximate: false } : { enabled: false, state: 'disabled', replicas: [] };
+    const pageHeader = (_title: string, description: string) => makeNode('header', '', description), panel = (title: string) => makeNode('section', 'panel', title);
+    const factory = vm.runInNewContext(`${js.slice(start,end)}; cachedProjectsPage`, { node: makeNode, panel, pageHeader, api, notify: () => undefined, render: () => undefined, Date }) as () => Promise<any>;
+    return factory();
+  };
+  const folder = { folderName: '../<script>', path: '/tmp/very-long-project-path', workspaceId: 'ws', mode: 'remote', trusted: true, mounted: true, domains: [], hooksInstalled: false, contextCache: { ageMs: 60000, stale: true }, queuedWrites: 2, queuedBytes: 30, replica: { state: null, pending: 0, conflicts: 0 } };
+  const view = await makePage([folder]);
+  const collect = (item: any): string => [item.text, ...(item.children || []).map(collect)].join(' ');
+  assert.match(collect(view), /Project folders on this device/); assert.match(collect(view), /Enable replica sync/); assert.match(collect(view), /STALE/); assert.match(collect(view), /\.\.\/<script>/);
+  const empty = await makePage([]); assert.match(collect(empty), /No project folders are bound on this machine\. Run mdb init --project in a project folder, or enable replica sync below\./);
+  const t = patchHarness(), stable = h('tr', { 'data-key': 'folder-/tmp/stable' }, h('td', {}, 'stable')), changed = h('tr', { 'data-key': 'folder-/tmp/changed' }, h('td', {}, 'offline'));
+  const initial = h('div', { 'data-connector-live': 'true' }, stable, changed); t.content.append(initial);
+  t.patchContent(h('div', { 'data-connector-live': 'true' }, h('tr', { 'data-key': 'folder-/tmp/stable' }, h('td', {}, 'stable')), h('tr', { 'data-key': 'folder-/tmp/changed' }, h('td', {}, 'offline'))));
+  assert.equal(t.content.childNodes[0], initial); assert.equal(initial.childNodes[0], stable); assert.equal(initial.childNodes[1], changed, 'an unchanged poll does not mutate folder rows');
+  t.patchContent(h('div', { 'data-connector-live': 'true' }, h('tr', { 'data-key': 'folder-/tmp/stable' }, h('td', {}, 'stable')), h('tr', { 'data-key': 'folder-/tmp/changed' }, h('td', {}, 'stale'))));
+  const patched = t.content.childNodes[0] as FakeEl;
+  assert.equal(patched, initial); assert.equal(patched.childNodes[0], stable); assert.equal(patched.childNodes[1], changed);
+  assert.equal(((changed.childNodes[0] as FakeEl).childNodes[0] as FakeText).data, 'stale');
+  assert.match(js, /Date\.now\(\)-clientFoldersFetchedAt>=10000/); assert.match(js, /folder-context-age.*1000/s);
+});
+
 test('replica UI exposes every state, capped size, and plain-text conflict rendering', () => {
   const js = assets['/assets/app.js']!.body;
   const start = js.indexOf('function updateReplicaHeader(data){'), end = js.indexOf('\nasync function refresh()', start); assert.ok(start >= 0 && end > start);

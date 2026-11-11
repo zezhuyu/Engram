@@ -31,3 +31,27 @@ test('private client note still produces a macOS alert without writing the token
     for (const [key, value] of [['MDB_DASHBOARD_TOKEN_NOTE', old.note], ['MDB_DASHBOARD_ALERT', old.alert], ['NODE_ENV', old.nodeEnv]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   }
 });
+
+test('once a password is set there is no pop-up and no token URL anywhere; first run still shows both', () => {
+  const old = { note: process.env.MDB_DASHBOARD_TOKEN_NOTE, alert: process.env.MDB_DASHBOARD_ALERT, nodeEnv: process.env.NODE_ENV };
+  delete process.env.MDB_DASHBOARD_TOKEN_NOTE; delete process.env.MDB_DASHBOARD_ALERT; process.env.NODE_ENV = 'test';
+  const url = 'http://127.0.0.1:4871/#t=private-setup-token';
+  const writes: string[] = [], originalWrite = process.stderr.write.bind(process.stderr); let alerts = 0;
+  const fake = (() => { alerts++; return { on: () => ({ unref: () => undefined }), unref: () => undefined }; }) as never;
+  process.stderr.write = ((chunk: string | Uint8Array) => { writes.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try {
+    announceDashboard({ urls: [url], passwordSet: true }, 'darwin', fake);
+    assert.equal(alerts, 0, 'no native alert when a password exists');
+    assert.equal(writes.join('').includes('private-setup-token'), false, 'the token is never printed once a password exists');
+    assert.match(writes.join(''), /127\.0\.0\.1:4871\//); assert.match(writes.join(''), /Sign in with your dashboard password/);
+    assert.equal(dashboardBanner({ urls: [url], passwordSet: true }).includes('#t='), false);
+    announceDashboard({ urls: [url], passwordSet: false }, 'darwin', fake);
+    assert.equal(alerts, 1, 'first run still pops up the window');
+    process.env.MDB_DASHBOARD_TOKEN_NOTE = '/private/note.txt'; writes.length = 0;
+    announceDashboard({ urls: [url], passwordSet: true }, 'darwin', fake);
+    assert.equal(alerts, 1); assert.deepEqual(writes, [], 'a supervised client with a password set writes nothing');
+  } finally {
+    process.stderr.write = originalWrite;
+    for (const [key, value] of [['MDB_DASHBOARD_TOKEN_NOTE', old.note], ['MDB_DASHBOARD_ALERT', old.alert], ['NODE_ENV', old.nodeEnv]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+});
