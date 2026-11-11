@@ -5,7 +5,6 @@ summarize(await runSuite({
   // The launchd validator uses macOS-only plutil; the generated plist itself and
   // systemd unit are covered on every platform, while lint is reported as a
   // platform-scoped skip on Linux.
-  allowedSkips: ['launchd plist is well-formed (plutil -lint on macOS), runs only the explicit worker command, and escapes special characters'],
   concurrency: 1,
   gaps: [
     { item: 'Real-model quality of workspace-scoped insight extraction and Dream inside the adaptive cycle', status: 'NOT_RUN', reason: 'All adaptive tests use deterministic provider fixtures; the underlying profile/dream prompts are evaluated separately (eval:profile, eval:dream) and the cycle adds no new prompts.' },

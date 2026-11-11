@@ -13,7 +13,6 @@ const criticGaps = criticPass ? [] : [{ item: 'Real-model Knowledge Critic rejec
 summarize(await runSuite({
   name: 'dream', title: 'Cross-domain dreaming: association retrieval, modes, critic, feedback (M4)',
   files: ['dist/tests/dream/retrieval.test.js', 'dist/tests/dream/dream.test.js', 'dist/tests/dream/learning.test.js'],
-  allowedSkips: ['real model'],
   gaps: [
     ...scoringGaps,
     ...criticGaps,

@@ -3,7 +3,6 @@ summarize(await runSuite({
   name: 'wiki', title: 'Wiki changes, compilation, session memory and handoff',
   concurrency: 4,
   files: ['dist/tests/wiki/changes.test.js', 'dist/tests/wiki/compile.test.js', 'dist/tests/wiki/lint.test.js', 'dist/tests/wiki/skill-routing.test.js', 'dist/tests/wiki/legacy-vault.test.js', 'dist/tests/wiki/http-cli-deployment.test.js', 'dist/tests/memory/handoff.test.js', 'dist/tests/wiki/real-model.test.js'],
-  allowedSkips: ['real model'],
   gaps: [
     { item: 'Real-model wiki compilation is opt-in', status: 'NOT_RUN', reason: 'Enable with MDB_REAL_MODEL_TEST=1 (default provider claude-cli). Passed once during M3 (see verification/wiki/m3.md); it spends a little model quota. Model quality (groundedness, hallucination rate) is not scored.' },
     { item: 'Claim extraction as a separate stage and lint of claim-to-span support', status: 'UNSUPPORTED', reason: 'Compilation is one model call per source (plus one repair attempt). The deterministic checks are: evidence is real and readable, target page was supplied, at least one source is cited, every statement cites [n] or says (inference), the page has not changed since compilation. Whether a cited span really supports the sentence is not machine-checked.' },

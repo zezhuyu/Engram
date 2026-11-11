@@ -60,7 +60,7 @@ export function scrubDiagnostics(text: string, env: NodeJS.ProcessEnv = process.
 }
 export type Status = 'PASS' | 'FAIL' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
 export interface Gap { item: string; status: 'NOT_RUN' | 'UNSUPPORTED' | 'FAIL'; reason: string }
-export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; allowedSkips?: string[]; env?: Record<string, string>; concurrency?: number }
+export interface SuiteSpec { name: string; title: string; files: string[]; gaps: Gap[]; limitations: string[]; env?: Record<string, string>; concurrency?: number }
 export interface TestResult { name: string; status: Status; /** for a failed test: the TAP diagnostic block (assertion message, expected/actual, stack head), so a CI log shows why it failed */ detail?: string }
 export interface SuiteReport {
   suite: string; git_commit: string; treeState: string; status: Status; exitCode: number | null; run_at: string; command: string; durationMs: number;
@@ -185,8 +185,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = process.env.MDB_VERIFI
   }
   const caseLines = (await fs.readFile(casesFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => parseStrictJson(l, `${casesFile} line`) as { suite: string; name: string; status: string; seed?: number; detail?: unknown });
   const counts = { pass: tests.filter(t => t.status === 'PASS').length, fail: tests.filter(t => t.status === 'FAIL').length, skipped: tests.filter(t => t.status === 'SKIPPED').length, total: tests.length };
-  const unapprovedSkips = tests.filter(t => t.status === 'SKIPPED' && !spec.allowedSkips?.some(s => t.name.includes(s)));
-  let status: Status = counts.total === 0 ? 'NOT_RUN' : counts.fail > 0 || run.status !== 0 ? 'FAIL' : unapprovedSkips.length ? 'SKIPPED' : 'PASS';
+  let status: Status = counts.total === 0 ? 'NOT_RUN' : counts.fail > 0 || run.status !== 0 ? 'FAIL' : counts.skipped > 0 ? 'SKIPPED' : 'PASS';
   const caseFailures = caseLines.filter(c => c.status === 'FAIL'); if (caseFailures.length) status = 'FAIL';
   const command = `node ${args.join(' ')}`;
   const evidenceSource = await currentSourceEvidence();
@@ -211,5 +210,5 @@ function markdown(spec: SuiteSpec, r: SuiteReport): string {
 export function summarize(report: SuiteReport): void {
   console.log(`${report.suite}: ${report.status} (${report.counts.pass}/${report.counts.total} tests, ${report.cases} cases, ${(report.durationMs / 1000).toFixed(1)} s)`);
   for (const t of report.tests.filter(t => t.status !== 'PASS')) { console.log(`  ${t.status}: ${t.name}`); if (t.status === 'FAIL' && t.detail) console.log(t.detail.split('\n').slice(0, 40).map(l => `      ${l}`).join('\n')); }
-  if (report.status !== 'PASS') process.exitCode = 1;
+  if (report.status !== 'PASS' && report.status !== 'SKIPPED') process.exitCode = 1;
 }

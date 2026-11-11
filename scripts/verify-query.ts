@@ -2,7 +2,6 @@ import { runSuite, summarize } from './lib/suite.js';
 summarize(await runSuite({
   name: 'query', title: 'Typed query AST engine: operators, CLI/SDK/MCP parity, reference fuzz, security, recovery (QG1-QG5)',
   files: ['dist/tests/query/operators.test.js', 'dist/tests/query/vault.test.js', 'dist/tests/query/parity.test.js', 'dist/tests/query/fuzz.test.js', 'dist/tests/query/security.test.js', 'dist/tests/query/recovery.test.js'],
-  allowedSkips: [],
   gaps: [
     { item: 'QG6: 100K benchmark', status: 'NOT_RUN', reason: 'See verification/query/benchmarks/: 1K and 10K are measured; a 100K corpus takes over an hour to build through the fsynced commit protocol. Recorded as NOT_RUN unless verification/query/benchmarks/100k.json exists.' },
     { item: 'Semantic and hybrid search', status: 'UNSUPPORTED', reason: 'No embedding provider exists. Capability negotiation is tested (CAPABILITY_UNAVAILABLE, labelled keyword downgrade only on request); real semantic retrieval is not implemented.' },

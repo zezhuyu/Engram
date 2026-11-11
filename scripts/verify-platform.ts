@@ -4,7 +4,6 @@ summarize(await runSuite({
   files: ['dist/tests/platform/environment.test.js'],
   // Permission-bit denial cannot be exercised under root because root bypasses
   // those bits. Keep both cases visible as approved skips in containerized CI.
-  allowedSkips: ['read-only vault: writes fail cleanly with no committed state, reads keep working', 'permission denied on the current-view directory after the commit point: commit stays durable and recover() repairs the view'],
   gaps: [
     { item: 'Linux (ext4) run of any suite', status: 'NOT_RUN', reason: 'Only macOS/APFS hardware was available. Linux is not a supported release platform until the reliability lane passes there.' },
     { item: 'Windows', status: 'UNSUPPORTED', reason: 'POSIX link/rename/fsync semantics and mkdir locking are assumed; never run.' },

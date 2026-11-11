@@ -2,8 +2,6 @@ import { runSuite, summarize } from './lib/suite.js';
 summarize(await runSuite({
   name: 'unix', title: 'Unix text interoperability: cat head tail grep cut sort uniq wc tr paste comm diff find tree tee + filter bridge',
   files: ['dist/tests/unix/parity.test.js', 'dist/tests/unix/features.test.js', 'dist/tests/unix/sandbox.test.js'],
-  // The macOS run records these exact external-tool prerequisites as skips; the same assertions pass in the Linux GNU lane.
-  allowedSkips: ['awk: gawk --sandbox', 'sed: GNU sed --sandbox'],
   gaps: [
     { item: 'External-merge sort / spill', status: 'UNSUPPORTED', reason: 'sort, diff and comm checks hold at most MDB_UNIX_MAX_BUFFER_LINES lines and fail with an error instead of spilling.' },
     { item: 'Locales and byte-exact non-UTF-8 data', status: 'UNSUPPORTED', reason: 'Text tools assume UTF-8 and C-locale (byte/code point) ordering; invalid UTF-8 is replaced when a tool decodes lines (cat and tee copy bytes unchanged).' },
