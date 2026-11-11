@@ -13,6 +13,7 @@ const slug = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/;
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 export const TUNNEL_HEALTH_PORT = 3337;
 const TUNNEL_STARTING_GRACE_MS = 15_000;
+export const SERVICE_STATUS_PROBE_TIMEOUT_MS = 5_000;
 const tunnelFirstSeen = new Map<number, number>();
 const home = () => process.env.HOME ?? '';
 const configDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(home(), '.config'), 'engram');
@@ -244,8 +245,9 @@ export async function discoverTunnelClient(): Promise<{ found: boolean; path: st
   for (const candidate of candidates) { try { const info = await fs.lstat(candidate); await fs.access(candidate, 1); if (info.isFile() && !info.isSymbolicLink()) return { found: true, path: path.resolve(candidate) }; } catch { /* next fixed candidate */ } }
   return { found: false, path: null };
 }
-export type TunnelState = 'stopped' | 'starting' | 'connected' | 'running-not-ready' | 'failing';
-export function deriveTunnelState(input: { loaded: boolean; running: boolean; ready: boolean; uptimeMs: number | null; failureReason?: string }): TunnelState {
+export type TunnelState = 'unknown' | 'stopped' | 'starting' | 'connected' | 'running-not-ready' | 'failing';
+export function deriveTunnelState(input: { loaded: boolean; running: boolean; ready: boolean; uptimeMs: number | null; failureReason?: string; statusUnknown?: boolean }): TunnelState {
+  if (input.statusUnknown) return 'unknown';
   if (!input.loaded) return 'stopped';
   if (!input.running) return input.failureReason ? 'failing' : 'stopped';
   if (input.ready) return 'connected';
@@ -312,46 +314,74 @@ async function probeTunnel(url?: string): Promise<boolean> {
     return !!first.value && first.value.byteLength <= 16 && new TextDecoder().decode(first.value).trim().toLowerCase() === 'ready';
   } catch { return false; }
 }
-export async function openAIStatus(root: string) {
+export async function openAIStatus(root: string, platform: NodeJS.Platform = process.platform) {
   const config = await openAIConfig(root), binary = await discoverTunnelClient(), dir = configDir(), gatewayLogPath = path.join(home(), 'Library/Logs/Engram/keyed-gateway.log'), tunnelLogPath = path.join(home(), 'Library/Logs/Engram/tunnel-client.log');
   let logAgeMs: number | null = null; try { logAgeMs = Math.max(0, Date.now() - (await fs.stat(gatewayLogPath)).mtimeMs); } catch { /* absent */ }
   let gatewayHealth: unknown = null; try { const response = await fetch('http://127.0.0.1:' + (process.env.ENGRAM_KEYED_GATEWAY_PORT || '3335') + '/health', { signal: AbortSignal.timeout(500) }); if (response.ok) gatewayHealth = await response.json(); } catch { /* down */ }
   const profilePath = path.join(dir, 'tunnel-client', config.profileName + '.yaml');
-  const services = await Promise.all(['dev.engram.keyed-gateway', 'dev.engram.tunnel-client'].map(label => serviceStatus(label)));
+  const services = await Promise.all(['dev.engram.keyed-gateway', 'dev.engram.tunnel-client'].map(label => serviceStatus(label, platform)));
   const keyedGateway = services[0]!, tunnelService = services[1]!;
   let failureReason: string | undefined;
-  if (keyedGateway.loaded && (!keyedGateway.running || keyedGateway.lastExitCode !== null && keyedGateway.lastExitCode !== 0)) {
+  if (!keyedGateway.statusUnknown && keyedGateway.loaded && (!keyedGateway.running || keyedGateway.lastExitCode !== null && keyedGateway.lastExitCode !== 0)) {
     const log = await fs.readFile(gatewayLogPath, 'utf8').catch(() => '');
     failureReason = 'Gateway is failing: ' + safeGatewayLogLine(log);
   }
   const [profile, tunnelLog] = await Promise.all([fs.readFile(profilePath, 'utf8').catch(() => ''), readTunnelLogTail(tunnelLogPath)]);
   const logEntries = tunnelLogEntries(tunnelLog), summary = summarizeTunnelClientLog(tunnelLog), tunnelFailure = summary.failureReason;
   let tunnelLogAt: string | null = null; try { tunnelLogAt = (await fs.stat(tunnelLogPath)).mtime.toISOString(); } catch { /* absent */ }
-  const healthUrl = tunnelHealthUrl(profile, tunnelLog), ready = tunnelService.running && await probeTunnel(healthUrl);
+  const healthUrl = tunnelHealthUrl(profile, tunnelLog), ready = !tunnelService.statusUnknown && tunnelService.running && await probeTunnel(healthUrl);
   const now = Date.now();
   if (tunnelService.pid && !tunnelFirstSeen.has(tunnelService.pid)) tunnelFirstSeen.set(tunnelService.pid, now);
   for (const pid of tunnelFirstSeen.keys()) if (pid !== tunnelService.pid) tunnelFirstSeen.delete(pid);
   const loggedStart = [...logEntries].reverse().find(entry => /tunnel-client started/i.test(entry.line) && entry.at !== undefined)?.at;
   const uptimeMs = tunnelService.pid ? Math.max(0, now - (loggedStart ?? tunnelFirstSeen.get(tunnelService.pid) ?? now)) : null;
-  const state = deriveTunnelState({ loaded: tunnelService.loaded, running: tunnelService.running, ready, uptimeMs, failureReason: tunnelFailure });
+  const state = deriveTunnelState({ loaded: tunnelService.loaded, running: tunnelService.running, ready, uptimeMs, failureReason: tunnelFailure, statusUnknown: tunnelService.statusUnknown });
   const failure = state === 'failing' ? tunnelFailure ?? 'Tunnel client is not running; inspect its launch service and recent logs.' : tunnelFailure;
-  return { gateway: { healthy: !!gatewayHealth, health: gatewayHealth, ...(failureReason ? { failureReason } : {}) }, keyedGateway, tunnelClient: { ...tunnelService, state, ready, healthUrl: healthUrl ?? null, uptimeSeconds: uptimeMs === null ? null : Math.floor(uptimeMs / 1000), failureReason: failure ?? null, lastLogAt: tunnelLogAt, recentLogLines: summary.recentLogLines }, binaryFound: binary.found, profilePresent: !!(await fs.stat(profilePath).catch(() => undefined)), logAgeMs };
+  return { gateway: { state: keyedGateway.statusUnknown ? 'unknown' : gatewayHealth ? 'healthy' : 'stopped', healthy: !!gatewayHealth, health: gatewayHealth, ...(failureReason ? { failureReason } : {}) }, keyedGateway, tunnelClient: { ...tunnelService, state, ready, healthUrl: healthUrl ?? null, uptimeSeconds: uptimeMs === null ? null : Math.floor(uptimeMs / 1000), failureReason: failure ?? null, lastLogAt: tunnelLogAt, recentLogLines: summary.recentLogLines }, binaryFound: binary.found, profilePresent: !!(await fs.stat(profilePath).catch(() => undefined)), logAgeMs };
 }
-export async function serviceStatus(label: string): Promise<{ loaded: boolean; running: boolean; pid: number | null; lastExitCode: number | null }> {
+export type ServiceStatus = { loaded: boolean; running: boolean; pid: number | null; lastExitCode: number | null; restartCount: number | null; statusUnknown?: true };
+export function parseSystemdServiceStatus(output: string, exitCode: number | null): ServiceStatus {
+  const properties = new Map(output.split(/\r?\n/u).map(line => { const at = line.indexOf('='); return at < 0 ? ['', ''] : [line.slice(0, at), line.slice(at + 1)]; }));
+  const loadState = properties.get('LoadState');
+  const active = properties.get('ActiveState') === 'active';
+  const pid = Number(properties.get('MainPID'));
+  const status = Number(properties.get('ExecMainStatus'));
+  const restarts = Number(properties.get('NRestarts'));
+  const execMainStatus = properties.has('ExecMainStatus') && Number.isInteger(status) ? status : null;
+  return {
+    loaded: exitCode === 0 && loadState === 'loaded',
+    running: active && Number.isInteger(pid) && pid > 0,
+    pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+    lastExitCode: execMainStatus,
+    restartCount: properties.has('NRestarts') && Number.isInteger(restarts) && restarts >= 0 ? restarts : null,
+  };
+}
+export async function serviceStatus(label: string, platform: NodeJS.Platform = process.platform, options: { timeoutMs?: number } = {}): Promise<ServiceStatus> {
   const { spawn } = await import('node:child_process');
-  const executable = findExecutable(process.platform === 'darwin' ? 'launchctl' : 'systemctl') ?? (process.platform === 'darwin' ? '/bin/launchctl' : '/usr/bin/systemctl');
-  const args = process.platform === 'darwin' ? ['print', 'gui/' + (typeof process.getuid === 'function' ? process.getuid() : 0) + '/' + label] : ['--user', 'show', label, '--property=ActiveState,MainPID', '--no-page'];
-  return new Promise(resolve => {
+  if (platform !== 'darwin' && platform !== 'linux') return { loaded: false, running: false, pid: null, lastExitCode: null, restartCount: null };
+  const macOS = platform === 'darwin';
+  const executable = findExecutable(macOS ? 'launchctl' : 'systemctl') ?? (macOS ? '/bin/launchctl' : '/usr/bin/systemctl');
+  const args = macOS ? ['print', 'gui/' + (typeof process.getuid === 'function' ? process.getuid() : 0) + '/' + label] : ['--user', 'show', label, '--property=LoadState,ActiveState,SubState,MainPID,ExecMainStatus,NRestarts,Result', '--no-page'];
+  const timeoutMs = options.timeoutMs ?? SERVICE_STATUS_PROBE_TIMEOUT_MS;
+  const probe = (): Promise<ServiceStatus> => new Promise(resolve => {
     const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'ignore'], shell: false }); let output = '', settled = false;
-    const finish = (result: { loaded: boolean; running: boolean; pid: number | null; lastExitCode: number | null }) => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); };
-    const timer = setTimeout(() => { child.kill(); finish({ loaded: false, running: false, pid: null, lastExitCode: null }); }, 1000);
+    const stopped: ServiceStatus = { loaded: false, running: false, pid: null, lastExitCode: null, restartCount: null };
+    const finish = (result: ServiceStatus) => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); };
+    const timer = setTimeout(() => { child.kill(); finish({ ...stopped, statusUnknown: true }); }, timeoutMs);
     child.stdout.on('data', chunk => { output += String(chunk).slice(0, 4096); });
-    child.once('error', () => finish({ loaded: false, running: false, pid: null, lastExitCode: null }));
-    child.once('exit', code => { const pid = /(?:pid|MainPID)\s*=\s*(\d+)/i.exec(output)?.[1], exit = /last exit code\s*=\s*(-?\d+)/i.exec(output)?.[1]; const running = /state = running|ActiveState=active/i.test(output); finish({ loaded: code === 0, running, pid: pid && Number(pid) > 0 ? Number(pid) : null, lastExitCode: exit === undefined ? null : Number(exit) }); });
+    child.once('error', () => finish({ ...stopped, statusUnknown: true }));
+    child.once('close', code => {
+      if (macOS) {
+        const pid = /(?:pid|MainPID)\s*=\s*(\d+)/i.exec(output)?.[1], exit = /last exit code\s*=\s*(-?\d+)/i.exec(output)?.[1];
+        finish({ loaded: code === 0, running: /state = running/i.test(output), pid: pid && Number(pid) > 0 ? Number(pid) : null, lastExitCode: exit === undefined ? null : Number(exit), restartCount: null });
+      } else finish(parseSystemdServiceStatus(output, code));
+    });
   });
+  const first = await probe();
+  return first.statusUnknown ? probe() : first;
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
-async function prepareAgents(root: string): Promise<void> {
+async function prepareAgents(root: string, platform: NodeJS.Platform = process.platform): Promise<void> {
   const config = await openAIConfig(root), binary = await discoverTunnelClient();
   if (!binary.found || !binary.path) throw new Error('tunnel-client not found; install it in the agent-slack tools directory, ~/.config/engram/tunnel-client, or PATH');
   const dir = configDir(), logs = path.join(home(), 'Library', 'Logs', 'Engram');
@@ -367,14 +397,14 @@ async function prepareAgents(root: string): Promise<void> {
   const tunnelLauncher = '#!/bin/sh\nset -eu\nset -a\n. ' + shellQuote(path.join(dir, 'chatgpt-tunnel.env')) + '\nset +a\nif [ -n "${ENGRAM_OPENAI_ORGANIZATION_ID:-}" ]; then\n  exec ' + shellQuote(binary.path) + runArgs + ' --control-plane.organization-id "$ENGRAM_OPENAI_ORGANIZATION_ID"\nfi\nexec ' + shellQuote(binary.path) + runArgs + '\n';
   const gatewayPath = path.join(dir, 'keyed-gateway-launcher.sh'), tunnelPath = path.join(dir, 'tunnel-client-launcher.sh');
   await atomicPrivate(gatewayPath, gatewayLauncher); await fs.chmod(gatewayPath, 0o700); await atomicPrivate(tunnelPath, tunnelLauncher); await fs.chmod(tunnelPath, 0o700);
-  if (process.platform === 'darwin') {
+  if (platform === 'darwin') {
     const launchAgents = path.join(home(), 'Library', 'LaunchAgents'); await fs.mkdir(launchAgents, { recursive: true, mode: 0o700 });
     for (const [label, launcher, name] of [['dev.engram.keyed-gateway', gatewayPath, 'keyed-gateway'], ['dev.engram.tunnel-client', tunnelPath, 'tunnel-client']] as Array<[string, string, string]>) {
       const plist = path.join(launchAgents, label + '.plist'), log = path.join(logs, name + '.log'), escaped = (value: string) => value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
       const xml = '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>' + label + '</string><key>ProgramArguments</key><array><string>' + escaped(launcher) + '</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>' + escaped(log) + '</string><key>StandardErrorPath</key><string>' + escaped(log) + '</string></dict></plist>';
       await atomicPrivate(plist, xml);
     }
-  } else if (process.platform === 'linux') {
+  } else if (platform === 'linux') {
     const units = path.join(process.env.XDG_CONFIG_HOME || path.join(home(), '.config'), 'systemd', 'user'); await privateDir(units);
     for (const [label, launcher] of [['dev.engram.keyed-gateway', gatewayPath], ['dev.engram.tunnel-client', tunnelPath]]) await atomicPrivate(path.join(units, label + '.service'), '[Unit]\nDescription=Engram keyed tunnel service\n[Service]\nExecStart=' + launcher + '\nRestart=on-failure\n[Install]\nWantedBy=default.target\n');
   } else throw new Error('OpenAI tunnel services are supported on macOS and Linux');
@@ -411,14 +441,14 @@ async function waitForGatewayHealth(timeoutMs = 8_000): Promise<boolean> {
   return false;
 }
 let serviceActionTail: Promise<boolean> = Promise.resolve(false);
-export function controlOpenAIServices(root: string, action: 'start' | 'stop' | 'restart', vault?: Vault): Promise<boolean> {
-  const current = serviceActionTail.then(() => runOpenAIServices(root, action, vault));
+export function controlOpenAIServices(root: string, action: 'start' | 'stop' | 'restart', vault?: Vault, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  const current = serviceActionTail.then(() => runOpenAIServices(root, action, vault, platform));
   serviceActionTail = current.catch(() => false);
   return current;
 }
-async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'restart', vault?: Vault): Promise<boolean> {
+async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'restart', vault?: Vault, platform: NodeJS.Platform = process.platform): Promise<boolean> {
   if (action === 'start') {
-    const current = await openAIStatus(root);
+    const current = await openAIStatus(root, platform);
     if (current.gateway.healthy && current.keyedGateway.running && current.tunnelClient.state === 'connected') return true;
   }
   if (action !== 'stop' && vault) await syncChatGateway(root, vault);
@@ -426,17 +456,17 @@ async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'resta
     const missing = await validateOpenAIStart(root);
     if (missing.includes('at least one workspace row')) throw new Error('Cannot start ChatGPT connector: needs workspace rows (add at least one workspace row below).');
     if (missing.length) throw new Error('Cannot start ChatGPT connector; missing: ' + missing.join(', '));
-    await prepareAgents(root);
+    await prepareAgents(root, platform);
   }
   const labels = ['dev.engram.keyed-gateway', 'dev.engram.tunnel-client'];
   const run = async (label: string, operation: 'start' | 'stop' | 'restart') => {
     const { spawn } = await import('node:child_process');
     const call = (executable: string, args: string[]) => new Promise<void>((resolve, reject) => { const child = spawn(executable, args, { stdio: 'ignore', shell: false }); child.once('error', () => reject(new Error('Service manager action failed'))); child.once('exit', code => code === 0 ? resolve() : reject(new Error('Service manager action failed'))); });
-    if (process.platform === 'darwin') {
+    if (platform === 'darwin') {
       const uid = typeof process.getuid === 'function' ? process.getuid() : 0, target = 'gui/' + uid, executable = findExecutable('launchctl') ?? '/bin/launchctl', plist = path.join(home(), 'Library', 'LaunchAgents', label + '.plist');
       if (operation !== 'start') await call(executable, ['bootout', target + '/' + label]).catch(() => undefined);
       if (operation !== 'stop') { await call(executable, ['bootstrap', target, plist]).catch(() => undefined); await call(executable, ['kickstart', '-k', target + '/' + label]); }
-    } else if (process.platform === 'linux') {
+    } else if (platform === 'linux') {
       const executable = findExecutable('systemctl') ?? '/usr/bin/systemctl';
       await call(executable, ['--user', 'daemon-reload']);
       await call(executable, ['--user', operation, label]);
@@ -454,6 +484,6 @@ async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'resta
   return false;
 }
 export async function restartOpenAIServicesIfRunning(root: string): Promise<void> {
-  const statuses = await Promise.all(['dev.engram.keyed-gateway','dev.engram.tunnel-client'].map(serviceStatus));
+  const statuses = await Promise.all(['dev.engram.keyed-gateway','dev.engram.tunnel-client'].map(label => serviceStatus(label)));
   if (statuses.some(status => status.loaded)) await controlOpenAIServices(root, 'restart');
 }

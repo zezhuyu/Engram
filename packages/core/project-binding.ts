@@ -13,17 +13,17 @@ export const BINDING_FILE = path.join('.engram', 'project.json');
 export const BINDING_HOSTS = ['claude-code', 'codex'] as const;
 export type BindingHost = (typeof BINDING_HOSTS)[number];
 export interface ProjectBinding {
-  schemaVersion: 1; projectRoot: '.'; workspaceId: string; serverUrl?: string; hosts: BindingHost[]; credentialRef?: string; registrationId?: string;
+  schemaVersion: 1; projectRoot: '.'; workspaceId: string; serverUrl?: string; mode?: 'local'|'remote'|'replica'; replicaId?: string; hosts: BindingHost[]; credentialRef?: string; registrationId?: string;
   captureConsent: boolean; fileSyncConsent: boolean; /** false keeps accepted-profile text out of AGENTS.md/CLAUDE.md (it is still delivered at session start) */ profileInFiles?: boolean; notesInclude: string[]; notesExclude: string[]; profileMaxTokens: number; sessionContextMaxTokens: number;
   /** Omitted on legacy bindings to preserve their historical unfiltered projection. */ domains?: ProfileDomain[];
   managed: { version: number; projectionRevision?: string; generatedAt?: string };
 }
-const KEYS = new Set(['schemaVersion', 'projectRoot', 'workspaceId', 'serverUrl', 'hosts', 'credentialRef', 'registrationId', 'captureConsent', 'fileSyncConsent', 'profileInFiles', 'notesInclude', 'notesExclude', 'profileMaxTokens', 'sessionContextMaxTokens', 'domains', 'managed']);
+const KEYS = new Set(['schemaVersion', 'projectRoot', 'workspaceId', 'serverUrl', 'mode', 'replicaId', 'hosts', 'credentialRef', 'registrationId', 'captureConsent', 'fileSyncConsent', 'profileInFiles', 'notesInclude', 'notesExclude', 'profileMaxTokens', 'sessionContextMaxTokens', 'domains', 'managed']);
 const invalid = (message: string): never => { throw new MDBError('INVALID_INPUT', `Invalid project binding: ${message}`); };
 const WORKSPACE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/, ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 export function defaultBinding(input: { workspaceId: string; serverUrl?: string; hosts?: BindingHost[]; credentialRef?: string; registrationId?: string; captureConsent?: boolean }): ProjectBinding {
-  return { schemaVersion: 1, projectRoot: '.', workspaceId: input.workspaceId, ...(input.serverUrl ? { serverUrl: input.serverUrl } : {}), hosts: input.hosts ?? [], ...(input.credentialRef ? { credentialRef: input.credentialRef } : {}), ...(input.registrationId ? { registrationId: input.registrationId } : {}),
+  return { schemaVersion: 1, projectRoot: '.', workspaceId: input.workspaceId, ...(input.serverUrl ? { serverUrl: input.serverUrl, mode: 'remote' as const } : { mode: 'local' as const }), hosts: input.hosts ?? [], ...(input.credentialRef ? { credentialRef: input.credentialRef } : {}), ...(input.registrationId ? { registrationId: input.registrationId } : {}),
     captureConsent: input.captureConsent ?? false, fileSyncConsent: false, notesInclude: ['notes/**/*.md', '.engram/notes/**/*.md'], notesExclude: ['**/.env*', '**/.git/**', '**/node_modules/**'], profileMaxTokens: 900, sessionContextMaxTokens: 2500, managed: { version: 1 } };
 }
 function glob(value: unknown, label: string): string {
@@ -40,6 +40,9 @@ export function parseBinding(raw: unknown): ProjectBinding {
   if (v.projectRoot !== '.') invalid('projectRoot must be "."');
   if (typeof v.workspaceId !== 'string' || !WORKSPACE.test(v.workspaceId)) invalid('workspaceId');
   if (v.serverUrl !== undefined) { try { const u = new URL(String(v.serverUrl)); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.hash) invalid('serverUrl'); } catch (error) { if (error instanceof MDBError) throw error; invalid('serverUrl'); } }
+  if (v.mode !== undefined && !['local','remote','replica'].includes(String(v.mode))) invalid('mode');
+  if (v.replicaId !== undefined && (typeof v.replicaId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v.replicaId))) invalid('replicaId');
+  if (v.mode === 'replica' && (!v.replicaId || !v.serverUrl)) invalid('replica mode requires replicaId and serverUrl');
   if (!Array.isArray(v.hosts) || v.hosts.some(h => !(BINDING_HOSTS as readonly string[]).includes(h as string)) || new Set(v.hosts).size !== v.hosts.length) invalid('hosts');
   if (v.credentialRef !== undefined && (typeof v.credentialRef !== 'string' || !ENV_NAME.test(v.credentialRef) || v.credentialRef.length > 80)) invalid('credentialRef must be an environment variable name');
   if (v.registrationId !== undefined && (typeof v.registrationId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(v.registrationId))) invalid('registrationId');
@@ -52,7 +55,7 @@ export function parseBinding(raw: unknown): ProjectBinding {
   inRange(v.profileMaxTokens, 100, 4000, 'profileMaxTokens'); inRange(v.sessionContextMaxTokens, 100, 8000, 'sessionContextMaxTokens');
   const m = v.managed as Record<string, unknown> | undefined;
   if (!m || typeof m !== 'object' || !Number.isInteger(m.version) || Object.keys(m).some(k => !['version', 'projectionRevision', 'generatedAt'].includes(k)) || (m.projectionRevision !== undefined && (typeof m.projectionRevision !== 'string' || m.projectionRevision.length > 100)) || (m.generatedAt !== undefined && !Number.isFinite(Date.parse(String(m.generatedAt))))) invalid('managed');
-  return v as unknown as ProjectBinding;
+  return { ...v, mode: (v.mode as ProjectBinding['mode']) ?? (v.serverUrl ? 'remote' : 'local') } as unknown as ProjectBinding;
 }
 
 export async function readBinding(projectDir: string): Promise<ProjectBinding> {

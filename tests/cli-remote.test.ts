@@ -7,7 +7,9 @@ import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path, { resolve } from 'node:path';
 import { Engram } from '../packages/sdk/index.js';
-import { createHttpCredential } from '../packages/mcp/credentials.js';
+import { createHttpCredential, revokeHttpCredential } from '../packages/mcp/credentials.js';
+import { listClientPresence } from '../packages/mcp/client-presence.js';
+import { toolsFor } from '../packages/mcp/index.js';
 import { assertDisposable } from './helpers/disposable-vault.js';
 import { stopOwnedChildProcess } from './helpers/owned-process.js';
 import { waitForDrainIdle } from '../packages/memory/capture.js';
@@ -49,6 +51,26 @@ test('any client runs the everyday CLI commands against the server: put, get, pa
   assert.equal(w.mdb(['remote', 'call', 'mdb_get', '--input', JSON.stringify({ objectId: id }), ...w.remote, '--json']).json.id, id);
   const stale = w.mdb(['patch', id, '--revision', 'rev_stale', '--body', 'x', ...w.remote, '--json']); assert.notEqual(stale.status, 0); assert.match(stale.stderr, /CONFLICT/);
   recordCase({ suite: 'cli', name: 'remote-mode-everyday-commands', status: 'PASS' });
+});
+
+test('client heartbeat is scoped to a revocable credential and never appears as an MCP tool', async t => {
+  const w = await world(t);
+  const body = {schemaVersion:1,clientId:'00000000-0000-4000-8000-000000000001',displayName:'Studio Air',hostLabel:'macOS',appVersion:'1.0',mode:'syncing',lastSync:{serverContactAt:null,outboxDeliveredAt:null,fileSyncCommittedAt:null,contextFetchedAt:null},queues:{outbox:0,fileSync:0,capture:0,queuedBytes:0},projects:[]};
+  const send = (token?: string, payload: unknown = body) => fetch(w.url.replace('/mcp','/client/heartbeat'),{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(payload)});
+  assert.equal((await send()).status,401);
+  assert.equal((await send('not-a-token')).status,401);
+  const accepted = await send(w.env.TK); assert.equal(accepted.status,202); assert.ok((await accepted.json() as any).serverReceivedAt);
+  assert.equal((await send(w.env.TK,{...body,actorId:'owner'})).status,400);
+  assert.equal((await send(w.env.TK)).status,202);
+  const limited = await send(w.env.TK); assert.equal(limited.status,429); assert.equal(limited.headers.get('retry-after'),'60');
+  const oversized = await fetch(w.url.replace('/mcp','/client/heartbeat'),{method:'POST',headers:{Authorization:'Bearer '+w.env.TK,'Content-Type':'application/json'},body:' '.repeat(16*1024+1)}); assert.equal(oversized.status,413);
+  const second = await createHttpCredential(w.owner.vault,'agent-second',['workspace:proj:read']);
+  assert.equal((await send(second.token)).status,202);
+  let records = await listClientPresence(w.root); assert.equal(records.length,2); assert.deepEqual(new Set(records.map(row=>row.credentialId)).size,2);
+  const tools = w.mdb(['remote','tools',...w.remote,'--json']).json as Array<{name:string}>; assert.ok(tools.every(tool=>!/client.*heartbeat|presence/i.test(tool.name)));
+  for (const toolset of [undefined,'remote-web','keyed-gateway']) assert.ok(toolsFor(w.owner,toolset).every(tool=>!/client.*heartbeat|presence/i.test(tool.name)),String(toolset)+' toolset contains no presence tools');
+  assert.equal(await revokeHttpCredential(w.owner.vault,second.id),true);
+  assert.equal((await send(second.token)).status,401);
 });
 
 test('the typed commands the CLI never had (task, note, handoff) work remotely; while the server is down they are kept locally, reads fail honestly, and `outbox drain` merges them in on recovery', async t => {

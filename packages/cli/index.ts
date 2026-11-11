@@ -27,8 +27,9 @@ import { wikiImport } from './wiki-import.js';
 import { wikiRetireWorkspace } from './wiki-retire.js';
 import { manageShim } from './shim.js';
 import { activeDomains, parseDomains, sanitizeDomainProposal, seedRegistry, suggestDomains } from '../profile/domains.js';
-import { readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDomainRegistry } from '../profile/domain-registry.js';
+import { discoverPreferenceDomains, readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDomainRegistry } from '../profile/domain-registry.js';
 import { unbindProject } from '../project-unbind.js';
+import { DOMAIN_CLASSIFICATION_PROMPT } from '../models/prompts.js';
 
 /** Builds the vault-configured built-in provider (openai, ollama, openai-compatible). Returns undefined, with a stderr note, when unavailable. */
 async function configuredProvider(root: string): Promise<ModelProvider | undefined> {
@@ -57,6 +58,8 @@ chat import status --batch ID | list [filters] | get --conversation ID [filters]
 outbox [drain --url URL --token-env VAR [--workspace ID] | watch --url URL (--token-env VAR | --token-file F) [--workspace ID] [--project-dir D] [--interval-sec N] [--exit-when-empty-sec N] | watch-unit --url URL --token-file F [--platform macos|linux] | log [--limit N]]   what is waiting on this machine (queued, conflicts, rejected); drain sends it now; log is the timestamped record
 dashboard [--host ADDR] [--port N] [--open] [--allow-remote] [--client] [--reset-password] | credential create|list|revoke  password dashboard; remote admin is opt-in with MDB_DASHBOARD_REMOTE_ADMIN=true
 storage status | breakdown | cleanup --dry-run   report logical storage paths/usage and preview only positively marked orphan scratch (nothing is deleted)
+replica epoch status [--scope workspace:ID] | bump [--scope workspace:ID]   invalidate replica cursors after a server restore
+replica init --server URL --token-file F [--name LABEL] | add WORKSPACE [--id ID] [--force] | remove WORKSPACE [--id ID] [--purge-local --yes] | list | status [--id ID] [--json] | sync [--id ID] [--once] | conflicts list|show|resolve|discard [--id ID] | resync [--id ID] | verify [--id ID] | daemon [--id ID] [--interval-s N] [--debounce-ms N]
 wiki lint [--scope S ...] [--check CODE ...] [--min-severity error|warning|info] [--limit N] [--propose [--dry-run]]   deterministic ACL-safe wiki lint and pending proposal generation
 wiki import [--target wiki --namespace SLUG | --workspace ID] --from DIR [--raw DIR] [--label TEXT] [--max-bytes N] [--dry-run] | wiki import verify --from DIR [--raw DIR] (--namespace SLUG | --workspace ID)   owner-only migration and hash verification
 wiki retire-workspace --workspace NAME --into-wiki-verified [--allow-leftovers] [--dry-run] | --restore NAME   verify, tombstone or restore imported workspace copies
@@ -69,7 +72,7 @@ init [--no-sqlite] [--postgres] Initialize a vault (Markdown is canonical)
 init --project --host claude-code|codex [--no-local-mcp] [--project-dir PATH] [--settings-path PATH] [--mcp-url URL --token-env NAME]
                                [--registration REG_ID --principal ACTOR --consent]
                                Initialize project memory, host capture, and AGENTS.md/CLAUDE.md
-                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools] [--dry-run]: previews project file changes; never writes project or vault state
+                               [--hosts claude-code,codex|auto instead of --host] [--workspace ID] [--profile-in-files|--no-profile-in-files] [--trust-codex-hooks] [--approve-engram-tools] [--dry-run]: previews project file changes; never writes project or vault state
 setup --user --consent --hosts H --mcp-url URL --token-env NAME --registration REG --principal ACTOR [--workspace personal] [--exclude PATTERN,...] [--include PATTERN,...] [--claude-instructions-path PATH] [--codex-instructions-path PATH]
                                One-time user-level capture for EVERY project (also --show --pause --resume --uninstall)
 instructions install|refresh|status|remove --host claude-code|codex|both [--dry-run] [--claude-instructions-path PATH] [--codex-instructions-path PATH] [--json]
@@ -79,7 +82,7 @@ project refresh-context [--project-dir PATH] [--remote]   Rewrite the managed bl
 doctor --project [--project-dir PATH] [--no-probe]        Per-feature PASS/INCOMPLETE/DISABLED/FAIL/NOT_RUN report for this project
 doctor | verify | recover | reconcile
 credential permissions-template --agent [--workspace ID[,ID...]] | create --actor ID --permissions SCOPE:read,SCOPE:write | rotate ID [--permissions ...] | revoke ID | audit
-workspace create ID | list | info ID | reactivate NAME | grant ID ACTOR --permissions read,write | revoke ID ACTOR
+workspace create ID | list | info ID | describe ID --description TEXT | reactivate NAME | grant ID ACTOR --permissions read,write | revoke ID ACTOR
 collection create ID --workspace ID | list --workspace ID | info ID --workspace ID
 put --scope workspace:ID[:COLLECTION] --kind note --title TITLE --body TEXT [--file PATH]
 get ID [--revision REV] | patch ID --revision REV [--body TEXT] | delete ID --revision REV
@@ -123,7 +126,7 @@ No configured model means deterministic maintenance only. No implicit downloads 
 type Flags = Record<string, string | boolean>;
 function parse(argv: string[]): { args: string[]; flags: Flags } {
   const args: string[] = [], flags: Flags = {};
-  const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'no-instructions', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'hook', 'user', 'agent', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'allow-network', 'allow-private-to-remote', 'no-check', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'consent', 'dry-run', 'into-wiki-verified', 'allow-leftovers', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password']);
+const switches = new Set(['local', 'enable', 'disable', 'json', 'help', 'no-sqlite', 'postgres', 'project', 'file-sync-consent', 'offline-buffer', 'no-local-mcp', 'no-profile-in-files', 'profile-in-files', 'no-instructions', 'trust-codex-hooks', 'approve-engram-tools', 'yes', 'force', 'purge-local', 'take-server', 'take-local', 'once', 'hook', 'user', 'agent', 'show', 'report', 'pause', 'resume', 'uninstall', 'no-probe', 'remote', 'allow-remote', 'allow-network', 'allow-private-to-remote', 'no-check', 'regex', 'case-sensitive', 'allow-fallback', 'include-history', 'review', 'reviewed', 'consent', 'dry-run', 'into-wiki-verified', 'allow-leftovers', 'allow-root', 'propose', 'quiet', 'sensitive', 'confirm-sensitive', 'confirm-hypothesis', 'explain', 'meta', 'coerce', 'no-shared', 'allow-cursor-drift', 'stdin', 'first', 'all', 'open', 'client', 'reset-password', 'discover', 'recheck']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') { args.push(...argv.slice(i + 1)); break; }
@@ -319,6 +322,30 @@ export async function execute(argv: string[]): Promise<unknown> {
   const { args, flags } = parse(argv);
   const [command, sub, third, fourth] = args;
   if (!command || command === 'help' || flags.help) return HELP;
+  if (command === 'replica' && sub === 'epoch' && ['bump','status'].includes(third ?? '')) {
+    const { bumpEpoch, epochStatus } = await import('../replication/feed.js');
+    const scopeText = text(flags, 'scope');
+    const scope = scopeText ? parseScope({ ...flags, scope: scopeText }) : undefined;
+    return third === 'status' ? { epochs: await epochStatus(), scope: scopeText ?? '*' } : { epoch: await bumpEpoch(scope), scope: scopeText ?? '*' };
+  }
+  if (command === 'replica' && sub !== 'epoch') {
+    const { initializeReplica, enrollWorkspace, fetchReplicaBlob, republishReplicaOperation, unenrollWorkspace, listReplicaConfigs, openReplica, syncReplica, replicaStatus, resyncWorkspace } = await import('../replication/client.js');
+    const id = text(flags, 'id') ?? text(flags, 'name');
+    const chooseId = async () => { if (id) return id; const all = await listReplicaConfigs(); if (all.length !== 1) throw new MDBError('INVALID_ARGUMENT', 'Pass --id; this command needs a replica id when zero or multiple replicas are configured'); return all[0]!.replicaId; };
+    if (sub === 'init') return initializeReplica({ serverUrl: required(text(flags, 'server'), '--server'), tokenFile: required(text(flags, 'token-file'), '--token-file'), ...(text(flags, 'name') ? { name: text(flags, 'name') } : {}) });
+    if (sub === 'list') return { replicas: await listReplicaConfigs() };
+    if (sub === 'add') return enrollWorkspace(await chooseId(), required(third, 'workspace'), undefined, flags.force === true);
+    if (sub === 'republish') { if(flags.reviewed!==true)throw new MDBError('INVALID_ARGUMENT','inspect the rejected candidate first, then pass --reviewed to create a new origin object');return republishReplicaOperation(await chooseId(),required(third,'operation id'));}
+    if (sub === 'fetch-blob') return fetchReplicaBlob(await chooseId(), required(text(flags,'workspace'),'--workspace'), required(third,'sha256 digest'));
+    if (sub === 'remove') { const rid=await chooseId(),ws=required(third,'workspace'),{store}=await openReplica(rid),status=store.status(),scopes=JSON.parse(await (await import('node:fs/promises')).readFile(`${store.state}/scopes.json`,'utf8').catch(()=> '[]')) as string[];if(flags['purge-local']){if(!flags.yes)throw new MDBError('INVALID_ARGUMENT','--purge-local requires --yes confirmation');if(status.pendingPush&& !flags.force)throw new MDBError('INVALID_ARGUMENT','pending operations exist; pass --force to purge them');if(scopes.length>1)throw new MDBError('INVALID_ARGUMENT','local purge is supported only when this is the replica’s only enrolled workspace');}const result=await unenrollWorkspace(rid,ws);if(flags['purge-local']){const fs=await import('node:fs/promises');await fs.rm(store.root,{recursive:true,force:true});}return result; }
+    if (sub === 'status') {const rid=id?await chooseId():undefined;return rid?replicaStatus(rid):{replicas:await Promise.all((await listReplicaConfigs()).map(x=>replicaStatus(x.replicaId)))};}
+    if (sub === 'sync') return syncReplica(await chooseId());
+    if (sub === 'resync') {const rid=await chooseId(),workspace=text(flags,'workspace');if(workspace)return resyncWorkspace(rid,workspace);const {store}=await openReplica(rid);await store.resync('keep-pending-and-refetch');return {resynced:true,scope:'all'};}
+    if (sub === 'verify') return (await openReplica(await chooseId())).store.verify();
+    if (sub === 'daemon') {const {runReplicaDaemon}=await import('../replication/daemon.js');const interval=number(flags,'interval-s'),debounce=number(flags,'debounce-ms');if(interval!==undefined&&(!Number.isFinite(interval)||interval<1))throw new MDBError('INVALID_ARGUMENT','--interval-s must be at least 1');if(debounce!==undefined&&(!Number.isFinite(debounce)||debounce<50))throw new MDBError('INVALID_ARGUMENT','--debounce-ms must be at least 50');const abort=new AbortController();const stop=()=>abort.abort();for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,stop);try{await runReplicaDaemon({replicaId:await chooseId(),...(interval!==undefined?{intervalMs:interval*1000}:{}),...(debounce!==undefined?{debounceMs:debounce}:{}),signal:abort.signal});}finally{for(const signal of ['SIGINT','SIGTERM'] as const)process.removeListener(signal,stop);}return STREAMED;}
+    if (sub === 'conflicts') {const rid=await chooseId(),{store}=await openReplica(rid);if(third==='list')return store.conflicts.filter(c=>c.state==='open');const objectId=required(text(flags,'object'),'--object');const conflict=store.conflicts.find(c=>c.objectId===objectId&&c.state==='open');if(!conflict)throw new MDBError('NOT_FOUND_OR_FORBIDDEN','Open conflict not found');if(third==='show'){return {conflict,local:await store.vault.get(objectId,conflict.localRevisionId),server:await store.vault.get(objectId,conflict.serverHeadId)};}if(third==='discard'){await store.discardCandidate(objectId);return {discarded:true,objectId};}if(third==='resolve'){if(flags['take-server']){await store.discardCandidate(objectId);return {resolved:'server',objectId};}const local=await store.vault.get(objectId,conflict.localRevisionId),title=text(flags,'title',local.title)!,body=text(flags,'body',local.body)!;const result=await store.resolveConflict(objectId,conflict.localRevisionId,title,body);return {resolved:true,revisionId:result.revisionId};}}
+    throw new MDBError('INVALID_ARGUMENT','usage: mdb replica init|add|remove|list|status|sync|fetch-blob|republish|conflicts|resync|verify|daemon');
+  }
   if (command === 'dashboard' && flags.client === true) {
     const { dashboardEnabled } = await import('../dashboard/server.js');
     if (!dashboardEnabled()) throw new MDBError('INVALID_ARGUMENT', 'Dashboard disabled by MDB_DASHBOARD_ENABLED=false');
@@ -384,8 +411,10 @@ export async function execute(argv: string[]): Promise<unknown> {
   // Remote mode: a client machine runs the same commands against the server (see cli/remote.ts). --root or --local keeps a command on a local vault.
   if (command === 'wiki' && ['import', 'retire-workspace'].includes(sub ?? '') && (flags.server || flags['token-env'] || (process.env.ENGRAM_URL && !flags.root && !flags.local))) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'wiki migration tools are owner-CLI only and require a local vault');
   if (usesServer(command, sub)) { const target = await remoteTarget(flags); if (target) return runRemote(target, args, flags); }
-  const root = resolveRoot(command === 'project' && sub === 'unbind' ? undefined : text(flags, 'root'));
-  const client = new Engram(root, OWNER, (['intelligence', 'dream', 'profile'].includes(command) || (command === 'model' && sub === 'test') || (command === 'project' && sub === 'relevance' && third === 'refresh')) ? await configuredProvider(root) : undefined);
+  const explicitRemote=!!(text(flags,'server')||text(flags,'mcp-url')||process.env.ENGRAM_URL);const trustedProject=!(flags.root||flags.local||explicitRemote)?await findTrustedBinding(process.cwd()).catch(()=>undefined):undefined;const replicaStore=trustedProject?.trusted&&trustedProject.binding.mode==='replica'&&trustedProject.binding.replicaId?(await import('../replication/client.js')).openReplica(trustedProject.binding.replicaId).then(x=>x.store):undefined;const selectedReplica=replicaStore?await replicaStore:undefined;
+  const root = selectedReplica?.vault.root ?? resolveRoot(command === 'project' && sub === 'unbind' ? undefined : text(flags, 'root'));
+  const provider=(['intelligence', 'dream', 'profile'].includes(command) || (command === 'model' && sub === 'test') || (command === 'project' && sub === 'relevance' && third === 'refresh')) ? await configuredProvider(root) : undefined;
+  const client = selectedReplica ? new Engram(root,selectedReplica.vault.actor,provider,{vault:selectedReplica.vault}) : new Engram(root, OWNER, provider);
   if (STREAM_COMMANDS.has(command)) return queryCommand(argv, client, root); // typed query AST and stream aliases (packages/cli/query.ts)
   if (command === 'grep' && (flags.path || flags.stdin)) return lineGrep(argv, client);
   const abort = new AbortController(); const interrupt = () => abort.abort(); process.once('SIGINT', interrupt);
@@ -457,16 +486,23 @@ export async function execute(argv: string[]): Promise<unknown> {
       catch (error) { throw new MDBError('INVALID_ARGUMENT', (error as Error).message); }
     }
     case 'init': {
-      const mcpUrl = text(flags, 'mcp-url');
+      const mode = text(flags,'mode') as 'local'|'remote'|'replica'|undefined;
+      if(mode&&!['local','remote','replica'].includes(mode))throw new MDBError('INVALID_ARGUMENT','--mode must be local, remote, or replica');
+      const mcpUrl = text(flags, 'server') ?? text(flags, 'mcp-url');
+      if(mode==='replica'&&!mcpUrl)throw new MDBError('INVALID_ARGUMENT','replica project init requires --server URL');
+      if(mode==='replica'&&!text(flags,'token-file'))throw new MDBError('INVALID_ARGUMENT','replica project init requires --token-file F');
       if (!flags.project) return await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
       const hostsFlag = text(flags, 'hosts'); const singleHost = text(flags, 'host');
       if (hostsFlag && singleHost) throw new MDBError('INVALID_ARGUMENT', 'use --host or --hosts, not both');
       const hostList = hostsFlag === 'auto' ? 'auto' as const : (hostsFlag ?? required(singleHost, '--host or --hosts')).split(',').map(item => item.trim()).filter(Boolean) as Host[];
       if (hostList !== 'auto') for (const item of hostList) if (item !== 'claude-code' && item !== 'codex') throw new MDBError('INVALID_ARGUMENT', '--host/--hosts must name claude-code and/or codex (or --hosts auto)');
-      const initialized = flags['dry-run'] ? { mode: mcpUrl ? 'remote-mcp' : 'local-preview' } : mcpUrl ? { mode: 'remote-mcp' } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
+      let replicaId=text(flags,'replica');
+      if(mode==='replica'&&!flags['dry-run']){const{initializeReplica,listReplicaConfigs,enrollWorkspace}=await import('../replication/client.js');const existing=(await listReplicaConfigs()).find(item=>item.serverUrl===new URL(mcpUrl!).origin);if(!replicaId)replicaId=existing?.replicaId;if(!replicaId){const created=await initializeReplica({serverUrl:mcpUrl!,tokenFile:text(flags,'token-file')!});replicaId=created.replicaId;}await enrollWorkspace(replicaId,required(text(flags,'workspace'),'--workspace'));}
+      const initialized = flags['dry-run'] ? { mode: mode==='replica'?'replica':mcpUrl ? 'remote-mcp' : 'local-preview' } : mcpUrl ? { mode: mode==='replica'?'replica':'remote-mcp', ...(replicaId?{replicaId}:{}) } : await v.init({ sqlite: !flags['no-sqlite'], ...(flags.postgres ? { postgres: true } : {}) });
       const allowed = activeDomains(mcpUrl || flags['dry-run'] ? seedRegistry() : (await readDomainRegistry(v)).registry).map(d => d.slug);
-      if (flags['dry-run']) return previewProjectInit(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(flags['offline-buffer'] ? { offlineBuffer: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'domain') ? { domains: parseDomains(text(flags, 'domain')!, allowed) } : {}), ...(flags['no-local-mcp'] ? { noLocalMcp: true } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(flags.consent ? { consent: true } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}) });
-      const setup = await initializeProject(mcpUrl ? undefined : client, { projectDir: resolve(text(flags, 'project-dir', process.cwd())!), hosts: hostList, ...(flags['offline-buffer'] ? { offlineBuffer: true } : {}), ...(flags['no-local-mcp'] ? { noLocalMcp: true } : {}), ...(flags['file-sync-consent'] ? { fileSyncConsent: true } : {}), ...(flags['no-profile-in-files'] ? { profileInFiles: false } : {}), ...(text(flags, 'domain') ? { domains: parseDomains(text(flags, 'domain')!, allowed) } : {}), ...(flags['trust-codex-hooks'] ? { trustCodexHooks: true } : {}), ...(flags['approve-engram-tools'] ? { approveEngramTools: true } : {}), ...(list(flags, 'notes-include') ? { notesInclude: list(flags, 'notes-include')! } : {}), ...(text(flags, 'workspace') ? { workspaceId: text(flags, 'workspace')! } : {}), ...(text(flags, 'settings-path') ? { settingsPath: text(flags, 'settings-path')! } : {}), ...(text(flags, 'principal') ? { principalId: text(flags, 'principal')! } : {}), ...(mcpUrl ? { mcpUrl, tokenEnv: text(flags, 'token-env', 'ENGRAM_MCP_TOKEN')! } : {}), ...(text(flags, 'registration') ? { registrationId: text(flags, 'registration')! } : {}), ...(flags.consent ? { consent: true } : {}) });
+      const initOptions={projectDir:resolve(text(flags,'project-dir',process.cwd())!),hosts:hostList,...(mode?{mode}:{}),...(replicaId?{replicaId}:{}),...(flags['offline-buffer']?{offlineBuffer:true}:{}),...(flags['no-local-mcp']?{noLocalMcp:true}:{}),...(flags['file-sync-consent']?{fileSyncConsent:true}:{}),...(flags['no-profile-in-files']?{profileInFiles:false}:flags['profile-in-files']?{profileInFiles:true}:{}),...(text(flags,'domain')?{domains:parseDomains(text(flags,'domain')!,allowed)}:{}),...(flags['trust-codex-hooks']?{trustCodexHooks:true}:{}),...(flags['approve-engram-tools']?{approveEngramTools:true}:{}),...(list(flags,'notes-include')?{notesInclude:list(flags,'notes-include')!}:{}),...(text(flags,'workspace')?{workspaceId:text(flags,'workspace')!}:{}),...(text(flags,'settings-path')?{settingsPath:text(flags,'settings-path')!}:{}),...(text(flags,'principal')?{principalId:text(flags,'principal')!}:{}),...(mcpUrl?{mcpUrl,tokenEnv:text(flags,'token-env','ENGRAM_MCP_TOKEN')!}:{}),...(text(flags,'registration')?{registrationId:text(flags,'registration')!}:{}),...(flags.consent?{consent:true}:{})};
+      if(flags['dry-run'])return previewProjectInit(mcpUrl?undefined:client,initOptions);
+      const setup = await initializeProject(mcpUrl ? undefined : client, initOptions);
       return { initialized, project: setup };
     }
     case 'notes': {
@@ -510,7 +546,7 @@ export async function execute(argv: string[]): Promise<unknown> {
         return result;
       }
       if (sub === 'trust-codex-hooks') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const result = await trustEngramCodexHooks(dir, { confirm: !!flags.yes }); return flags.yes ? result : { ...result, note: 'Nothing was changed. These are the exact hook commands Codex would then run in this project; rerun with --yes to record trust for them (only these) in your Codex config.' }; }
-      if (sub === 'domains' && third === 'set') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const binding = await readBinding(dir); const allowed = activeDomains((await readDomainRegistry(v)).registry).map(d => d.slug); const domains = parseDomains(required(text(flags, 'domains'), '--domains'), allowed); const updated = { ...binding, domains }; const { writeBinding } = await import('../core/project-binding.js'); await writeBinding(dir, updated); const refreshed = await refreshContext(dir, flags.remote ? {} : { client }); return { projectDir: dir, domains, refreshed }; }
+      if (sub === 'domains' && third === 'set') { const dir = resolve(text(flags, 'project-dir', process.cwd())!); const binding = await readBinding(dir); const allowed = activeDomains((await readDomainRegistry(v)).registry).map(d => d.slug); const domains = parseDomains(required(text(flags, 'domains'), '--domains'), allowed); const updated = { ...binding, domains }; const { writeBinding } = await import('../core/project-binding.js'); const { isTrusted, trustProject } = await import('../core/project-trust.js'); const wasTrusted = await isTrusted(dir, binding); await writeBinding(dir, updated); /* an owner edit of a binding this machine already trusts keeps it trusted; an untrusted binding is never trusted by editing it */ if (wasTrusted) await trustProject(dir, updated); const refreshed = await refreshContext(dir, flags.remote ? {} : { client }); return { projectDir: dir, domains, refreshed }; }
       if (sub === 'relevance') {
         const workspaceId = required(text(flags, 'workspace'), '--workspace');
         if (third === 'refresh') return refreshRelevance(client, workspaceId, await configuredProvider(root), await v.config());
@@ -528,6 +564,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'daily') { const a = client.adaptive; const ws = required(text(flags, 'workspace'), '--workspace'); if (third === 'show') return a.dailyShow(ws, required(text(flags, 'date'), '--date')); return a.dailyList(ws, { ...(text(flags, 'from') ? { from: text(flags, 'from')! } : {}), ...(text(flags, 'to') ? { to: text(flags, 'to')! } : {}) }); }
       if (sub === 'changes') return client.adaptive.changesSince(required(text(flags, 'workspace'), '--workspace'), required(text(flags, 'since'), '--since'));
       if (sub === 'create') return v.createWorkspace(required(third, 'workspace ID'), text(flags, 'description', ''));
+      if (sub === 'describe') { const id = required(third, 'workspace name'); return await v.setWorkspaceDescription(id, required(text(flags, 'description'), '--description')); }
       if (sub === 'reactivate') { const id = required(third, 'workspace name'); const workspace = await v.getWorkspace(id); if (!workspace.retired) throw new MDBError('INVALID_ARGUMENT', `Workspace ${id} is not retired; nothing to reactivate`); return v.setWorkspaceRetired(id, false); }
       if (sub === 'list') return v.listWorkspaces();
       if (sub === 'info') return (await v.listWorkspaces()).find(w => w.id === required(third, 'workspace ID')) ?? null;
@@ -576,7 +613,7 @@ export async function execute(argv: string[]): Promise<unknown> {
         const { registry, revisionId: registryRevision } = await readDomainRegistry(v);
         const domainSlugs = activeDomains(registry).map(d => d.slug);
         const docs = (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] })).filter(d => d.kind === 'user_insight' && d.status === 'accepted' && ['preference', 'working_style'].includes(String(d.metadata.category)));
-        if (action === 'registry' || action === 'list-domains') return { revisionId: registryRevision, autoApply: registry.autoApply, domains: registry.domains };
+        if (action === 'registry' || action === 'list-domains') return { revisionId: registryRevision, autoApply: registry.autoApply, minEvidence: (await v.config()).profile?.domains?.minEvidence ?? 2, pendingDomainCandidates: registry.pendingDomainCandidates ?? [], domains: registry.domains };
         if (action === 'add') {
           const proposal = { slug: required(text(flags, 'slug'), '--slug'), label: required(text(flags, 'label'), '--label'), description: required(text(flags, 'description'), '--description'), keywords: (text(flags, 'keywords') ?? '').split(',').map(x => x.trim()).filter(Boolean) };
           const evidence = await verifyDomainEvidence(v, [required(text(flags, 'evidence'), '--evidence')]);
@@ -592,7 +629,16 @@ export async function execute(argv: string[]): Promise<unknown> {
           const saved = await writeDomainRegistry(v, registry, registryRevision); return { autoApply: registry.autoApply, revisionId: saved.revisionId };
         }
         if (action === 'list') return docs.map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, domains: d.metadata.domains ?? ['general'] }));
-        if (action === 'suggest' || action === 'apply') { const suggestions = docs.map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, current: d.metadata.domains ?? ['general'], proposed: suggestDomains(d.body, registry) })); if (action === 'suggest' || !flags.yes) return { dryRun: true, suggestions, discoveredDomains: [], note: 'No provider-driven domain discovery is available from this deterministic classifier. Review tag proposals; pass --yes to apply.' }; const updated = []; for (const d of docs) if (d.metadata.tagSource !== 'owner') { const domains = suggestDomains(d.body, registry); updated.push(await v.patch({ objectId: d.id, expectedRevisionId: d.revisionId, metadataPatch: { domains, tagSource: 'classifier' } })); } return { dryRun: false, updated: updated.map(d => ({ id: d.id, revisionId: d.revisionId })) }; }
+        if (action === 'suggest' && flags.discover) {
+          const provider = await configuredProvider(root);
+          if (!provider) return { status: 'unavailable', note: 'domain discovery unavailable (no model)' };
+          const config = await v.config();
+          const { modelConsent } = await import('../models/consent.js');
+          if (!modelConsent(config.model, true, provider.locality ?? config.model.locality).consentGiven) return { status: 'unavailable', note: 'domain discovery unavailable (model consent required)' };
+          const result = await discoverPreferenceDomains(v, async ({ registry: active, items }) => (await provider.generate({ job: 'profile-domain-classification', documents: [], goals: '', instruction: `${DOMAIN_CLASSIFICATION_PROMPT}\nActive domains: ${JSON.stringify(active.domains.filter(d => d.status === 'active').map(({ slug, label, description, keywords }) => ({ slug, label, description, keywords })))}\nItems: ${JSON.stringify(items)}` })).body, { dryRun: !flags.yes, recheck: flags.recheck === true });
+          return { ...result, dryRun: !flags.yes, note: flags.yes ? undefined : 'Preview only; pass --yes to apply classifications.' };
+        }
+        if (action === 'suggest' || action === 'apply') { const suggestions = docs.map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, current: d.metadata.domains ?? ['general'], proposed: suggestDomains(d.body, registry) })); if (action === 'suggest' || !flags.yes) return { dryRun: true, suggestions, discoveredDomains: [], note: 'Deterministic tag suggestions only. Use suggest --discover for model-driven domain discovery.' }; const updated = []; for (const d of docs) if (d.metadata.tagSource !== 'owner') { const domains = suggestDomains(d.body, registry); const discovered = domains.filter(slug => registry.domains.some(domain => domain.slug === slug && domain.origin === 'discovered')); updated.push(await v.patch({ objectId: d.id, expectedRevisionId: d.revisionId, metadataPatch: discovered.length ? { proposedDomains: discovered } : { domains, tagSource: 'classifier' } })); } return { dryRun: false, updated: updated.map(d => ({ id: d.id, revisionId: d.revisionId })) }; }
         if (action === 'set') { const id = required(fourth, 'insight ID'); const domains = parseDomains(required(text(flags, 'domains'), '--domains'), domainSlugs); const d = await v.get(id); if (d.kind !== 'user_insight' || d.status !== 'accepted' || !['preference', 'working_style'].includes(String(d.metadata.category))) throw new MDBError('INVALID_INPUT', 'Domains can only be set on accepted preference or working_style insights'); const updated = await v.patch({ objectId: d.id, expectedRevisionId: d.revisionId, metadataPatch: { domains, tagSource: 'owner' } }); return { id: updated.id, revisionId: updated.revisionId, domains }; }
         if (action === 'rename' || action === 'retire' || action === 'merge') {
           const slug = required(fourth, 'domain slug'), record = registry.domains.find(d => d.slug === slug && d.status === 'active'); if (!record || slug === 'general') throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Active non-general domain not found');
@@ -602,7 +648,7 @@ export async function execute(argv: string[]): Promise<unknown> {
           if (action === 'merge') { const target = required(text(flags, 'into'), '--into'); if (!domainSlugs.includes(target) || target === slug) throw new MDBError('INVALID_INPUT', `--into must be an active domain: ${domainSlugs.join(', ')}`); record.status = 'merged'; record.mergedInto = target; for (const insight of docs) { if (insight.metadata.tagSource === 'owner' || !Array.isArray(insight.metadata.domains) || !insight.metadata.domains.includes(slug)) continue; const domains = [...new Set((insight.metadata.domains as string[]).map(d => d === slug ? target : d))].slice(0, 3); await v.patch({ objectId: insight.id, expectedRevisionId: insight.revisionId, metadataPatch: { domains, tagSource: 'classifier' } }); } }
           const saved = await writeDomainRegistry(v, registry, registryRevision); return { domain: slug, revisionId: saved.revisionId };
         }
-        throw new MDBError('INVALID_ARGUMENT', 'usage: profile domains list|suggest|apply [--yes] | set ID --domains a,b | registry | add | rename|merge|retire SLUG');
+        throw new MDBError('INVALID_ARGUMENT', 'usage: profile domains list|suggest [--discover [--recheck]] [--yes] | apply [--yes] | set ID --domains a,b | registry | add | rename|merge|retire SLUG');
       }
       if (sub === 'show') return (await v.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] }));
       if (sub === 'propose') return engine.enqueue('profile', { ...jsonInput(flags), scope: parseScope(flags) });
@@ -735,10 +781,10 @@ export async function execute(argv: string[]): Promise<unknown> {
       if (sub === 'show') return client.skill(required(third, 'skill name'));
       if (sub === 'run') return client.runSkill(required(third, 'skill name'), jsonInput(flags));
       break;
-    case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); return { root: restored.root }; } return v.backup(resolve(id()));
+    case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); const { bumpEpoch } = await import('../replication/feed.js'); const epoch = await bumpEpoch(); return { root: restored.root, serverEpoch: epoch, replicasMustResync: true }; } return v.backup(resolve(id()));
   }
   throw new MDBError('INVALID_ARGUMENT', 'Unknown command. Run mdb help.');
-  } finally { process.removeListener('SIGINT', interrupt); try { if (!(command === 'init' && flags['dry-run']) && !(command === 'project' && sub === 'unbind') && !['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); } finally { await client.close(); } }
+  } finally { process.removeListener('SIGINT', interrupt); try { if (command!=='replica'&&!selectedReplica && !(command === 'init' && flags['dry-run']) && !(command === 'project' && sub === 'unbind') && !['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); } finally { await client.close(); } }
 }
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const unix = detectUnix(argv); if (unix) { process.exitCode = await unixMain(unix.command, unix.rest, unix.root); process.stdin.destroy(); return; } // Unix-style text tools: own option parsing and exit codes (docs/unix.md)

@@ -302,6 +302,11 @@ async function configureRemoteMcp(projectDir: string, host: Host, url: string, t
   if (host === 'claude-code') await upsertClaudeMcp(file, url, tokenEnv, workspace, { offlineBuffer }); else await upsertCodexMcp(file, url, tokenEnv, workspace, { approveTools, offlineBuffer });
   return file;
 }
+async function configureReplicaMcp(projectDir:string,host:Host,url:string,tokenEnv:string,workspace:string,replicaId:string,approveTools=false):Promise<string>{
+ const server=path.join(path.dirname(mdbBinaryPath()),'mdb-mcp.js');if(!existsSync(server))throw new Error('replica mode requires the bundled mdb-mcp.js executable');const file=host==='claude-code'?path.join(projectDir,'.mcp.json'):path.join(projectDir,'.codex','config.toml');
+ if(host==='claude-code'){let config:Record<string,any>={};try{config=JSON.parse(await fs.readFile(file,'utf8')) as Record<string,any>;}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}const rows=config.mcpServers??{};if(rows.engram&&!Array.isArray(rows.engram.args))throw new Error(`${file} already defines a non-Engram engram server`);rows.engram={type:'stdio',command:process.execPath,args:[server,'--replica',replicaId,'--workspace',workspace]};rows['engram-remote']={type:'http',url,headers:{Authorization:'Bearer ${'+tokenEnv+'}','X-Engram-Workspace':workspace}};config.mcpServers=rows;await atomicWriteText(file,JSON.stringify(config,null,2)+'\n',0o600);return file;}
+ let current='';try{current=await fs.readFile(file,'utf8');}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}const start=current.indexOf(MCP_START),end=current.indexOf(MCP_END),base=start>=0&&end>start?`${current.slice(0,start)}${current.slice(end+MCP_END.length)}`:current;if(/^\s*\[mcp_servers\.engram\]\s*$/m.test(base)||/^\s*\[mcp_servers\.engram-remote\]\s*$/m.test(base))throw new Error(`${file} already defines an Engram MCP entry outside the managed block`);const q=(v:string)=>JSON.stringify(v);const block=`${MCP_START}\n[mcp_servers.engram]\ncommand = ${q(process.execPath)}\nargs = [${[server,'--replica',replicaId,'--workspace',workspace].map(q).join(', ')}]\n${approveTools?'default_tools_approval_mode = "approve"\n':''}\n[mcp_servers.engram-remote]\nurl = ${q(url)}\nbearer_token_env_var = ${q(tokenEnv)}\nhttp_headers = { "X-Engram-Workspace" = ${q(workspace)} }\n${MCP_END}`;await atomicWriteText(file,`${base.trimEnd()}${base.trimEnd()?'\n\n':''}${block}\n`,0o600);return file;
+}
 
 // ---- init ---------------------------------------------------------------------------------------------------------------------------------
 async function withInitLock<T>(projectDir: string, work: () => Promise<T>): Promise<T> {
@@ -339,7 +344,7 @@ export async function detectHosts(projectDir: string): Promise<Host[]> {
   return found;
 }
 const cap = (status: FeatureStatus, detail: string): Capability => ({ status, detail });
-export interface InitOptions { /** Local projects only: skip writing the stdio connection to the built-in server. */ noLocalMcp?: boolean; /** Remote projects only: the host talks to the server through the local stdio proxy, which keeps task/note/handoff writes on this machine while the server is unreachable and merges them in when it returns. */ offlineBuffer?: boolean; projectDir: string; host?: Host; hosts?: Host[] | 'auto'; workspaceId?: string; settingsPath?: string; settingsPaths?: Partial<Record<Host, string>>; principalId?: string; mcpUrl?: string; tokenEnv?: string; registrationId?: string; consent?: boolean; /** Separate from `consent`: allows approved Markdown files (and only those) to be uploaded in full. */ fileSyncConsent?: boolean; notesInclude?: string[]; /** false: no accepted-profile text in AGENTS.md/CLAUDE.md (still delivered at session start) */ profileInFiles?: boolean; domains?: ProfileDomain[]; /** explicit consent to record Codex trust for THIS project's Engram hooks (otherwise the user must trust them in Codex) */ trustCodexHooks?: boolean; /** Codex only: pre-approve the Engram MCP tools so headless (`codex exec`) sessions can use them; interactive sessions otherwise prompt */ approveEngramTools?: boolean }
+export interface InitOptions { /** Local projects only: skip writing the stdio connection to the built-in server. */ noLocalMcp?: boolean; /** Remote projects only: the host talks to the server through the local stdio proxy, which keeps task/note/handoff writes on this machine while the server is unreachable and merges them in when it returns. */ offlineBuffer?: boolean; mode?: 'local'|'remote'|'replica'; replicaId?: string; projectDir: string; host?: Host; hosts?: Host[] | 'auto'; workspaceId?: string; settingsPath?: string; settingsPaths?: Partial<Record<Host, string>>; principalId?: string; mcpUrl?: string; tokenEnv?: string; registrationId?: string; consent?: boolean; /** Separate from `consent`: allows approved Markdown files (and only those) to be uploaded in full. */ fileSyncConsent?: boolean; notesInclude?: string[]; /** false: no accepted-profile text in AGENTS.md/CLAUDE.md (still delivered at session start) */ profileInFiles?: boolean; domains?: ProfileDomain[]; /** explicit consent to record Codex trust for THIS project's Engram hooks (otherwise the user must trust them in Codex) */ trustCodexHooks?: boolean; /** Codex only: pre-approve the Engram MCP tools so headless (`codex exec`) sessions can use them; interactive sessions otherwise prompt */ approveEngramTools?: boolean }
 export interface InitResult { fileSyncScope?: { include: string[]; exclude: string[] }; workspaceId: string; workspaceCreated: boolean; instructionsFile: string; instructionsFiles: Record<string, string>; adapter: unknown; adapters: Record<string, unknown>; mcpConfigFile?: string; mcpConfigFiles?: Record<string, string>; binding: ProjectBinding; projection: { revision: string; source: Projection['source']; preferences: number; insights: number }; readiness: Readiness; warnings: string[] }
 
 function managedText(existing: string, block: string): string {
@@ -389,7 +394,7 @@ export async function previewProjectInit(client: Engram | undefined, options: In
   addIgnore('.engram/');
   for (const host of hosts) { const explicit = options.settingsPaths?.[host] ?? (hosts.length === 1 ? options.settingsPath : undefined); if (!explicit) addIgnore(path.relative(projectDir, projectSettingsPath(projectDir, host)).split(path.sep).join('/')); }
   if (nextIgnore !== ignore) await add(path.join(projectDir, '.gitignore'), nextIgnore);
-  await add(path.join(projectDir, BINDING_FILE), `${JSON.stringify({ schemaVersion: 1, projectRoot: '.', workspaceId, serverUrl: options.mcpUrl, hosts, captureConsent: false, fileSyncConsent: !!options.fileSyncConsent, profileInFiles: options.profileInFiles !== false, notesInclude: options.notesInclude ?? ['notes/**/*.md', '.engram/notes/**/*.md'], notesExclude: ['**/.env*', '**/.git/**', '**/node_modules/**'], profileMaxTokens: 900, sessionContextMaxTokens: 2500, managed: { version: 2 } }, null, 2)}\n`);
+  await add(path.join(projectDir, BINDING_FILE), `${JSON.stringify({ schemaVersion: 1, projectRoot: '.', workspaceId, ...(options.mcpUrl ? { serverUrl: options.mcpUrl } : {}), ...(options.mode ? { mode: options.mode } : {}), ...(options.replicaId ? { replicaId: options.replicaId } : {}), hosts, captureConsent: false, fileSyncConsent: !!options.fileSyncConsent, profileInFiles: options.profileInFiles !== false, notesInclude: options.notesInclude ?? ['notes/**/*.md', '.engram/notes/**/*.md'], notesExclude: ['**/.env*', '**/.git/**', '**/node_modules/**'], profileMaxTokens: 900, sessionContextMaxTokens: 2500, managed: { version: 2 } }, null, 2)}\n`);
   await add(path.join(projectDir, PROJECTION_FILE), `${JSON.stringify({ workspaceId, revision: projection.revision, source: 'none', items: [] }, null, 2)}\n`);
   const summary = { create: files.filter(f => f.action === 'create').length, modify: files.filter(f => f.action === 'modify').length, unchanged: files.filter(f => f.action === 'unchanged').length };
   return { projectDir, workspaceId, files, summary, cannotPreview: ['exact adapter hook command paths and generated registration ids', 'remote workspace creation or grants (preview never performs these)', 'Codex trust-service state', 'init-time timestamps and manifest hashes'], tokenEnvironmentNames: options.mcpUrl ? [options.tokenEnv ?? 'ENGRAM_MCP_TOKEN'] : [] };
@@ -399,6 +404,7 @@ export async function previewProjectInit(client: Engram | undefined, options: In
 export async function initializeProject(client: Engram | undefined, options: InitOptions): Promise<InitResult> {
   const projectDir = path.resolve(options.projectDir);
   if (!client && !options.mcpUrl) throw new Error('A local Engram client or --mcp-url is required');
+  if (options.mode === 'replica' && (!options.replicaId || !options.mcpUrl)) throw new Error('Replica project mode requires an enrolled replica id and server URL');
   if (options.registrationId && (!options.mcpUrl || options.consent !== true || !options.principalId)) throw new Error('Remote passive capture requires --mcp-url, --consent and --principal with a server-side --registration');
   const hosts: Host[] = options.hosts === 'auto' ? await detectHosts(projectDir) : (options.hosts ?? (options.host ? [options.host] : []));
   if (!hosts.length) throw new MDBError('INVALID_INPUT', options.hosts === 'auto' ? 'No supported agent host was detected; pass --hosts claude-code,codex' : 'Select at least one host (--host or --hosts)');
@@ -424,14 +430,20 @@ export async function initializeProject(client: Engram | undefined, options: Ini
       const known = await client.listWorkspaces();
       if (!known.some(item => item.id === workspace)) { await client.createWorkspace(workspace, `Engram memory for ${path.basename(projectDir)}`); workspaceCreated = true; }
       projection = await fetchProjection({ client }, workspace, base.profileMaxTokens, domains);
+    } else if (options.mode === 'replica') {
+      projection = buildProjection([], workspace, base.profileMaxTokens, 'remote', undefined, domains);
+      remote = cap('PASS', `local replica ${options.replicaId}; server calls are limited to the separate engram-remote entry`);
     } else {
       projection = buildProjection([], workspace, base.profileMaxTokens, 'none');
       const token = process.env[tokenEnv];
       if (!token) remote = cap('INCOMPLETE', `$${tokenEnv} is not set in this shell; the server was not contacted`);
       else try {
         const provisioner = await openRemoteSession({ url: options.mcpUrl!, token });
-        if (!provisioner.tools.includes('engram_workspace_ensure')) throw new RemoteError('protocol', 'The server does not provide engram_workspace_ensure; upgrade the server before remote init.');
-        if (options.consent) {
+        if (!provisioner.tools.includes('engram_workspace_ensure')) {
+          if (options.consent) throw new RemoteError('protocol', 'The server does not provide engram_workspace_ensure; upgrade the server before remote init.');
+          warnings.push('The server does not provide engram_workspace_ensure; remote init can use only an existing workspace and cannot create one.');
+        }
+        if (options.consent && provisioner.tools.includes('engram_workspace_ensure')) {
           const ensured = await provisioner.call('engram_workspace_ensure', { projectName: path.basename(projectDir), workspaceId: workspace });
           if (ensured.isError || !ensured.value || typeof ensured.value !== 'object') throw new RemoteError('workspace', typeof ensured.value === 'string' ? ensured.value : 'Remote workspace creation was refused; ask the owner to create and grant this workspace.');
           const value = ensured.value as { workspaceId?: string; status?: string };
@@ -464,7 +476,7 @@ export async function initializeProject(client: Engram | undefined, options: Ini
       const lifecycle = createAdapter(host, { root: options.mcpUrl ? projectDir : client!.vault.root, ...adapterOptions }); await lifecycle.installContext({ projectRoot: projectDir, ...(options.mcpUrl ? {} : { localRoot: client!.vault.root }) }); await lifecycle.installHandoff({ projectRoot: projectDir, ...(options.mcpUrl ? {} : { localRoot: client!.vault.root }) }); contextInstalled = true;
       if (options.mcpUrl) {
         if (existsSync(path.join(path.dirname(mdbBinaryPath()), 'mdb-mcp.js')) && !/^(localhost|127\.|\[::1\])/.test(new URL(options.mcpUrl).hostname)) warnings.push('This installation includes the server: its built-in client is meant for agents on this machine. Agents on other machines should install the separate client package (npm run package:client) and run init there.');
-        mcpConfigFiles[host] = await configureRemoteMcp(projectDir, host, options.mcpUrl, tokenEnv, workspace, !!options.approveEngramTools, !!options.offlineBuffer);
+        mcpConfigFiles[host] = options.mode === 'replica' ? await configureReplicaMcp(projectDir, host, options.mcpUrl, tokenEnv, workspace, options.replicaId!, !!options.approveEngramTools) : await configureRemoteMcp(projectDir, host, options.mcpUrl, tokenEnv, workspace, !!options.approveEngramTools, !!options.offlineBuffer);
         if (!options.registrationId) { adapters[host] = { installed: false, mode: 'remote-mcp' }; continue; }
         adapters[host] = await createAdapter(host, { root: projectDir, ...adapterOptions }).install({ consent: true, principalId: options.principalId!, workspaceId: workspace, mcpUrl: options.mcpUrl, tokenEnv, registrationId: options.registrationId, projectRoot: projectDir });
         capturePass = true; captureNote = 'remote capture hooks installed with the server-side registration, limited to sessions inside this project';
@@ -493,7 +505,7 @@ export async function initializeProject(client: Engram | undefined, options: Ini
     const fileSync = !!options.fileSyncConsent || base.fileSyncConsent;
     const fileRevision = profileInFiles ? projection.revision : 'none';
     const binding: ProjectBinding = { ...base, domains, profileInFiles, ...(options.notesInclude ? { notesInclude: options.notesInclude } : {}), fileSyncConsent: fileSync, workspaceId: workspace, hosts: [...new Set([...(existing?.hosts ?? []), ...hosts])].sort() as Host[],
-      ...(options.mcpUrl ? { serverUrl: options.mcpUrl, credentialRef: tokenEnv } : {}), ...(options.registrationId ? { registrationId: options.registrationId } : {}), captureConsent: base.captureConsent || capturePass,
+      ...(options.mcpUrl ? { serverUrl: options.mcpUrl, credentialRef: tokenEnv } : {}), ...(options.mode ? { mode: options.mode } : options.mcpUrl ? { mode: 'remote' as const } : { mode: 'local' as const }), ...(options.replicaId ? { replicaId: options.replicaId } : {}), ...(options.registrationId ? { registrationId: options.registrationId } : {}), captureConsent: base.captureConsent || capturePass,
       managed: { version: 2, projectionRevision: fileRevision, generatedAt: new Date().toISOString() } };
     await writeBinding(projectDir, binding); await trustProject(projectDir, binding); await ensureGitignore(projectDir); // init is the owner's own act: this machine now honors this binding
     if (fileSync) for (const host of hosts) { const settings = options.settingsPaths?.[host] ?? (hosts.length === 1 ? options.settingsPath : undefined) ?? projectSettingsPath(projectDir, host); await createAdapter(host, { root: options.mcpUrl ? projectDir : client!.vault.root, settingsPath: settings }).installFileSync({ projectRoot: projectDir, ...(options.mcpUrl ? {} : { localRoot: client!.vault.root }) }); }

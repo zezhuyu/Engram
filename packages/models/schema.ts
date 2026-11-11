@@ -65,6 +65,29 @@ export function parseModelProposal(raw: unknown): ModelProposal {
   return result;
 }
 
+/** Strict, dedicated schema for the bounded accepted-preference domain pass. */
+export function parseDomainClassifications(raw: unknown): Array<{ id: string; domain: string; newDomain?: { slug: string; label: string; description: string; keywords: string[] } }> {
+  const value = plain(raw, 'domainClassification');
+  onlyKeys(value, new Set(['items']), 'domainClassification');
+  if (!Array.isArray(value.items) || value.items.length > 10) fail('domainClassification.items', 'expected up to 10 items');
+  return value.items.map((entry, index) => {
+    const item = plain(entry, `domainClassification.items[${index}]`);
+    onlyKeys(item, new Set(['id', 'domain', 'newDomain']), `domainClassification.items[${index}]`);
+    const result: { id: string; domain: string; newDomain?: { slug: string; label: string; description: string; keywords: string[] } } = {
+      id: str(item.id, `domainClassification.items[${index}].id`, 128, 1),
+      domain: str(item.domain, `domainClassification.items[${index}].domain`, 24, 1),
+    };
+    if (item.newDomain !== undefined) {
+      if (item.domain !== 'none') fail(`domainClassification.items[${index}].newDomain`, 'only allowed when domain is none');
+      const proposal = plain(item.newDomain, `domainClassification.items[${index}].newDomain`);
+      onlyKeys(proposal, new Set(['slug', 'label', 'description', 'keywords']), `domainClassification.items[${index}].newDomain`);
+      if (!Array.isArray(proposal.keywords) || proposal.keywords.length < 2 || proposal.keywords.length > 12) fail(`domainClassification.items[${index}].newDomain.keywords`, 'expected 2..12 keywords');
+      result.newDomain = { slug: str(proposal.slug, `domainClassification.items[${index}].newDomain.slug`, 24, 2), label: str(proposal.label, `domainClassification.items[${index}].newDomain.label`, 80, 1), description: str(proposal.description, `domainClassification.items[${index}].newDomain.description`, 240, 1), keywords: proposal.keywords.map((keyword, j) => str(keyword, `domainClassification.items[${index}].newDomain.keywords[${j}]`, 80, 1)) };
+    }
+    return result;
+  });
+}
+
 /** Dream-only discriminated response: abstention is complete and valid, never a repairable discovery schema error. */
 export function parseDreamResponse(raw: unknown): DreamModelResult {
   const proposal = parseModelProposal(raw);

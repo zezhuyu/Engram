@@ -10,7 +10,9 @@ test('Dream run-status route requires owner/admin access and rejects cross-origi
   const vault = await disposableVault();
   const priorPath = process.env.PATH, priorRemote = process.env.MDB_DASHBOARD_REMOTE_ADMIN;
   const fakeBin = path.join(vault.root, 'fake-bin'); await fs.mkdir(fakeBin);
-  await fs.writeFile(path.join(fakeBin, 'launchctl'), '#!/bin/sh\nprintf "state = running\\npid = 43\\n"\nexit 0\n', { mode: 0o700 });
+  await fs.writeFile(path.join(fakeBin, process.platform === 'darwin' ? 'launchctl' : 'systemctl'), process.platform === 'darwin'
+    ? '#!/bin/sh\nprintf "state = running\\npid = 43\\nlast exit code = 0\\n"\nexit 0\n'
+    : '#!/bin/sh\nprintf "LoadState=loaded\\nActiveState=active\\nSubState=running\\nMainPID=43\\nExecMainStatus=0\\nNRestarts=0\\nResult=success\\n"\nexit 0\n', { mode: 0o700 });
   process.env.PATH = fakeBin + path.delimiter + (priorPath ?? ''); process.env.MDB_DASHBOARD_REMOTE_ADMIN = 'true';
   const view = await createDashboardCredential(vault.root, { label: 'dream-view', mode: 'view' });
   const admin = await createDashboardCredential(vault.root, { label: 'dream-admin', mode: 'admin' });

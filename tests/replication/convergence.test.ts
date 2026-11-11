@@ -1,0 +1,63 @@
+import '../helpers/isolate-user-state.js';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path, { resolve } from 'node:path';
+import { Engram } from '../../packages/sdk/index.js';
+import { createHttpCredential } from '../../packages/mcp/credentials.js';
+import { ReplicaStore } from '../../packages/replication/replica.js';
+import { HttpReplicaTransport, syncOnce } from '../../packages/replication/sync.js';
+import { stopOwnedChildProcess } from '../helpers/owned-process.js';
+
+const freePort=()=>new Promise<number>(done=>{const server=createServer();server.listen(0,'127.0.0.1',()=>{const port=(server.address() as {port:number}).port;server.close(()=>done(port));});});
+test('five seeded real-HTTP replica runs converge after flaky transport, conflicts, restart, revocation and epoch resync',async t=>{
+  const root=await mkdtemp(path.join(tmpdir(),'engram-convergence-')),home=await mkdtemp(path.join(tmpdir(),'engram-convergence-home-'));let child:ChildProcess|undefined;const port=await freePort(),url=`http://127.0.0.1:${port}`,env={...process.env,HOME:home,XDG_CONFIG_HOME:path.join(home,'.config'),XDG_STATE_HOME:path.join(home,'.state'),XDG_DATA_HOME:path.join(home,'.data'),ENGRAM_DATA_DIR:root,MDB_MCP_HTTP_TOKEN:'legacy-shared-token-long-enough-32-bytes',MDB_MCP_TRANSPORT:'http',MDB_MCP_HTTP_HOST:'127.0.0.1',MDB_MCP_HTTP_PORT:String(port)};
+  const start=async()=>{child=spawn(process.execPath,[resolve('bin/mdb-mcp.js'),'--root',root],{env});let logs='';await new Promise<void>((ok,bad)=>{child!.stderr!.setEncoding('utf8');child!.stderr!.on('data',(chunk:string)=>{logs+=chunk;if(logs.includes('MCP HTTP listening'))ok();});child!.once('exit',code=>bad(new Error(`replica server exited ${code}: ${logs}`)));});};
+  const stop=async()=>{if(child){const current=child;child=undefined;await stopOwnedChildProcess(current,2000);}};t.after(async()=>{await stop();await rm(root,{recursive:true,force:true});await rm(home,{recursive:true,force:true});});
+  const owner=new Engram(root);await owner.vault.init();const workspaceIds=seedsForScopes(),credential=await createHttpCredential(owner.vault,'replica-agent',workspaceIds.flatMap(id=>[`workspace:${id}:read`,`workspace:${id}:write`])),tokenFile=path.join(home,'token');for(const workspaceId of workspaceIds){await owner.createWorkspace(workspaceId);await owner.vault.grant(workspaceId,'replica-agent',['read','write']);}await writeFile(tokenFile,credential.token,{mode:0o600});await start();
+  const seeds=[12345,7,20261110,8675309,314159];let forcedConflictCandidate='';
+  for(let run=0;run<seeds.length;run++){
+    let state=seeds[run]!,random=()=>{state=(Math.imul(state,1664525)+1013904223)>>>0;return state/0x1_0000_0000;};
+    const workspaceId=`converge-${run}`,scope={type:'workspace' as const,workspaceId};
+    const a=await ReplicaStore.replicaInit(`a-${run}`,url,path.join(home,'replicas')),b=await ReplicaStore.replicaInit(`b-${run}`,url,path.join(home,'replicas'));
+    for(const client of [a,b]){await client.enrollScope(scope);const response=await fetch(`${url}/replica/v1/enroll`,{method:'POST',headers:{Authorization:`Bearer ${credential.token}`,'Content-Type':'application/json'},body:JSON.stringify({v:1,deviceId:client.deviceId,workspaceId,label:client.replicaId})});assert.equal(response.status,200);}
+    const reliable=new HttpReplicaTransport(url,tokenFile),noisy=new HttpReplicaTransport(url,tokenFile,async(input,init)=>{if(random()<0.12)throw new Error('net down');const response=await fetch(input,init);if(new URL(String(input)).pathname==='/replica/v1/push'&&random()<0.06)throw new Error('dropped push response');return response;});
+    const sync=async(client:ReplicaStore,transport:HttpReplicaTransport)=>{let report=await syncOnce(client,transport);if(report.epochChanged||report.resyncRequired.length){await client.resync('keep-pending-and-refetch');const enrolled=await fetch(`${url}/replica/v1/enroll`,{method:'POST',headers:{Authorization:`Bearer ${credential.token}`,'Content-Type':'application/json'},body:JSON.stringify({v:1,deviceId:client.deviceId,workspaceId,label:client.replicaId})});assert.equal(enrolled.status,200);report=await syncOnce(client,transport);}return report;};
+    const base=await owner.put({scope,kind:'note',title:`Shared ${run}`,body:'base'}),other=await owner.put({scope,kind:'note',title:`Other ${run}`,body:'other'});await sync(a,reliable);await sync(b,reliable);
+    if(run===0){const ad=await a.vault.get(base.id),bd=await b.vault.get(base.id);await a.vault.patch({objectId:base.id,expectedRevisionId:ad.revisionId,body:'offline winner A'});const losing=await b.vault.patch({objectId:base.id,expectedRevisionId:bd.revisionId,body:'offline losing candidate B'});forcedConflictCandidate=losing.revisionId;
+      await a.vault.patch({objectId:other.id,expectedRevisionId:(await a.vault.get(other.id)).revisionId,body:'A local branch'});await owner.vault.patch({objectId:other.id,expectedRevisionId:(await owner.vault.get(other.id)).revisionId,body:'origin branch'});
+      await sync(a,reliable);const conflict=await sync(b,reliable);assert.ok(conflict.conflicts+conflict.diverged>0);assert.equal((await b.vault.get(other.id)).body,'origin branch','other objects must pull through a divergence');
+      await owner.vault.revoke(workspaceId,'replica-agent');await owner.vault.grant(workspaceId,'replica-agent',['read','write']);
+      await stop();await start();
+      await owner.vault.patch({objectId:other.id,expectedRevisionId:(await owner.vault.get(other.id)).revisionId,body:'origin after restart'});await sync(a,reliable);await sync(b,reliable);
+      await owner.vault.patch({objectId:base.id,expectedRevisionId:(await owner.vault.get(base.id)).revisionId,body:'origin advanced after offline edits'});
+      const epochFile=path.join(root,'.engram-runtime','state','replication');await (await import('../../packages/replication/feed.js')).bumpEpoch(scope,epochFile);
+      await sync(b,reliable);await sync(a,reliable);
+    }
+    for(let i=0;i<60;i++){
+      const client=random()<0.5?a:b,roll=random();
+      if(roll<0.33){await client.vault.put({scope,kind:'note',title:`seed-${seeds[run]}-${i}`,body:`created ${i} on ${client.replicaId}`});}
+      else if(roll<0.58){const docs=await client.vault.listDocuments({scopes:[scope]});if(docs.length){const doc=docs[Math.floor(random()*docs.length)]!;try{await client.vault.patch({objectId:doc.id,expectedRevisionId:doc.revisionId,body:`${doc.body}\nedit-${i}-${client.replicaId}`});}catch{}}}
+      else if(roll<0.70){const docs=await owner.vault.listDocuments({scopes:[scope]});if(docs.length){const doc=docs[Math.floor(random()*docs.length)]!;try{await owner.vault.patch({objectId:doc.id,expectedRevisionId:doc.revisionId,body:`${doc.body}\norigin-${i}`});}catch{}}}
+      else await sync(client,noisy);
+      for(const replica of [a,b])for(const conflict of replica.conflicts.filter(item=>item.state==='open')){try{const head=await replica.vault.get(conflict.objectId);const candidates=await Promise.all(conflict.candidateRevisionIds.map(id=>readFile(path.join(replica.root,'vault','.mdb','objects',conflict.objectId,'revs',`${id}.md`),'utf8')));await replica.resolveConflict(conflict.objectId,conflict.localRevisionId,head.title,`${head.body}\nresolved-candidates\n${candidates.join('\n')}`);}catch{}}
+    }
+    // Restarting clears only the server's in-memory per-device rate window; canonical state is on disk.
+    await stop();await start();let settledReports:Array<Awaited<ReturnType<typeof syncOnce>>>=[];for(let settle=0;settle<18;settle++){
+      const reports=[await sync(a,reliable),await sync(b,reliable)];
+      settledReports=reports;for(const replica of [a,b])for(const conflict of replica.conflicts.filter(item=>item.state==='open')){try{const head=await replica.vault.get(conflict.objectId);const candidates=await Promise.all(conflict.candidateRevisionIds.map(id=>readFile(path.join(replica.root,'vault','.mdb','objects',conflict.objectId,'revs',`${id}.md`),'utf8')));await replica.resolveConflict(conflict.objectId,conflict.localRevisionId,head.title,`${head.body}\nresolved-candidates\n${candidates.join('\n')}`);}catch{}}
+      if(reports.every(report=>report.errors.length===0&&report.objectErrors.length===0)&&a.status().pendingPush+b.status().pendingPush===0&&a.status().conflicts+b.status().conflicts===0&&a.status().deferred+b.status().deferred===0){const originHeads=new Map((await owner.vault.listDocuments({scopes:[scope]})).map(doc=>[doc.id,doc.revisionId]));let matches=true;for(const replica of [a,b]){const localDocs=await replica.vault.listDocuments({scopes:[scope]});if(localDocs.length!==originHeads.size||localDocs.some(doc=>originHeads.get(doc.id)!==doc.revisionId)){matches=false;break;}}if(matches)break;}
+    }
+    assert.ok(settledReports.every(report=>report.errors.length===0),`settle sync errors for seed ${seeds[run]}: ${JSON.stringify(settledReports.map(report=>({errors:report.errors,resync:report.resyncRequired,pulled:report.pulled})))}`);const openRows=[];for(const replica of [a,b])for(const item of replica.conflicts.filter(value=>value.state==='open')){const cursor=await replica.cursorFor(workspaceId),fresh=await reliable.fetch(replica.deviceId,workspaceId,cursor);openRows.push({replica:replica.replicaId,objectId:item.objectId,serverHeadId:item.serverHeadId,feedStatus:fresh.status,remainingEvents:fresh.events?.map(event=>event.event.revisionId),originHas:await owner.vault.get(item.objectId,item.serverHeadId).then(()=>true,()=>false),serverHeadPresent:await replica.vault.get(item.objectId,item.serverHeadId).then(()=>true,()=>false),resolutionRevisionId:item.resolutionRevisionId,candidates:item.candidateRevisionIds,localHead:(await replica.vault.get(item.objectId)).revisionId,status:replica.status(),cursor});}assert.equal(openRows.length,0,`open conflicts for seed ${seeds[run]}: ${JSON.stringify({rows:openRows,reports:settledReports.map(report=>({pulled:report.pulled,resync:report.resyncRequired}))})}`);const deferredRows=[];for(const replica of [a,b]){try{deferredRows.push(...(await readFile(path.join(replica.state,'deferred.jsonl'),'utf8')).split('\n').filter(Boolean).map(line=>({replica:replica.replicaId,...JSON.parse(line)})));}catch{}}assert.equal(a.status().deferred+b.status().deferred,0,`deferred events for seed ${seeds[run]}: ${JSON.stringify(deferredRows.map(row=>({replica:row.replica,event:row.item.event.revisionId,objectId:row.item.event.objectId,error:row.error,attempts:row.attempts})))}`);
+    const origin=await owner.vault.listDocuments({scopes:[scope]}),snap=async(store:ReplicaStore)=>{const docs=await store.vault.listDocuments({scopes:[scope]});return new Map(await Promise.all(docs.map(async doc=>[doc.id,{revisionId:doc.revisionId,title:doc.title,body:doc.body,status:doc.status,bytes:await readFile(path.join(store.root,'vault','.mdb','objects',doc.id,'revs',`${doc.revisionId}.md`))}] as const)));};
+    const replicaA=await snap(a),replicaB=await snap(b);assert.equal(replicaA.size,origin.length);assert.equal(replicaB.size,origin.length);
+    for(const doc of origin){const originBytes=await readFile(path.join(root,'.mdb','objects',doc.id,'revs',`${doc.revisionId}.md`));for(const values of [replicaA,replicaB]){const replica=values.get(doc.id);assert.ok(replica,`missing ${doc.id} seed ${seeds[run]}`);assert.equal(replica.revisionId,doc.revisionId,`head mismatch ${doc.id} seed ${seeds[run]}; replica=${replica.revisionId} origin=${doc.revisionId} body=${replica.body.slice(-150)}`);assert.equal(replica.title,doc.title);assert.equal(replica.body,doc.body);assert.equal(replica.status,doc.status);assert.deepEqual(replica.bytes,originBytes);}}
+    const originVerify=await owner.vault.verify(),aVerify=await a.verify(),bVerify=await b.verify();assert.equal(originVerify.ok,true,`origin verify seed ${seeds[run]}: ${JSON.stringify(originVerify.issues)}`);assert.equal(aVerify.ok,true,`replica A verify seed ${seeds[run]}: ${JSON.stringify(aVerify.issues)}`);assert.equal(bVerify.ok,true,`replica B verify seed ${seeds[run]}: ${JSON.stringify(bVerify.issues)}`);
+  }
+  assert.ok(forcedConflictCandidate);const allConflicts=await Promise.all(['a-0','b-0'].map(id=>ReplicaStore.replicaInit(id,url,path.join(home,'replicas'))));assert.ok(allConflicts.some(replica=>replica.conflicts.some(conflict=>conflict.candidateRevisionIds.includes(forcedConflictCandidate))));
+});
+
+function seedsForScopes():string[]{return['converge-0','converge-1','converge-2','converge-3','converge-4'];}

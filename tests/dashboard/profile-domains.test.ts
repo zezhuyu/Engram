@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 import { makeDisposableVault, requestDashboard, stopDashboard } from './security-helpers.js';
+import { readDomainRegistry, writeDomainRegistry } from '../../packages/profile/domain-registry.js';
+import { seedRegistry } from '../../packages/profile/domains.js';
 
 test('profile domain editor is authenticated, CSRF protected and patches by expected revision', async t => {
   const fixture = await makeDisposableVault();
@@ -24,16 +26,23 @@ test('profile domain editor is authenticated, CSRF protected and patches by expe
 
 test('dashboard domain panel reads without mutation and writes revisioned registry changes with preconditions', async t => {
   const fixture = await makeDisposableVault();
-  const insight = await fixture.engram.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Episodes', body: 'The user likes episodic video.', status: 'accepted', metadata: { category: 'preference', domains: ['general'], sensitivity: 'none' } });
+  const insight = await fixture.engram.put({ scope: { type: 'global', area: 'profile' }, kind: 'user_insight', title: 'Episodes', body: 'The user likes episodic video.', status: 'accepted', metadata: { category: 'preference', domains: ['general'], sensitivity: 'none', domainRejectionReason: 'Approval provenance is missing.' } });
+  const initial = await readDomainRegistry(fixture.engram.vault);
+  await writeDomainRegistry(fixture.engram.vault, { ...seedRegistry(), pendingDomainCandidates: [{ proposal: { slug: 'episodic-video', label: 'Episodic video', description: 'Preferences for episodic video.', keywords: ['episodic', 'video'] }, evidence: [insight.id], count: 1, firstSeen: new Date().toISOString(), updatedAt: new Date().toISOString(), reason: 'waiting for 1 more accepted item' }] }, initial.revisionId);
   const dashboard = await createDashboardServer({ engram: fixture.engram, token: 'c'.repeat(64), idleMs: 60_000 });
   t.after(async () => { await stopDashboard(dashboard); await fixture.cleanup(); });
   const origin = `http://127.0.0.1:${dashboard.port}`, headers = { Authorization: `Bearer ${dashboard.token}` };
   const read1 = await requestDashboard(dashboard.port, '/api/profile/domains', { headers });
   const read2 = await requestDashboard(dashboard.port, '/api/profile/domains', { headers });
-  const first = JSON.parse(read1.body) as { registryRevisionId?: string; autoApply: boolean; domains: Array<{ slug: string; origin: string }> };
+  const first = JSON.parse(read1.body) as { registryRevisionId?: string; autoApply: boolean; minEvidence: number; pendingDomainCandidates: Array<{ proposal: { slug: string }; evidence: string[]; reason: string }>; items: Array<{ rejectedReason?: string }>; domains: Array<{ slug: string; origin: string }> };
   const second = JSON.parse(read2.body) as typeof first;
   assert.equal(first.registryRevisionId, second.registryRevisionId, 'polling does not create registry revisions');
   assert.equal(first.autoApply, true);
+  assert.equal(first.minEvidence, 2);
+  assert.equal(first.pendingDomainCandidates[0]?.proposal.slug, 'episodic-video');
+  assert.deepEqual(first.pendingDomainCandidates[0]?.evidence, [insight.id]);
+  assert.equal(first.pendingDomainCandidates[0]?.reason, 'waiting for 1 more accepted item');
+  assert.equal(first.items[0]?.rejectedReason, 'Approval provenance is missing.');
   const add = await requestDashboard(dashboard.port, '/api/profile/domains', { method: 'POST', headers: { ...headers, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'add', slug: 'serial-art', label: 'Serial art', description: 'Serial visual stories.', keywords: ['serial-art', 'story-board'], evidence: [insight.id], expectedRegistryRevisionId: first.registryRevisionId }) });
   assert.equal(add.status, 200, add.body);
   const after = JSON.parse((await requestDashboard(dashboard.port, '/api/profile/domains', { headers })).body) as { registryRevisionId?: string; domains: Array<{ slug: string; origin: string }> };

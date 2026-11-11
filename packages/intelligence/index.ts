@@ -6,7 +6,7 @@ import { ProviderError } from '../models/errors.js';
 import { ABSTENTION_KIND, parseDreamResponse, parseModelProposal, parseVerdict } from '../models/schema.js';
 import { MODEL_DEFAULTS } from '../models/factory.js';
 import { modelConsent } from '../models/consent.js';
-import { PROFILE_SCHEMA_VERSION } from '../models/prompts.js';
+import { DOMAIN_CLASSIFICATION_PROMPT, PROFILE_SCHEMA_VERSION } from '../models/prompts.js';
 import { criticize, isSensitive } from './critic.js';
 import { loadDocuments, newestFirst, oldestFirst, readableEntries, scopeEqual } from './corpus.js';
 import type { ManifestEntry } from '../search-files/manifest.js';
@@ -19,7 +19,7 @@ import { dreamPool, planContext } from './dream/context.js';
 import { checkDiscovery, docDomain, isLexicalOnlyCrossDomain, judgeDiscovery, scoreCandidate } from './dream/critic.js';
 import { DEEP_ANGLES, PROMPT_VERSION, SCHEMA_VERSION, type Cluster, type DreamMode } from './dream/types.js';
 import { applicability, commitInsight, correctInsight, evaluateInsight, explicitCorrectionApplies, projectProfile, repairTerminalCitationPunctuation, normalize, isFragmentOfClaim, type ClaimShape, type InsightCategory } from './insights.js';
-import { readDomainRegistry, writeDomainRegistry } from '../profile/domain-registry.js';
+import { discoverPreferenceDomains, readDomainRegistry, type DomainClassifier } from '../profile/domain-registry.js';
 import { Vault } from '../core/vault.js';
 import type { SnapshotRef } from '../adaptive/types.js';
 import type { SnapshotView } from '../adaptive/snapshot.js';
@@ -27,8 +27,9 @@ import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js'
 import { assertDurableWriteCapacity, createOwnedOperation } from '../core/storage-lifecycle.js';
 import { lintWiki, WIKI_LINT_CODES, type WikiLintIssue } from './wiki-lint.js';
 import { looksSecret } from '../memory/redact.js';
+import { redactText, redactRemotePii } from '../memory/redact.js';
 import { userOnlyChatDocument } from '../chat/live.js';
-import { PROFILE_DOMAINS, sanitizeDomainProposal, suggestDomains, validateDomains } from '../profile/domains.js';
+import { suggestDomains, validateDomains } from '../profile/domains.js';
 
 export type JobKind = 'index' | 'profile' | 'wiki' | 'memory' | 'reflect' | 'dream';
 export const WIKI_SKILLS = ['wiki-page-compiler', 'wiki-update', 'wiki-maintenance', 'cross-linker', 'tag-taxonomy'] as const;
@@ -577,16 +578,10 @@ export class IntelligenceEngine {
         const preference = ['preference', 'working_style'].includes(String(proposal.input.metadata?.category));
         const domainState = preference ? await readDomainRegistry(this.vault) : undefined;
         const classified = preference ? suggestDomains(proposal.input.body, domainState!.registry) : undefined;
-        const discovery = preference && classified?.length === 1 && classified[0] === 'general' ? sanitizeDomainProposal(proposal.input.metadata?.domainProposal, ['pending-evidence'], domainState!.registry, new Date().toISOString(), String(proposal.input.metadata?.jobId ?? proposal.id)) : undefined;
         const metadataInput = { ...proposal.input.metadata };
         delete metadataInput.domainProposal;
-        const acceptedInput = { ...proposal.input, metadata: { ...metadataInput, ...(proposal.flags?.includes('sensitive') ? { sensitivity: 'sensitive' } : {}), ...(preference ? { domains: domainState!.registry.autoApply ? discovery?.record ? [discovery.record.slug] : classified : ['general'], tagSource: 'model', ...(!domainState!.registry.autoApply ? { proposedDomains: discovery?.record ? [discovery.record.slug] : classified } : {}) } : {}) } };
+        const acceptedInput = { ...proposal.input, metadata: { ...metadataInput, ...(proposal.flags?.includes('sensitive') ? { sensitivity: 'sensitive' } : {}), ...(preference ? { domains: classified, tagSource: 'model', domainClassificationQueued: true } : {}) } };
         document = await commitInsight(this.vault, acceptedInput, proposal.id, reason, supersede);
-        if (preference && document.metadata.sensitivity !== 'sensitive' && discovery?.record) {
-          const { registry, revisionId } = domainState!;
-          registry.domains.push({ ...discovery.record, evidence: [document.id] });
-          await writeDomainRegistry(this.vault, registry, revisionId);
-        }
         if (this.vault.actor.permissions.includes('*')) await projectProfile(this.vault).catch(() => undefined);
         return this.mutate(state => { const current = state.proposals.find(item => item.id === id)!; current.status = 'approved'; current.reason = reason; current.objectId = document!.id; return current; });
       }
@@ -712,7 +707,31 @@ export class IntelligenceEngine {
       await this.ensureCorrectionReviewFallback(job);
       delete job.leaseUntil; await this.mutate(state => { const index = state.jobs.findIndex(j => j.id === job.id); state.jobs[index] = job; }); if (await this.jobAccessible(job)) completed.push(job);
     }
-    if (profileTouched || completed.some(job => job.kind === 'profile')) await this.reconcileProfile().catch(error => { if (!(error instanceof MDBError)) throw error; });
+    if (profileTouched || completed.some(job => job.kind === 'profile')) {
+      await this.reconcileProfile().catch(error => { if (!(error instanceof MDBError)) throw error; });
+      const profileJob = completed.find(job => job.kind === 'profile');
+      const discoveryTelemetry: JobTelemetry | undefined = profileJob?.telemetry;
+      const profileConfig = await this.config();
+      const maxCalls = discoveryTelemetry?.budget?.max ?? profileCallBudget(profileConfig.model.maxCallsPerProfileBatch);
+      if (this.provider && profileJob && (discoveryTelemetry?.modelCalls ?? 0) < maxCalls) try {
+        const classifyDomains: DomainClassifier = async ({ registry, items }) => {
+        const config = await this.config();
+        if (!modelConsent(config.model, true, this.provider!.locality ?? config.model.locality).consentGiven) throw new MDBError('CAPABILITY_UNAVAILABLE', 'Remote model consent is required for domain discovery');
+        const safeItems = items.map(item => ({ ...item, text: (modelConsent(config.model, true, this.provider!.locality ?? config.model.locality).remote ? redactRemotePii(redactText(item.text)) : redactText(item.text)).slice(0, 1000) }));
+        if (discoveryTelemetry) {
+          discoveryTelemetry.calls ??= { generate: 0, repair: 0, critic: 0 };
+          discoveryTelemetry.calls.generate++; discoveryTelemetry.modelCalls++;
+        }
+        const response = await this.provider!.generate({ job: 'profile-domain-classification', documents: [], goals: '', instruction: `${DOMAIN_CLASSIFICATION_PROMPT}\nActive registry (slug, label, description, keywords): ${JSON.stringify(registry.domains.filter(domain => domain.status === 'active').map(({ slug, label, description, keywords }) => ({ slug, label, description, keywords })))}\nItems: ${JSON.stringify(safeItems)}` }, discoveryTelemetry ? { maxOutputTokens: config.model.maxOutputTokens ?? MODEL_DEFAULTS.maxOutputTokens, onUsage: usage => { discoveryTelemetry.retries = (discoveryTelemetry.retries ?? 0) + (usage.retries ?? 0); if (usage.inputTokens !== undefined || usage.outputTokens !== undefined) { discoveryTelemetry.tokens ??= { input: 0, output: 0, reported: false }; discoveryTelemetry.tokens.reported = true; discoveryTelemetry.tokens.input += usage.inputTokens ?? 0; discoveryTelemetry.tokens.output += usage.outputTokens ?? 0; } } } : undefined);
+        return response.body;
+        };
+        await discoverPreferenceDomains(this.vault, classifyDomains);
+        if ((discoveryTelemetry?.modelCalls ?? 0) < maxCalls) await discoverPreferenceDomains(this.vault, classifyDomains, { recheck: true });
+      } catch (error) {
+        if (discoveryTelemetry) { discoveryTelemetry.terminal = terminalFor(error); discoveryTelemetry.partialReason = `domain discovery unavailable: ${(error instanceof Error ? error.message : 'provider error').slice(0, 160)}`; }
+      }
+      if (profileJob && discoveryTelemetry) await this.mutate(state => { const current = state.jobs.find(job => job.id === profileJob.id); if (current) current.telemetry = discoveryTelemetry; });
+    }
     return completed;
   }
 

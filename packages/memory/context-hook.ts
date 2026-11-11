@@ -31,6 +31,17 @@ async function recordState(env: NodeJS.ProcessEnv, state: ContextState): Promise
   try { await ensureStorageDirectory('state', env); let all: Record<string, ContextState> = {}; try { all = JSON.parse(await fs.readFile(contextStateFile(env), 'utf8')); } catch { /* first run */ } all[`${state.host}:${state.workspaceId ?? '-'}`] = state; await writePrivate(contextStateFile(env), JSON.stringify(all, null, 2)); } catch { /* diagnostics only */ }
 }
 const render = (host: string, text: string, format: 'claude' | 'text'): string => format === 'claude' ? `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } })}\n` : `${text}\n`;
+function profileProjectionRows(content: string): Array<{id:string;scope:string;category:string;claim:string}> {
+  const rows:Array<{id:string;scope:string;category:string;claim:string}>=[];
+  for(const section of content.split(/\n(?=# (?:PROFILE|USER_INSIGHT)\s*$)/m)){
+    let scope='global';
+    for(const line of section.split('\n')){
+      const heading=/^### Workspace: (.+)$/.exec(line);if(heading){scope=heading[1]!.trim();continue;}if(/^### Global$/.test(line)){scope='global';continue;}
+      const item=/^- \*\*([^*]+)\*\* — (.*?) _\(/.exec(line);if(item)rows.push({id:`snapshot-${rows.length}`,scope,category:item[1]!.toLowerCase().replace(/[^a-z_]+/g,'_'),claim:item[2]!});
+    }
+  }
+  return rows;
+}
 
 async function drainWaitingWrites(url: string, token: string, workspaceId: string, env: NodeJS.ProcessEnv): Promise<void> {
   try {
@@ -50,14 +61,17 @@ export async function runContextHook(options: ContextHookOptions): Promise<Conte
     // A binding this machine did not create is never obeyed: it could name any server and any environment variable as the credential.
     if (found && !found.trusted && !options.user) return { outcome: 'disabled', output: '', reason: 'this project binding is not trusted on this machine (run mdb init here)' };
     const bound = found?.trusted ? found : undefined;
-    let workspaceId: string, serverUrl: string | undefined, tokenEnv: string | undefined, maxTokens = 2500, domains: import('../profile/domains.js').ProfileDomain[] | undefined;
-    if (bound) { if (options.user) return { outcome: 'disabled', output: '', reason: 'project hook handles this project' }; workspaceId = bound.binding.workspaceId; serverUrl = bound.binding.serverUrl; tokenEnv = bound.binding.credentialRef; maxTokens = bound.binding.sessionContextMaxTokens; domains = bound.binding.domains; }
+    let workspaceId: string, serverUrl: string | undefined, tokenEnv: string | undefined, maxTokens = 2500, domains: import('../profile/domains.js').ProfileDomain[] | undefined, replicaId:string|undefined;
+    if (bound) { if (options.user) return { outcome: 'disabled', output: '', reason: 'project hook handles this project' }; workspaceId = bound.binding.workspaceId; serverUrl = bound.binding.serverUrl; tokenEnv = bound.binding.credentialRef; maxTokens = bound.binding.sessionContextMaxTokens; domains = bound.binding.domains; replicaId=bound.binding.mode==='replica'?bound.binding.replicaId:undefined; }
     else if (options.user) {
       const config = await readUserConfig(env); if (!config || config.paused) return { outcome: 'disabled', output: '', reason: 'user-level capture is not active' };
       if (config.excludeProjects.some(pattern => new RegExp(pattern, 'i').test(cwd))) return { outcome: 'disabled', output: '', reason: 'project is excluded' };
       if (config.includeProjects?.length && !config.includeProjects.some(pattern => new RegExp(pattern, 'i').test(cwd))) return { outcome: 'disabled', output: '', reason: 'project is not on the recording allowlist' };
       workspaceId = config.workspaceId; serverUrl = config.serverUrl; tokenEnv = config.tokenEnv;
     } else return { outcome: 'disabled', output: '', reason: 'project is not initialized' };
+    if (replicaId) { // Replica-mode context is entirely local, including the server-filtered profile snapshot.
+      const {openReplica}=await import('../replication/client.js');const{store}=await openReplica(replicaId);const client=new Engram(store.vault.root,store.vault.actor,undefined,{vault:store.vault});const context=await buildSessionContext(client,{workspaceId,maxTokens,now,...(domains?{domains}:{})});let extra='';try{const snapshot=JSON.parse(await fs.readFile(path.join(store.state,'profile-snapshot.json'),'utf8')) as {content?:string};if(typeof snapshot.content==='string'){const rows=profileProjectionRows(snapshot.content);const projection=(await import('../project-init.js')).buildProjection(rows,workspaceId,Math.min(800,Math.floor(maxTokens*.35)),'local',undefined,domains);const items=[...projection.preferences,...projection.insights];if(items.length)extra=`\n\n## Server profile snapshot (read-only)\n${items.map(item=>`- ${item.claim}`).join('\n')}`;}}catch{/* a missing snapshot is a normal first-run state */}return finish({outcome:'fresh',output:render(options.host,context.text+extra,format),workspaceId});
+    }
     if (!serverUrl) { // local mode: read the local vault directly, no network
       if (!options.root) return { outcome: 'none', output: '', workspaceId, reason: 'no vault root given for local mode' };
       const context = await buildSessionContext(new Engram(options.root), { workspaceId, maxTokens, now, ...(domains ? { domains } : {}) });

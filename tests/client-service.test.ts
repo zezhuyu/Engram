@@ -5,6 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { dashboardUrl, manageClientService } from '../packages/cli/service.js';
 import { spawnSync } from 'node:child_process';
+import { initializeReplica } from '../packages/replication/client.js';
 
 async function fixture(t: test.TestContext) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'mdb service test '));
@@ -146,6 +147,18 @@ test('macOS LaunchAgent definition is user scoped and root and opt-out are rejec
   assert.match(launchCalls, /bootstrap gui\/501/); assert.match(launchCalls, /kickstart -k/); assert.match(launchCalls, /bootout gui\/501/);
   await assert.rejects(manageClientService({ ...common, action: 'install', uid: 0 }, f.env), /refusing to manage.*root/);
   await assert.rejects(manageClientService({ ...common, action: 'install' }, { ...f.env, ENGRAM_AUTO_RECONNECT: '0' }), /disabled/);
+});
+
+test('replica daemon is supervised as a separate Linux user unit without token arguments',async t=>{
+  const f=await fixture(t),replicas=path.join(f.root,'replicas'),prior=process.env.ENGRAM_REPLICA_DIR;process.env.ENGRAM_REPLICA_DIR=replicas;
+  t.after(()=>{if(prior===undefined)delete process.env.ENGRAM_REPLICA_DIR;else process.env.ENGRAM_REPLICA_DIR=prior;});
+  await initializeReplica({serverUrl:'https://memory.example',tokenFile:f.tokenFile,name:'service-client',baseDir:replicas});
+  const options={action:'install',platform:'linux' as const,home:f.home,uid:501,url:'https://memory.example/mcp',tokenFile:f.tokenFile};
+  const installed=await manageClientService(options,f.env) as {replicaSync:{installed:boolean;replicaId:string}};
+  assert.deepEqual(installed.replicaSync,{installed:true,unitFile:path.join(f.home,'.config/systemd/user/engram-replica-sync.service'),replicaId:'service-client'});
+  const unit=await fs.readFile(path.join(f.home,'.config/systemd/user/engram-replica-sync.service'),'utf8');assert.match(unit,/Restart=on-failure/);assert.match(unit,/'replica' 'daemon' '--id' 'service-client'/);assert.doesNotMatch(unit,/never-put-this-secret/);
+  const status=await manageClientService({action:'status',platform:'linux',home:f.home,uid:501},f.env) as {replicaSync:{installed:boolean;running:boolean}};assert.equal(status.replicaSync.installed,true);assert.equal(status.replicaSync.running,true);
+  await manageClientService({action:'start',platform:'linux',home:f.home,uid:501},f.env);await manageClientService({action:'stop',platform:'linux',home:f.home,uid:501},f.env);await manageClientService({action:'uninstall',platform:'linux',home:f.home,uid:501},f.env);await assert.rejects(fs.access(path.join(f.home,'.config/systemd/user/engram-replica-sync.service')));
 });
 
 test('client dashboard port comes from client.env or environment and port changes require reinstall', async t => {

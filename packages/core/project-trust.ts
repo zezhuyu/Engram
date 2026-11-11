@@ -10,7 +10,7 @@ import { findBinding, type ProjectBinding } from './project-binding.js';
  * own `mdb init` recorded it: (real project root, fingerprint of everything the binding asks for). Change the server, the credential variable, the consent or the approved paths and the
  * fingerprint no longer matches, so the hooks go quiet until the owner runs init again. The registry lives with the user-level config, never in the repository.
  */
-export interface TrustEntry { root: string; fingerprint: string; trustedAt: string }
+export interface TrustEntry { root: string; fingerprint: string; trustedAt: string; workspaceId?: string; mode?: 'local'|'remote'|'replica'; replicaId?: string }
 export const trustFilePath = (env: NodeJS.ProcessEnv = process.env): string => env.ENGRAM_TRUST_FILE ?? path.join(path.dirname(userConfigPath(env)), 'trusted-projects.json');
 /** Everything the binding asks the machine to do; `managed` (generation time, projection revision) is bookkeeping and excluded. */
 export function bindingFingerprint(binding: ProjectBinding): string {
@@ -29,7 +29,7 @@ async function writeRegistry(entries: TrustEntry[], env: NodeJS.ProcessEnv): Pro
 }
 export async function trustProject(projectDir: string, binding: ProjectBinding, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const root = await fs.realpath(projectDir); const entries = (await readRegistry(env)).filter(e => e.root !== root);
-  entries.push({ root, fingerprint: bindingFingerprint(binding), trustedAt: new Date().toISOString() }); await writeRegistry(entries, env);
+  entries.push({ root, fingerprint: bindingFingerprint(binding), trustedAt: new Date().toISOString(), workspaceId: binding.workspaceId, mode: binding.mode, ...(binding.replicaId ? { replicaId: binding.replicaId } : {}) }); await writeRegistry(entries, env);
 }
 export async function untrustProject(projectDir: string, env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
   const root = await fs.realpath(projectDir).catch(() => path.resolve(projectDir)); const entries = await readRegistry(env); const kept = entries.filter(e => e.root !== root);

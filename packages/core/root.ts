@@ -6,13 +6,13 @@ export const DATA_DIR_ENV = 'ENGRAM_DATA_DIR';
 export const LEGACY_ROOT_ENV = 'MDB_ROOT';
 export const DEFAULT_DATA_DIR_NAME = '.Engram';
 
-export type StoragePathKind = 'config' | 'state' | 'cache' | 'outbox' | 'remote-spool' | 'tmp' | 'logs' | 'index-scratch';
+export type StoragePathKind = 'config' | 'state' | 'cache' | 'outbox' | 'remote-spool' | 'replica' | 'tmp' | 'logs' | 'index-scratch';
 
 const RUNTIME_DIR = '.engram-runtime';
 const storageOverrides: Partial<Record<StoragePathKind, string>> = {
   config: 'ENGRAM_USER_CONFIG', state: 'ENGRAM_STATE_DIR', cache: 'ENGRAM_CACHE_DIR',
   outbox: 'ENGRAM_OUTBOX', 'remote-spool': 'ENGRAM_REMOTE_SPOOL', tmp: 'ENGRAM_TEMP_DIR',
-  logs: 'ENGRAM_LOG_DIR', 'index-scratch': 'ENGRAM_INDEX_SCRATCH_DIR',
+  logs: 'ENGRAM_LOG_DIR', replica: 'ENGRAM_REPLICA_DIR', 'index-scratch': 'ENGRAM_INDEX_SCRATCH_DIR',
 };
 
 /** Resolve Engram-managed side storage. Explicit class overrides are honored; otherwise an explicit ENGRAM_DATA_DIR roots every class under .engram-runtime. */
@@ -38,6 +38,7 @@ export function resolveStoragePath(kind: StoragePathKind, env: Record<string, st
     case 'cache': return path.join(xdg('XDG_CACHE_HOME', '.cache'), 'engram');
     case 'outbox': return path.join(home, '.Engram-outbox');
     case 'remote-spool': return path.join(home, '.Engram-remote-spool');
+    case 'replica': return path.join(xdg('XDG_DATA_HOME', '.local/share'), 'engram', 'replicas');
     case 'tmp': return os.tmpdir();
     case 'logs': return path.join(xdg('XDG_STATE_HOME', '.local/state'), 'engram', 'logs');
     case 'index-scratch': return path.join(os.tmpdir(), 'engram-index');

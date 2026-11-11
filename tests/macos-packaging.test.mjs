@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdtemp, mkdir, writeFile, readFile, rm, access, stat } from 'node:fs/promises';
 import { tmpdir, platform } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { workerLauncher, packageMacApps } from '../scripts/package-macos.mjs';
 
 test('standalone runtime copies the keyed gateway into its private app bundle', async () => {
@@ -55,13 +55,22 @@ test('client worker supervises its dashboard with private setup-token output and
   const f = await fixture('client', 'ENGRAM_MCP_URL=https://memory.example/mcp\nENGRAM_MCP_TOKEN=fake-test-token\n');
   try {
     const node = join(f.root, 'App/Contents/Resources/backend/runtime/bin/node');
-    await writeFile(node, '#!/bin/sh\nprintf "ARGS:%s\\n" "$*" >> "$CAPTURE"\ncase "$*" in *dashboard*) printf "setup-token-line\\n"; sleep 3;; esac\n', { mode: 0o755 });
+    await writeFile(node, '#!/bin/sh\nprintf "ARGS:%s\\n" "$*" >> "$CAPTURE"\ncase "$*" in *dashboard*) printf "setup-token-line\\n"; exec sleep 30;; *) exec sleep 30;; esac\n', { mode: 0o755 });
     const note = join(f.root, 'client-dashboard.txt'); const log = join(f.root, 'client-dashboard.log');
     const env = { ...f.env, ENGRAM_DASHBOARD_NOTE: note, ENGRAM_CLIENT_DASHBOARD_LOG: log, ENGRAM_CLIENT_DASHBOARD_PORT: '4896' };
-    const run = spawnSync('/bin/sh', [f.launch], { env, encoding: 'utf8', timeout: 5000 });
-    assert.equal(run.status, 0, run.stderr);
-    const seen = await readFile(f.env.CAPTURE, 'utf8');
-    assert.match(seen, /dashboard --client --host 127\.0\.0\.1 --port 4896/);
+    const child = spawn('/bin/sh', [f.launch], { env, stdio: ['ignore', 'pipe', 'pipe'] }); let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const deadline = Date.now() + 5_000; let seen = '';
+    while (Date.now() < deadline) {
+      seen = await readFile(f.env.CAPTURE, 'utf8').catch(() => '');
+      if (/ARGS:.*dashboard --client/.test(seen) && /ARGS:.*outbox watch/.test(seen)) break;
+      if (child.exitCode !== null) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    child.kill('SIGTERM');
+    const exit = await Promise.race([new Promise(resolve => child.once('exit', resolve)), new Promise(resolve => setTimeout(() => resolve('timeout'), 5_000))]);
+    assert.notEqual(exit, 'timeout', 'launcher cleanup must finish after SIGTERM');
+    assert.match(seen, /dashboard --client --host 127\.0\.0\.1 --port 4896/, stderr);
     assert.match(seen, /outbox watch --url https:\/\/memory\.example\/mcp/);
     assert.equal((await stat(note)).mode & 0o777, 0o600);
     assert.match(await readFile(note, 'utf8'), /setup-token-line/);

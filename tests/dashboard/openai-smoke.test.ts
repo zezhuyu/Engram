@@ -34,7 +34,9 @@ test('disposable OpenAI gateway smoke reaches real Engram MCP and revoked worksp
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-openai-smoke-')), bin = path.join(base, 'bin');
   process.env.HOME = base; process.env.XDG_CONFIG_HOME = path.join(base, '.config'); await fs.mkdir(bin, { recursive: true }); process.env.PATH = bin + path.delimiter + (oldPath ?? '');
   const managerLog = path.join(base, 'service-manager.log'), runningMarker = path.join(base, 'gateway-running'); process.env.SERVICE_MANAGER_LOG = managerLog; process.env.SERVICE_MANAGER_RUNNING = runningMarker;
-  for (const manager of ['launchctl', 'systemctl']) await fs.writeFile(path.join(bin, manager), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SERVICE_MANAGER_LOG"\nif [ "$1" = print ]; then if [ -f "$SERVICE_MANAGER_RUNNING" ]; then printf "state = running\\npid = 123\\n"; exit 0; else exit 1; fi; fi\nexit 0\n', { mode: 0o700 });
+  const launchctlFake = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SERVICE_MANAGER_LOG"\nif [ "$1" = print ]; then if [ -f "$SERVICE_MANAGER_RUNNING" ]; then printf "state = running\\npid = 123\\nlast exit code = 0\\n"; exit 0; else printf "state = waiting\\nlast exit code = 0\\n"; exit 0; fi; fi\nexit 0\n';
+  const systemctlFake = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SERVICE_MANAGER_LOG"\ncase "$*" in *show*) if [ -f "$SERVICE_MANAGER_RUNNING" ]; then printf "LoadState=loaded\\nActiveState=active\\nSubState=running\\nMainPID=123\\nExecMainStatus=0\\nNRestarts=0\\nResult=success\\n"; else printf "LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nExecMainStatus=0\\nNRestarts=0\\nResult=success\\n"; fi;; esac\nexit 0\n';
+  await fs.writeFile(path.join(bin, 'launchctl'), launchctlFake, { mode: 0o700 }); await fs.writeFile(path.join(bin, 'systemctl'), systemctlFake, { mode: 0o700 });
   const fakeTunnel = path.join(base, '.config/engram/tunnel-client/tunnel-client');
   await fs.mkdir(path.dirname(fakeTunnel), { recursive: true }); await fs.writeFile(fakeTunnel, '#!/bin/sh\nexec sleep 60\n', { mode: 0o700 });
   const vault = await disposableVault(); let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;

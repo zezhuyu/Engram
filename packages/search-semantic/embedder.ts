@@ -85,21 +85,27 @@ export class BuiltinBgeM3Embedder implements EmbeddingProvider {
     this.ready = new Promise<void>((resolve, reject) => {
       const entry = this.options.workerPath ?? path.resolve(path.dirname(new URL(import.meta.url).pathname), 'builtin-worker.js');
       const child = spawn(process.execPath, [entry, this.modelPath], { stdio: ['pipe', 'pipe', 'ignore'], env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ENGRAM_EMBED_IDLE_MS: String(this.options.idleTimeoutMs ?? 120_000) } }); this.child = child; this.setPipeReferences(true);
-      // The idle timer is a resource policy, not a parent-process keepalive.
-      child.unref();
-      const cleanup = () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); };
+      // The active request keeps the child referenced; setPipeReferences(false) applies the idle policy after it settles.
+      const cleanup = () => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        child.ref();
+        child.kill('SIGKILL');
+      };
+      process.once('beforeExit', cleanup);
       process.once('exit', cleanup);
-      child.once('exit', () => process.removeListener('exit', cleanup));
+      child.once('exit', () => { process.removeListener('beforeExit', cleanup); process.removeListener('exit', cleanup); });
       this.lines = createInterface({ input: child.stdout });
       let initialized = false;
       this.lines.on('line', line => { let message: WorkerMessage; try { message = JSON.parse(line) as WorkerMessage; } catch { return; } if (!initialized) { initialized = true; if (message.ready) resolve(); else reject(new Error(message.error ?? 'Built-in model worker failed to load')); return; } if (message.id !== undefined) { const item = this.pending.get(message.id); if (item) { this.pending.delete(message.id); message.error ? item.reject(new Error(message.error)) : item.resolve(message.vectors ?? []); } } else if (message.error) this.fail(message.error); });
       child.once('error', error => { if (!initialized) reject(new Error(`Built-in model worker could not start: ${error.message}`)); this.fail('Built-in model worker crashed'); });
       child.once('exit', () => { this.child = undefined; this.lines?.close(); this.lines = undefined; this.ready = undefined; if (!initialized) reject(new Error('Built-in model worker exited before loading the model')); this.fail('Built-in model worker exited unexpectedly'); });
+      child.once('close', () => { this.child = undefined; this.lines?.close(); this.lines = undefined; this.ready = undefined; if (!initialized) reject(new Error('Built-in model worker closed before loading the model')); this.fail('Built-in model worker exited unexpectedly'); });
     });
     this.ready.catch(() => { this.ready = undefined; }); return this.ready;
   }
   private fail(message: string) { for (const p of this.pending.values()) p.reject(new Error(message)); this.pending.clear(); }
   private setPipeReferences(referenced: boolean): void {
+    if (referenced) this.child?.ref(); else this.child?.unref();
     const change = (stream: unknown) => { const handle = (stream as { _handle?: { ref?: () => void; unref?: () => void } } | null)?._handle; if (referenced) handle?.ref?.(); else handle?.unref?.(); };
     change(this.child?.stdin); change(this.child?.stdout); change(this.child?.stderr);
   }

@@ -1,0 +1,44 @@
+import { promises as fs } from 'node:fs';
+import type { ReplicaStore, ReplicaEvent } from './replica.js';
+import type { ReplicaOperation } from './operation.js';
+import { replicaFault } from './internals.js';
+
+export type HelloReply={v:1;epoch:string;enrolledScopes:Array<{workspaceId:string;scopeVersion:string;sequenceHead:number}>};
+export interface SyncTransport {
+  hello(deviceId:string,signal?:AbortSignal):Promise<HelloReply>;
+  fetch(deviceId:string,workspaceId:string,cursor?:string,signal?:AbortSignal):Promise<{events:ReplicaEvent[];cursor:string;epoch:string;status?:'resync-required'|'epoch-changed'}>;
+  push(deviceId:string,ops:ReplicaOperation[],signal?:AbortSignal):Promise<{results:Array<{opId:string;status:string;code:string;serverSequence?:number;authoritative?:{revisionId:string;revisionSha256:string;serverSequence:number;revisionBytes:string};currentHeadId?:string;profilePull?:boolean}>}>;
+  profile?(etag?:string,signal?:AbortSignal):Promise<{content:string;revisionId:string;etag:string}>;
+  blob?(deviceId:string,workspaceId:string,digest:string,offset?:number,signal?:AbortSignal):Promise<Uint8Array>;
+}
+export class InProcessReplicaTransport implements SyncTransport {
+  constructor(private readonly handlers:{hello:(deviceId:string)=>Promise<HelloReply>;fetch:(deviceId:string,workspaceId:string,cursor?:string)=>ReturnType<SyncTransport['fetch']>;push:(deviceId:string,ops:ReplicaOperation[])=>ReturnType<SyncTransport['push']>;profile?:()=>Promise<{content:string;revisionId:string;etag:string}>}){}
+  hello(deviceId:string){return this.handlers.hello(deviceId);}
+  fetch(deviceId:string,workspaceId:string,cursor?:string){return this.handlers.fetch(deviceId,workspaceId,cursor);}
+  push(deviceId:string,ops:ReplicaOperation[]){return this.handlers.push(deviceId,ops);}
+  profile(){if(!this.handlers.profile)throw new Error('profile transport unavailable');return this.handlers.profile();}
+}
+export class ReplicaHttpError extends Error { constructor(public readonly status: number, public readonly retryAfterMs?: number) { super(`replica HTTP ${status}`); } }
+export class HttpReplicaTransport implements SyncTransport {
+  constructor(readonly baseUrl:string,readonly tokenFile:string,private readonly request:typeof fetch=fetch){}
+  private async call<T>(route:string,body?:unknown,method='POST',headers:Record<string,string>={},signal?:AbortSignal):Promise<T>{const token=(await fs.readFile(this.tokenFile,'utf8')).trim();if(!token)throw new Error('replica token file is empty');const request=this.request(new URL(route,this.baseUrl),{method,headers:{Authorization:`Bearer ${token}`,...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},...(body===undefined?{}:{body:JSON.stringify(body)}),...(signal?{signal}:{})});if(route==='/replica/v1/push')replicaFault('sync.after_push_request_sent');const response=await request;if(!response.ok)throw new ReplicaHttpError(response.status,parseRetryAfter(response.headers.get('retry-after')));if(response.status===304)return { notModified:true } as T;return await response.json() as T;}
+  hello(deviceId:string,signal?:AbortSignal){return this.call<HelloReply>('/replica/v1/hello',{v:1,deviceId},'POST',{},signal);}
+  fetch(deviceId:string,workspaceId:string,cursor?:string,signal?:AbortSignal){return this.call<{events:ReplicaEvent[];cursor:string;epoch:string;status?:'resync-required'|'epoch-changed'}>('/replica/v1/fetch',{v:1,deviceId,workspaceId,...(cursor?{cursor}:{})},'POST',{},signal);}
+  push(deviceId:string,ops:ReplicaOperation[],signal?:AbortSignal){return this.call<{results:Array<{opId:string;status:string;code:string;serverSequence?:number;authoritative?:{revisionId:string;revisionSha256:string;serverSequence:number;revisionBytes:string};currentHeadId?:string;profilePull?:boolean}>}>('/replica/v1/push',{v:1,deviceId,ops},'POST',{},signal);}
+  async blob(deviceId:string,workspaceId:string,digest:string,offset=0,signal?:AbortSignal):Promise<Uint8Array>{const token=(await fs.readFile(this.tokenFile,'utf8')).trim();if(!token)throw new Error('replica token file is empty');const response=await this.request(new URL(`/replica/v1/blobs/${digest}?scope=${encodeURIComponent(workspaceId)}&deviceId=${encodeURIComponent(deviceId)}`,this.baseUrl),{headers:{Authorization:`Bearer ${token}`,...(offset?{Range:`bytes=${offset}-`}:{})},...(signal?{signal}:{})});if(!response.ok)throw new ReplicaHttpError(response.status,parseRetryAfter(response.headers.get('retry-after')));return new Uint8Array(await response.arrayBuffer());}
+  profile(etag?:string,signal?:AbortSignal){return this.call<{content:string;revisionId:string;etag:string;notModified?:boolean}>('/replica/v1/profile',undefined,'GET',etag?{'If-None-Match':etag}:{},signal);}
+}
+function parseRetryAfter(value:string|null):number|undefined { if(!value)return undefined; const seconds=Number(value); if(Number.isFinite(seconds)&&seconds>=0)return Math.min(seconds*1000,300_000); const at=Date.parse(value); return Number.isFinite(at)?Math.max(0,Math.min(at-Date.now(),300_000)):undefined; }
+export type SyncReport={pulled:number;pushed:number;accepted:number;rejected:number;conflicts:number;diverged:number;deferred:number;held:number;objectErrors:Array<{objectId:string;error:string}>;resyncRequired:string[];epochChanged:boolean;errors:string[];httpStatus?:number;retryAfterMs?:number;timings:{startedAt:string;finishedAt:string;durationMs:number}};
+export async function syncOnce(store:ReplicaStore,transport:SyncTransport,signal?:AbortSignal):Promise<SyncReport>{
+  const start=Date.now(),report:SyncReport={pulled:0,pushed:0,accepted:0,rejected:0,conflicts:0,diverged:0,deferred:store.status().deferred,held:store.status().held,objectErrors:[],resyncRequired:[],epochChanged:false,errors:[],timings:{startedAt:new Date(start).toISOString(),finishedAt:'',durationMs:0}};
+  const addResync=(scope:string)=>{if(!report.resyncRequired.includes(scope))report.resyncRequired.push(scope);};
+  const rememberError=(error:unknown)=>{report.errors.push(String(error));if(error instanceof ReplicaHttpError){report.httpStatus=error.status;if(error.retryAfterMs!==undefined)report.retryAfterMs=error.retryAfterMs;}};
+  const pullScope=async(workspaceId:string)=>{let cursor=await store.cursorFor(workspaceId);for(;;){const page=await transport.fetch(store.deviceId,workspaceId,cursor,signal);if(page.status==='resync-required'){addResync(workspaceId);return;}if(page.status==='epoch-changed'){report.epochChanged=true;return;}const installed=await store.installRemote(page.events,page.cursor,page.epoch,workspaceId);report.pulled+=page.events.length;report.diverged+=installed.diverged;report.deferred=installed.deferred;report.objectErrors.push(...installed.errors);cursor=page.cursor;if(page.events.length<100)return;}};
+  try{const retry=await store.retryDeferred();report.deferred=retry.deferred;report.objectErrors.push(...retry.errors);const hello=await transport.hello(store.deviceId,signal);for(const scope of hello.enrolledScopes){try{await pullScope(scope.workspaceId);}catch(error){rememberError(error);}}
+    let profilePull=false;if(!report.epochChanged&&!report.resyncRequired.length&&report.httpStatus!==401&&report.httpStatus!==403){for(;;){const ops=store.pendingBatch(100);if(!ops.length)break;report.pushed+=ops.length;const response=await transport.push(store.deviceId,ops,signal);replicaFault('sync.after_server_accept_before_reconcile');let madeProgress=false,stop=false;for(const result of response.results){if(result.status==='resync-required'){const op=ops.find(item=>item.opId===result.opId);addResync(op?.scope.workspaceId??result.code);stop=true;continue;}if(result.status==='skipped-after-conflict'){await store.markResult(result.opId,result);stop=true;continue;}await store.markResult(result.opId,result);if(['accepted','rejected','conflict'].includes(result.status))madeProgress=true;if(result.status==='accepted')report.accepted++;else if(result.status==='rejected')report.rejected++;else if(result.status==='conflict')report.conflicts++;profilePull||=result.profilePull===true;}if(stop||!madeProgress||response.results.length!==ops.length)break;}}
+    if(profilePull&&transport.profile){const snapshot=await transport.profile(undefined,signal);await store.installProfileSnapshot(snapshot);}
+    if(!report.epochChanged)for(const scope of hello.enrolledScopes){if(report.resyncRequired.includes(scope.workspaceId))continue;try{await pullScope(scope.workspaceId);}catch(error){report.errors.push(String(error));}}
+  }catch(error){rememberError(error);}
+  const state=store.status();report.deferred=state.deferred;report.held=state.held;report.conflicts=state.conflicts;report.objectErrors=report.objectErrors.slice(0,100);report.errors=report.errors.slice(0,100);report.timings.finishedAt=new Date().toISOString();report.timings.durationMs=Date.now()-start;return report;
+}

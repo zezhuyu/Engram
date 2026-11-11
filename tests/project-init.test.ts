@@ -62,6 +62,18 @@ test('remote project init connects directly to the shared HTTP MCP server withou
   await assert.rejects(readFile(path.join(base, 'must-not-exist', 'commits.jsonl')));
 });
 
+test('replica project init binds local stdio plus live remote MCP without contacting the server', async t => {
+  const base=await mkdtemp(path.join(tmpdir(),'engram-replica-project-init-'));t.after(()=>rm(base,{recursive:true,force:true}));
+  const projectDir=path.join(base,'replica-project');await mkdir(projectDir);
+  const result=await initializeProject(undefined,{projectDir,host:'claude-code',mode:'replica',replicaId:'client-a',workspaceId:'proj',mcpUrl:'https://memory.example/mcp',tokenEnv:'REPLICA_TOKEN'});
+  const binding=JSON.parse(await readFile(path.join(projectDir,'.engram','project.json'),'utf8')) as {mode:string;replicaId:string;workspaceId:string};
+  assert.equal(binding.mode,'replica');assert.equal(binding.replicaId,'client-a');assert.equal(binding.workspaceId,'proj');
+  const config=JSON.parse(await readFile(path.join(projectDir,'.mcp.json'),'utf8')) as {mcpServers:Record<string,{type:string;command?:string;args?:string[];url?:string;headers?:Record<string,string>}>};
+  assert.equal(config.mcpServers.engram?.type,'stdio');assert(config.mcpServers.engram?.args?.includes('--replica'));assert(config.mcpServers.engram?.args?.includes('client-a'));assert(config.mcpServers.engram?.args?.includes('proj'));
+  assert.deepEqual(config.mcpServers['engram-remote'],{type:'http',url:'https://memory.example/mcp',headers:{Authorization:'Bearer ${REPLICA_TOKEN}','X-Engram-Workspace':'proj'}});
+  assert.equal(result.binding.mode,'replica');assert.equal(result.binding.replicaId,'client-a');
+});
+
 test('remote Codex project init uses bearer token environment lookup and replaces its managed config block', async t => {
   const base = await mkdtemp(path.join(tmpdir(), 'engram-codex-remote-init-'));
   t.after(() => rm(base, { recursive: true, force: true }));

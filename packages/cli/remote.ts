@@ -32,7 +32,7 @@ export async function remoteTarget(flags: Flags, cwd = process.cwd(), env: NodeJ
   const explicit = text(flags, 'server') ?? text(flags, 'mcp-url') ?? env.ENGRAM_URL;
   let url: string | undefined, tokenEnv: string | undefined, workspaceId = text(flags, 'workspace'), via: RemoteTarget['via'] = 'flag';
   if (explicit) { url = explicit; tokenEnv = text(flags, 'token-env') ?? env.ENGRAM_TOKEN_ENV ?? 'ENGRAM_TOKEN'; via = text(flags, 'server') || text(flags, 'mcp-url') ? 'flag' : 'environment'; }
-  else { const found = await findTrustedBinding(cwd, env).catch(() => undefined); if (!found?.trusted || !found.binding.serverUrl || !found.binding.credentialRef) return undefined; url = found.binding.serverUrl; tokenEnv = found.binding.credentialRef; workspaceId ??= found.binding.workspaceId; via = 'project'; }
+  else { const found = await findTrustedBinding(cwd, env).catch(() => undefined); if (!found?.trusted || !found.binding.serverUrl || !found.binding.credentialRef || found.binding.mode==='replica') return undefined; url = found.binding.serverUrl; tokenEnv = found.binding.credentialRef; workspaceId ??= found.binding.workspaceId; via = 'project'; }
   const token = env[tokenEnv!]; if (!token) throw new MDBError('INVALID_ARGUMENT', `Environment variable ${tokenEnv} is not set (it holds the credential for ${url})`);
   return { url: url!, tokenEnv: tokenEnv!, token, ...(workspaceId ? { workspaceId } : {}), via };
 }

@@ -280,3 +280,18 @@ test('retirement refuses a page whose recorded original hash differs from its na
   const result = await wikiRetireWorkspace(vault, { workspace: 'mismatch', intoWikiVerified: true });
   assert.equal(result.unverified, 1); assert.match(result.errors[0]!.reason, /SHA-256/); assert.equal(result.deleted.length, 0);
 });
+
+test('workspace describe is owner-only, neutralizes text, is idempotent and keeps grants', async t => {
+  const { root, vault } = await disposableVault(t);
+  await vault.createWorkspace('proj', 'Imported wiki: migrated from /somewhere/wiki', { agent: ['read', 'write'] });
+  const updated = await execute(['workspace', 'describe', 'proj', '--description', 'Project workspace for /Volumes/x/Proj\u0000\n  notes', '--root', root]) as { description: string; grants: Record<string, string[]> };
+  assert.equal(updated.description, 'Project workspace for /Volumes/x/Proj notes');
+  assert.deepEqual(updated.grants.agent, ['read', 'write']);
+  assert.equal((await vault.getWorkspace('proj')).description, 'Project workspace for /Volumes/x/Proj notes');
+  const again = await execute(['workspace', 'describe', 'proj', '--description', 'Project workspace for /Volumes/x/Proj notes', '--root', root]) as { description: string };
+  assert.equal(again.description, 'Project workspace for /Volumes/x/Proj notes');
+  await assert.rejects(() => execute(['workspace', 'describe', 'proj', '--description', '   ', '--root', root]), /description is required/);
+  const agent = new Vault(root, { actorId: 'agent', permissions: ['workspace:proj:read', 'workspace:proj:write'], credentialBound: true });
+  await assert.rejects(() => agent.setWorkspaceDescription('proj', 'hijacked'));
+  assert.equal((await vault.getWorkspace('proj')).description, 'Project workspace for /Volumes/x/Proj notes');
+});

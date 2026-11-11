@@ -1,5 +1,23 @@
 # Remote MCP clients
 
+Replica sync uses the same origin through `/replica/v1/hello`, `/enroll`, `/fetch`, `/push`, `/unenroll`, `/blobs/<sha256>`, and `/profile`. Use a scoped revocable credential, enroll only workspaces with read access, and add write access for pushes. The push route accepts up to 100 operations in a 4 MiB JSON request and returns a result for each operation. See [replication](replication.md) for result handling and authoritative-revision reconciliation.
+
+Installations that use the Client app should use one scoped HTTP credential per installation where practical. Client app heartbeats are sent to `POST /client/heartbeat`; this route is separate from MCP tools and reports advisory device/project sync metadata to the server owner's Clients dashboard. If a credential is shared, revoking it immediately disables every agent, process, and machine holding that token. Local queued writes remain on those client machines.
+
+## Local-first replica mode
+
+For a Client machine that should keep selected project workspaces available offline, store its scoped credential in a private token file and initialize a replica:
+
+```sh
+chmod 600 ~/.config/engram/replica.token
+mdb init --project --host claude-code --mode replica --workspace my-project \
+  --server https://memory.example --token-file ~/.config/engram/replica.token
+mdb service install
+mdb replica status
+```
+
+Replica mode enrolls and pulls the named workspace before project setup completes. That project's `engram` MCP server is local stdio and writes revisions to the replica; a separate `engram-remote` entry keeps live access to other authorized scopes without caching them. Root profile snapshots are local, accepted, non-sensitive data filtered by the existing project projection. Add another whole workspace with `mdb replica add WORKSPACE`; remove its enrollment with `mdb replica remove WORKSPACE` (local bytes remain). Use `mdb replica sync` for a one-shot exchange or `mdb replica daemon` for foreground diagnosis. A revoked credential stops sync but cannot erase copies already downloaded. See [replication](replication.md) and [security](security.md) before caching private workspace content.
+
 For a persistent macOS or Linux outbox watcher on a client machine, use the per-user service commands in [client-daemon.md](client-daemon.md). The daemon consumes the same `outbox watch` operation described below and keeps the credential in a 0600 token file.
 
 Engram uses the existing HTTP MCP server. Start it with `MDB_MCP_TOOLSET=remote-web`, a vault root, and either a scoped credential created through the owner CLI or a configured OAuth resource-server verifier. The stable endpoint is `/mcp`; `/.well-known/oauth-protected-resource` publishes RFC 9728 metadata when OAuth validation is enabled.
@@ -102,3 +120,8 @@ The Agent Slack tools expose `search_engram_memory`, `get_engram_memory`, `creat
 `node scripts/standalone.mjs package [darwin|linux] [x64|arm64]` builds and packages on explicit invocation, embedding the latest Node 24 LTS runtime from the official Node release index and production dependencies (`ENGRAM_NODE_VERSION` can pin an exact version). Package on each target OS/architecture; cross-target native dependency packaging is refused. `install` creates a per-user LaunchAgent/systemd user service that starts at login. For boot-time startup use `sudo node scripts/standalone.mjs install-system [bundle-dir] [service-user]`; `uninstall-system` removes it. The privileged installer runs the service as the named non-root user so it reads that user's protected environment file and vault. Configure `~/.config/engram/engram.env` with `ENGRAM_DATA_DIR`, remote authentication and ingress variables, then set mode 600 before installing autostart. This task does not execute packaging or install commands. Local operation uses authenticated HTTP loopback. Hosted access uses the separately approved adapter above; Caddy and certificates are not bundle prerequisites.
 
 Project bindings can be reviewed with `mdb init --project --dry-run --project-dir DIR --hosts claude-code,codex --workspace NAME`. To remove a binding, run `mdb project unbind --root DIR`; unbind refuses if any file recorded by init changed after initialization. It never removes workspace content.
+# Replica pull setup
+
+Replica clients use the same HTTP origin as MCP and call `/replica/v1/hello`, `/enroll`, `/fetch`, `/unenroll`, `/blobs/<sha256>`, and `/profile`. Provision a scoped, revocable HTTP credential with `workspace:<ID>:read` for each requested workspace; add `global:profile:read` only when the client needs the filtered profile snapshot. Shared `MDB_MCP_HTTP_TOKEN` credentials and OAuth identities cannot enroll replicas. Enrollment is explicitly workspace-only; `personal`, retired, unknown, and unreadable scopes are refused with the same generic response.
+
+Use a client-generated UUID as `deviceId`, send `v:1` on JSON requests, and retain the opaque fetch cursor per workspace. The server may return `resync-required` after a grant change. Revoking or rotating the credential immediately prevents further requests and removes its server-side device registry rows. Existing local replica bytes remain on that client and must be removed there separately.

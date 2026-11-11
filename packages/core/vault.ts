@@ -1,3 +1,4 @@
+import { killAtBoundary } from './fault-injection.js';
 import { promises as fs, watch as fsWatch } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -8,6 +9,7 @@ import { createS3ObjectStoreFromEnv } from '../storage-s3/index.js';
 import { describeModel } from '../models/factory.js';
 import { profileAsync, profileBytes } from '../bench/instrumentation.js';
 import { assertDurableWriteCapacity } from './storage-lifecycle.js';
+import { REPLICATION_INSTALL_CAPABILITY } from './replication-capability.js';
 import { isSensitive } from './sensitivity.js';
 import { MDBError, OWNER, type ActorContext, type Collection, type CommitEvent, type CommitJournalStore, type Document, type ObjectStore, type PatchInput, type PutInput, type Scope, type VaultConfig, type Workspace } from './types.js';
 
@@ -86,7 +88,7 @@ function hookExit():void{if(exitHooked)return;exitHooked=true;process.on('before
 export class Vault {
   readonly root: string;
   readonly store: ObjectStore;
-  constructor(root: string, readonly actor: ActorContext = OWNER, readonly options: { fault?: (stage: string) => void; idFactory?: (prefix: string) => string; now?: () => Date; store?: ObjectStore; storageAvailableBytes?: () => Promise<number> } = {}) { this.root = path.resolve(root); this.store = options.store ?? (process.env.MDB_STORAGE_BACKEND === 's3' ? createS3ObjectStoreFromEnv() : new LocalObjectStore(this.root, options.fault)); }
+  constructor(root: string, readonly actor: ActorContext = OWNER, readonly options: { fault?: (stage: string) => void; idFactory?: (prefix: string) => string; now?: () => Date; store?: ObjectStore; storageAvailableBytes?: () => Promise<number>; beforeCommit?: (document: Document, operation: string) => void | Promise<void>; onCommit?: (document: Document, event: CommitEvent) => void | Promise<void> } = {}) { this.root = path.resolve(root); this.store = options.store ?? (process.env.MDB_STORAGE_BACKEND === 's3' ? createS3ObjectStoreFromEnv() : new LocalObjectStore(this.root, options.fault)); }
   private remoteJournal(): CommitJournalStore | undefined { const store = this.store as Partial<CommitJournalStore>; return typeof store.readCommittedJournal === 'function' && typeof store.appendCommittedEvent === 'function' && typeof store.initializeJournal === 'function' ? store as CommitJournalStore : undefined; }
   private newId(prefix: string): string { return this.options.idFactory?.(prefix) ?? id(prefix); }
   private now(): Date { return this.options.now?.() ?? new Date(); }
@@ -94,8 +96,8 @@ export class Vault {
   private owner(): boolean { return this.actor.permissions.includes('*'); }
   private requireOwner(): void { if (!this.owner()) throw inaccessible(); }
   private async readJSON<T>(key: string): Promise<T> { return JSON.parse(Buffer.from(await this.store.read(key)).toString('utf8')) as T; }
-  async init(options: { sqlite?: boolean; postgres?: boolean } = {}): Promise<VaultConfig> {
-    this.requireOwner(); await safePath(this.root,'mdb.yaml'); await mkdirDurable(this.root, this.options.fault);
+  async init(options: { sqlite?: boolean; postgres?: boolean } = {}, capability?:object): Promise<VaultConfig> {
+    if(capability!==REPLICATION_INSTALL_CAPABILITY)this.requireOwner(); await safePath(this.root,'mdb.yaml'); await mkdirDurable(this.root, this.options.fault);
     if ((await fs.lstat(this.root)).isSymbolicLink()) throw new MDBError('INVALID_INPUT', 'Vault root must not be a symlink');
     try { await this.store.read('mdb.yaml'); await this.remoteJournal()?.initializeJournal(); return this.config(); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     const config = structuredClone(defaults); config.sqlite.enabled = options.sqlite ?? false; if(options.postgres)config.postgres={enabled:true};
@@ -115,16 +117,16 @@ export class Vault {
       return {ok:true,root:this.root,config,storage:this.remoteJournal()?'s3-markdown':'local-markdown',journalEvents:(await this.events()).length,capabilities:{grep:true,keyword:true,sqlite:{enabled:config.sqlite.enabled,runtimeAvailable:sqliteRuntime,fts5Available:fts5,...(sqliteReason?{reason:sqliteReason}:{})},postgres:{enabled:config.postgres?.enabled??false},semantic:{available:false,reason:'No embedding/vector adapter configured'},model:describeModel(config.model),dream:{enabled:config.dream.enabled,available:config.dream.enabled&&describeModel(config.model).available,...(config.dream.enabled?{}:{reason:'Dreaming is disabled; explicit opt-in required'})},capture:{enabled:config.capture.enabled,allowedSources:config.capture.allowedSources},network:{allowed:config.model.allowNetwork,automaticFetch:false}}};
     } catch(error) {return{ok:false,error:error instanceof Error?error.message:String(error)};}
   }
-  async canAccess(scope: Scope, action: 'read' | 'write' | 'promote' = 'read'): Promise<boolean> { return profileAsync('acl.check', () => this.canAccessUnprofiled(scope, action)); }
-  private async canAccessUnprofiled(scope: Scope, action: 'read' | 'write' | 'promote'): Promise<boolean> {
-    if (this.owner()) return true;
-    const permissions = this.actor.permissions;
+  async canAccess(scope: Scope, action: 'read' | 'write' | 'promote' = 'read', actor: ActorContext = this.actor): Promise<boolean> { return profileAsync('acl.check', () => this.canAccessUnprofiled(scope, action, actor)); }
+  private async canAccessUnprofiled(scope: Scope, action: 'read' | 'write' | 'promote', actor: ActorContext): Promise<boolean> {
+    if (actor.permissions.includes('*')) return true;
+    const permissions = actor.permissions;
     if (scope.type === 'global') return permissions.includes(`global:${scope.area}:${action}`) || permissions.includes(`global:*:${action}`) || permissions.includes(`${scopeKey(scope)}:*`);
     let workspace: Workspace; try { workspace = await this.readJSON<Workspace>(`workspaces/${validId(scope.workspaceId)}/.mdb/workspace.json`); } catch { return false; }
     const collectionPermission = scope.collectionId ? permissions.includes(`workspace:${scope.workspaceId}:collection:${scope.collectionId}:${action}`) : false;
     const workspacePermission = collectionPermission || permissions.includes(`workspace:${scope.workspaceId}:${action}`) || permissions.includes(`workspace:${scope.workspaceId}:*`);
-    const autoCreatedForActor = workspace.autoCreatedBy === this.actor.actorId && permissions.includes('workspace:create');
-    const granted = this.actor.credentialBound ? workspace.grants[this.actor.actorId]?.includes(action) === true && (workspacePermission || autoCreatedForActor) : workspace.grants[this.actor.actorId]?.includes(action) || workspacePermission;
+    const autoCreatedForActor = workspace.autoCreatedBy === actor.actorId && permissions.includes('workspace:create');
+    const granted = actor.credentialBound ? workspace.grants[actor.actorId]?.includes(action) === true && (workspacePermission || autoCreatedForActor) : workspace.grants[actor.actorId]?.includes(action) || workspacePermission;
     if (!granted) return false;
     if (scope.collectionId) { let collection: Collection; try { collection = await this.readJSON<Collection>(`workspaces/${scope.workspaceId}/collections/${validId(scope.collectionId)}/.mdb/collection.json`); } catch { return false; } if (collection.grants && !collection.grants[this.actor.actorId]?.includes(action)) return false; }
     return true;
@@ -134,6 +136,8 @@ export class Vault {
     this.requireOwner(); validId(workspaceId); if (['profile', 'user-insight', 'chat', 'wiki'].includes(workspaceId.toLowerCase())) throw new MDBError('INVALID_ARGUMENT', 'This workspace name is reserved for connector memory routing'); const workspace: Workspace = {id:workspaceId,description,grants};
     await withVaultLock(this.root, async () => { await this.createWorkspaceUnlocked(workspace); await this.appendWorkspaceCreateAudit(workspaceId, false); }); return workspace;
   }
+  /** Create or enroll one local replica workspace without elevating its actor to OWNER. */
+  async enrollReplicaWorkspace(workspaceId:string,actorId:string,capability:object):Promise<Workspace>{if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();validId(workspaceId);if(['profile','user-insight','chat','wiki'].includes(workspaceId.toLowerCase()))throw new MDBError('INVALID_ARGUMENT','This workspace name is reserved for connector memory routing');return withVaultLock(this.root,async()=>{const key=`workspaces/${workspaceId}/.mdb/workspace.json`;let workspace:Workspace;try{workspace=await this.readJSON<Workspace>(key);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;workspace={id:workspaceId,description:'Replica workspace',grants:{[actorId]:['read','write']}};await this.createWorkspaceUnlocked(workspace);await this.appendWorkspaceCreateAudit(workspaceId,true);return workspace;}const grants={...workspace.grants,[actorId]:['read','write'] as ('read'|'write')[]};workspace={...workspace,grants};await atomicWrite(this.root,key,JSON.stringify(workspace));await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(workspace));return workspace;});}
   private async appendWorkspaceCreateAudit(workspaceId: string, autoCreated: boolean): Promise<void> { const auditPath = await safePath(this.root, '.mdb/workspace-create-audit.jsonl'); await fs.appendFile(auditPath, `${JSON.stringify({ actorId: this.actor.actorId, workspaceId, at: this.now().toISOString(), autoCreated })}\n`, { mode: 0o600 }); }
   private async createWorkspaceUnlocked(workspace: Workspace): Promise<void> { const workspaceId = workspace.id; await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(workspace)) + 16 * 1024); const key=`workspaces/${workspaceId}/.mdb/workspace.json`; await rejectCaseAlias(await safePath(this.root,'workspaces'),workspaceId); if (await this.store.stat(key)) throw new MDBError('CONFLICT','Workspace already exists'); await this.store.putImmutable(key,Buffer.from(JSON.stringify(workspace))); await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(workspace)); for (const dir of ['memory/episodic','memory/semantic','memory/procedural','insights','decisions','sources/originals','sources/manifests','wiki/pages','wiki/topics','wiki/syntheses','collections']) await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/${dir}`),{recursive:true,mode:0o700}); for (const name of ['INDEX','PROFILE','OVERVIEW']) await atomicWrite(this.root,`workspaces/${workspaceId}/${name}.md`,`# ${name}\n`); }
   /** Explicit remote self-service: the caller receives only its own read/write grant. */
@@ -159,22 +163,36 @@ export class Vault {
     });
     return 'created';
   }
-  async listWorkspaces(): Promise<Workspace[]> {
+  async listWorkspaces(actor:ActorContext=this.actor): Promise<Workspace[]> {
     const result: Workspace[] = [];
     if (this.remoteJournal()) {
       const ids = new Set<string>();
       for await (const entry of this.store.list('workspaces')) { const match = /^workspaces\/([^/]+)\/.mdb\/workspace\.json$/.exec(entry.key); if (match) ids.add(match[1]!); }
-      for (const id of ids) if (await this.canAccess({ type: 'workspace', workspaceId: id }, 'read')) { const workspace = await this.readJSON<Workspace>(`workspaces/${id}/.mdb/workspace.json`); if (!workspace.retired || id === 'personal') result.push(workspace); }
+      for (const id of ids) if (await this.canAccess({ type: 'workspace', workspaceId: id }, 'read',actor)) { const workspace = await this.readJSON<Workspace>(`workspaces/${id}/.mdb/workspace.json`); if (!workspace.retired || id === 'personal') result.push(workspace); }
       return result;
     }
     let entries;
     try { entries = await fs.readdir(await safePath(this.root, 'workspaces'), { withFileTypes: true }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return result; throw error; }
-    for (const entry of entries) if (entry.isDirectory() && await this.canAccess({ type: 'workspace', workspaceId: entry.name }, 'read')) { const workspace = await this.readJSON<Workspace>(`workspaces/${entry.name}/.mdb/workspace.json`); if (!workspace.retired || entry.name === 'personal') result.push(workspace); }
+    for (const entry of entries) if (entry.isDirectory() && await this.canAccess({ type: 'workspace', workspaceId: entry.name }, 'read',actor)) { const workspace = await this.readJSON<Workspace>(`workspaces/${entry.name}/.mdb/workspace.json`); if (!workspace.retired || entry.name === 'personal') result.push(workspace); }
     return result;
   }
   async getWorkspace(workspaceId: string): Promise<Workspace> { validId(workspaceId); await this.requireAccess({ type: 'workspace', workspaceId }, 'read'); return this.readJSON(`workspaces/${workspaceId}/.mdb/workspace.json`); }
   async setWorkspaceRetired(workspaceId: string, retired: boolean): Promise<Workspace> { if (!this.actor.permissions.includes('*')) throw new MDBError('NOT_FOUND_OR_FORBIDDEN', 'Workspace retirement and reactivation are owner-only'); validId(workspaceId); if (workspaceId === 'personal' && retired) throw new MDBError('INVALID_ARGUMENT', 'The personal workspace cannot be retired'); return withVaultLock(this.root, async () => { const key = `workspaces/${workspaceId}/.mdb/workspace.json`, old = await this.readJSON<Workspace>(key); if (!!old.retired === retired) return old; const at = this.now().toISOString(), next: Workspace = { ...old, retired, ...(retired ? { retiredAt: at } : {}) }; if (!retired) delete next.retiredAt; await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(next)) + 8192); if (this.remoteJournal()) { if (!await this.store.compareAndSwapPointer(key, JSON.stringify(old), JSON.stringify(next))) throw new MDBError('CONFLICT', 'Workspace metadata changed during retirement'); } else await atomicWrite(this.root, key, JSON.stringify(next)); await atomicWrite(this.root, `workspaces/${workspaceId}/db.yaml`, YAML.stringify(next)); const audit = await safePath(this.root, '.mdb/workspace-retirement-audit.jsonl'); await fs.appendFile(audit, `${JSON.stringify({ actorId: this.actor.actorId, workspaceId, action: retired ? 'retired' : 'reactivated', at })}\n`, { mode: 0o600 }); return next; }); }
+  async setWorkspaceDescription(workspaceId: string, description: string): Promise<Workspace> {
+    this.requireOwner(); validId(workspaceId);
+    const text = String(description).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+    if (!text) throw new MDBError('INVALID_ARGUMENT', 'A workspace description is required');
+    return withVaultLock(this.root, async () => {
+      const key = `workspaces/${workspaceId}/.mdb/workspace.json`, old = await this.readJSON<Workspace>(key);
+      if (old.description === text) return old;
+      const next: Workspace = { ...old, description: text };
+      await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(next)) + 8192);
+      if (this.remoteJournal()) { if (!await this.store.compareAndSwapPointer(key, JSON.stringify(old), JSON.stringify(next))) throw new MDBError('CONFLICT', 'Workspace changed during update'); } else await atomicWrite(this.root, key, JSON.stringify(next));
+      await atomicWrite(this.root, `workspaces/${workspaceId}/db.yaml`, YAML.stringify(next));
+      return next;
+    });
+  }
   async grant(workspaceId:string,actorId:string,permissions:('read'|'write'|'promote')[]):Promise<Workspace> { this.requireOwner(); validId(workspaceId); if(permissions.some(p=>!['read','write','promote'].includes(p))) throw new MDBError('INVALID_INPUT','Invalid grant'); return withVaultLock(this.root,async()=>{const key=`workspaces/${workspaceId}/.mdb/workspace.json`;const old=await this.readJSON<Workspace>(key);const w={...old,grants:{...old.grants,[actorId]:permissions}};await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(w)) + 8192);if(this.remoteJournal()){if(!await this.store.compareAndSwapPointer(key,JSON.stringify(old),JSON.stringify(w)))throw new MDBError('CONFLICT','Workspace grants changed during update');}else await atomicWrite(this.root,key,JSON.stringify(w));await atomicWrite(this.root,`workspaces/${workspaceId}/db.yaml`,YAML.stringify(w));return w;}); }
   async revoke(workspaceId:string,actorId:string):Promise<Workspace> { return this.grant(workspaceId,actorId,[]); }
   async createCollection(workspaceId:string,collectionId:string,description='',grants?:Collection['grants']):Promise<Collection> { validId(workspaceId);validId(collectionId);await this.requireAccess({type:'workspace',workspaceId},'write'); if(grants && !this.owner()) throw inaccessible(); const collection:Collection={id:collectionId,workspaceId,description,...(grants?{grants}:{})}; await withVaultLock(this.root,async()=>{await this.assertMutationCapacity(Buffer.byteLength(JSON.stringify(collection)) + 12 * 1024);const key=`workspaces/${workspaceId}/collections/${collectionId}/.mdb/collection.json`;await rejectCaseAlias(await safePath(this.root,`workspaces/${workspaceId}/collections`),collectionId);if(await this.store.stat(key))throw new MDBError('CONFLICT','Collection already exists');await this.store.putImmutable(key,Buffer.from(JSON.stringify(collection))); for(const d of ['working','notes','observations','insights','sessions'])await fs.mkdir(await safePath(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${d}`),{recursive:true,mode:0o700});for(const n of ['PROFILE','INDEX','state','retrospective'])await atomicWrite(this.root,`workspaces/${workspaceId}/collections/${collectionId}/${n}.md`,`# ${n}\n`);});return collection; }
@@ -230,6 +248,11 @@ export class Vault {
   /** Readable journal records with sequence greater than `sequence`, in order. Cost is proportional to the new records, not the journal. */
   async eventsSince(sequence:number):Promise<CommitEvent[]> {await this.refreshJournal();const tail=this.journalCache!.events.slice(Math.max(0,sequence));const result:CommitEvent[]=[];const canRead=this.readMemo();for(const e of tail)if(await canRead(e.scope))result.push(e);return result;}
   async events():Promise<CommitEvent[]> { const result:CommitEvent[]=[];const canRead=this.readMemo();for(const e of await this.rawEvents())if(await canRead(e.scope))result.push(e);return result; }
+  /** Internal replication collision check; reveals only a boolean and requires the replication capability. */
+  async replicationIdentityUsed(objectId:string, revisionId:string, capability:object):Promise<boolean>{if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();return(await this.rawEvents()).some(event=>event.objectId===objectId||event.revisionId===revisionId);}
+  async replicationRevisionIdUsed(revisionId:string, capability:object):Promise<boolean>{if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();return(await this.rawEvents()).some(event=>event.revisionId===revisionId);}
+  async replicationEvents(capability:object):Promise<CommitEvent[]>{if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();return(await this.rawEvents()).slice();}
+  async replicationScopeVersion(scope:Scope,actor:ActorContext,capability:object):Promise<string>{if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();const grants=scope.type==='workspace'?await this.readJSON<Workspace>(`workspaces/${validId(scope.workspaceId)}/.mdb/workspace.json`).then(workspace=>workspace.grants[actor.actorId]??[]):[];return createHash('sha256').update(JSON.stringify([actor.actorId,actor.permissions.slice().sort(),scopeKey(scope),grants.slice().sort()])).digest('hex').slice(0,24);}
   /** Revisions are immutable, so parsed documents are cached by object/revision (bounded). Callers must treat results as read-only; visibility, purge and ACL are always decided from the journal before a cached document is used, and purge evicts. */
   private revisionCache=new Map<string,Document>();private revisionCacheChars=0;
   private cacheRevision(key:string,doc:Document):void{this.revisionCache.set(key,doc);this.revisionCacheChars+=doc.body.length+256;while(this.revisionCache.size>20000||this.revisionCacheChars>32_000_000){const oldest=this.revisionCache.keys().next().value as string;const gone=this.revisionCache.get(oldest)!;this.revisionCache.delete(oldest);this.revisionCacheChars-=gone.body.length+256;}}
@@ -303,23 +326,102 @@ export class Vault {
   }
   async get(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.get', async () => this.visible(await this.rawDocument(objectId,revisionId))); }
   async listDocuments(options:{includeHistory?:boolean;scopes?:Scope[];includeUnresolvedReferences?:boolean}={}):Promise<Document[]> {const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));const candidates=options.includeHistory?events: [...new Map(events.map(e=>[e.objectId,e])).values()],canRead=this.readMemo(),readable:CommitEvent[]=[];for(const e of candidates){if(purged.has(e.objectId)||e.operation==='purge'||!(await canRead(e.scope)))continue;if(options.scopes&&!options.scopes.some(s=>s.type===e.scope.type&&(s.type==='global'?e.scope.type==='global'&&s.area===e.scope.area:e.scope.type==='workspace'&&s.workspaceId===e.scope.workspaceId&&(!s.collectionId||e.scope.collectionId===s.collectionId))))continue;readable.push(e);}const result:Document[]=[];for(let at=0;at<readable.length;at+=48){const batch=readable.slice(at,at+48),documents=await this.documentsForEvents(batch);for(let i=0;i<batch.length;i++){const d=documents[i]!;if(d.status!=='deleted'||options.includeHistory)try{result.push(await this.visible(d,options.includeUnresolvedReferences));}catch(error){if(!(error instanceof MDBError)||error.code!=='NOT_FOUND_OR_FORBIDDEN')throw error;}}}return result;}
-  private async commit(input:PutInput,previous?:Document,operation='put',idempotencyPayloadHash?:string):Promise<Document> {
+  private async commit(input:PutInput,previous?:Document,operation='put',idempotencyPayloadHash?:string,replication?:{capability:object;fork:NonNullable<CommitEvent['replicatedFork']>}):Promise<Document> {
+    if(replication&&replication.capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();
     validateInput(input);if(input.metadata?.profileRole)this.requireOwner();await this.requireAccess(input.scope,'write');const events=await this.repairJournal();await this.reconcileProjectionTail(events);this.options.fault?.('commit.before_revision');
     const payload = { ...input, idempotencyKey: undefined };
     const replayHash = idempotencyPayloadHash ?? payloadHash(operation, payload);
     if(input.idempotencyKey){const prior=events.find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(input.scope));if(prior){if(prior.operation!==operation||prior.idempotencyActorId!==this.actor.actorId||previous&&prior.objectId!==previous.id||(operation!=='ingest'&&prior.idempotencyPayloadHash!==replayHash))throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}
-    if(previous){const latest=events.findLast(e=>e.objectId===previous.id);if(latest?.revisionId!==previous.revisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');}
+    if(previous&&!replication){const latest=events.findLast(e=>e.objectId===previous.id);if(latest?.revisionId!==previous.revisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');}
     const now=this.now().toISOString();const objectId=previous?.id??this.newId('obj');const revisionId=this.newId('rev');const doc:Document={id:objectId,revisionId,revisionNumber:(previous?.revisionNumber??0)+1,...(previous?{previousRevisionId:previous.revisionId}:{}),scope:input.scope,kind:input.kind,title:input.title,body:input.body,tags:input.tags??[],links:input.links??[],evidence:input.evidence??[],status:input.status??'active',createdAt:previous?.createdAt??now,updatedAt:now,createdBy:previous?.createdBy??this.actor.actorId,metadata:input.metadata??{},path:'',uri:documentUri(objectId,input.scope)};doc.path=viewPath(doc);if(!previous && events.some(e=>e.path===doc.path&&e.operation!=='purge'))throw new MDBError('CONFLICT','Named profile already exists; patch its current revision');
-    const text=serializeDocument(doc);await this.assertMutationCapacity(Buffer.byteLength(text) + 4096);await this.store.putImmutable(`.mdb/objects/${objectId}/revs/${revisionId}.md`,Buffer.from(text));this.options.fault?.('after_revision');this.options.fault?.('after_revision_write');this.options.fault?.('revision.after_dirsync');
-    const event:CommitEvent={sequence:events.length+1,transactionId:this.newId('tx'),objectId,revisionId,...(previous?{previousRevisionId:previous.revisionId}:{}),path:doc.path,scope:doc.scope,operation,timestamp:now,revisionSha256:createHash('sha256').update(text).digest('hex'),...(input.idempotencyKey?{idempotencyKey:input.idempotencyKey,idempotencyPayloadHash:replayHash,idempotencyActorId:this.actor.actorId}:{})};
-    this.options.fault?.('journal.before_append');const committedEvent = await this.appendEvent(event);/* commit point: durable append or conditional S3 head publication */this.options.fault?.('after_journal');this.options.fault?.('after_journal_append');this.options.fault?.('before_view');this.options.fault?.('before_view_update');
-    /* The commit point has passed. Head and view are rebuildable projections of the journal and the immutable revision: written atomically but NOT fsynced here; flushProjections() and tail reconciliation make them durable or repair them (see verification/durability/commit-protocol-adr.md). */this.options.fault?.('head.before_replace');await atomicWriteVolatile(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.noteProjections([doc.path]);/* only the view is flushed: nothing ever reads a head file, recover() and tail reconciliation rewrite it, so it never needs to be durable */this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');return doc;
+    const text=serializeDocument(doc);await this.options.beforeCommit?.(doc,operation);await this.assertMutationCapacity(Buffer.byteLength(text) + 4096);await this.store.putImmutable(`.mdb/objects/${objectId}/revs/${revisionId}.md`,Buffer.from(text));killAtBoundary('local.after_revision_write');this.options.fault?.('after_revision');this.options.fault?.('after_revision_write');this.options.fault?.('revision.after_dirsync');
+    const event:CommitEvent={sequence:events.length+1,transactionId:this.newId('tx'),objectId,revisionId,...(previous?{previousRevisionId:previous.revisionId}:{}),path:doc.path,scope:doc.scope,operation,timestamp:now,revisionSha256:createHash('sha256').update(text).digest('hex'),...(replication?{replicatedFork:replication.fork}:{}),...(input.idempotencyKey?{idempotencyKey:input.idempotencyKey,idempotencyPayloadHash:replayHash,idempotencyActorId:this.actor.actorId}:{})};
+    this.options.fault?.('journal.before_append');const committedEvent = await this.appendEvent(event);killAtBoundary('local.after_journal_append');/* commit point: durable append or conditional S3 head publication */this.options.fault?.('after_journal');this.options.fault?.('after_journal_append');this.options.fault?.('before_view');this.options.fault?.('before_view_update');
+    /* The commit point has passed. Head and view are rebuildable projections of the journal: flushProjections() and recovery repair them. */this.options.fault?.('head.before_replace');await atomicWriteVolatile(this.root,`.mdb/heads/${objectId}.json`,JSON.stringify(committedEvent),this.options.fault);this.options.fault?.('view.before_replace');await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.noteProjections([doc.path]);this.options.fault?.('view.after_replace');this.options.fault?.('commit.before_ack');await this.options.onCommit?.(doc,committedEvent);return doc;
   }
   private async assertMutationCapacity(estimatedGrowthBytes: number): Promise<void> {
     if (this.remoteJournal()) return; // remote backends have their own capacity and acknowledgement contract
     await assertDurableWriteCapacity(this.root, estimatedGrowthBytes, process.env, this.options.storageAvailableBytes ? await this.options.storageAvailableBytes() : undefined);
   }
   async put(input:PutInput):Promise<Document> { return this.visible(await withVaultLock(this.root,()=>this.commit(input))); }
+  /** Internal replica import. Preserves the validated immutable bytes and ids; not exposed by CLI, MCP or SDK. */
+  async installReplicatedRevision(bytes: Uint8Array, event: CommitEvent, capability: object): Promise<void> {
+    if (capability !== REPLICATION_INSTALL_CAPABILITY) throw new MDBError('NOT_FOUND_OR_FORBIDDEN','Replica capability required');
+    const text = Buffer.from(bytes).toString('utf8'), doc = parseDocument(text);
+    if (doc.id !== event.objectId || doc.revisionId !== event.revisionId || scopeKey(doc.scope) !== scopeKey(event.scope) ) throw new MDBError('INVALID_INPUT','Replicated revision and event disagree');
+    if (!(await this.canAccess(event.scope,'write'))) throw inaccessible();
+    await withVaultLock(this.root, async () => {
+      const events = await this.repairJournal();
+      const current = events.findLast(e => e.objectId === event.objectId);
+      if (current?.revisionId === event.revisionId) return;
+      if ((current?.revisionId ?? null) !== (event.previousRevisionId ?? null)) throw new MDBError('CONFLICT','Replica parent is not current');
+      killAtBoundary('install_remote.before_revision_write');await this.store.putImmutable(`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`, Buffer.from(bytes));killAtBoundary('install_remote.after_revision_before_journal');
+      const imported: CommitEvent = { ...event, sequence: events.length + 1, operation: 'replica_import', revisionSha256: createHash('sha256').update(bytes).digest('hex') };
+      await this.appendEvent(imported);killAtBoundary('install_remote.after_journal_before_cursor');
+      await atomicWriteVolatile(this.root,`.mdb/heads/${doc.id}.json`,JSON.stringify(imported),this.options.fault);
+      await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);
+      this.noteProjections([doc.path]);
+    });
+  }
+  /** Install the server side of a recorded replica conflict while retaining the local candidate revision. */
+  async installReplicaConflictRevision(bytes:Uint8Array,event:CommitEvent,capability:object):Promise<void>{
+    if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();const text=Buffer.from(bytes).toString('utf8'),doc=parseDocument(text);
+    if(doc.id!==event.objectId||doc.revisionId!==event.revisionId||scopeKey(doc.scope)!==scopeKey(event.scope))throw new MDBError('INVALID_INPUT','Conflict revision and event disagree');
+    if(!(await this.canAccess(event.scope,'write')))throw inaccessible();
+    await withVaultLock(this.root,async()=>{const events=await this.repairJournal(),prior=events.find(item=>item.objectId===event.objectId&&item.revisionId===event.revisionId);if(prior){const existing=Buffer.from(await this.store.read(`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`));if(!existing.equals(Buffer.from(bytes)))throw new MDBError('CONFLICT','Revision ID collision');return;}
+      killAtBoundary('fork_install.before_conflict_record');await this.store.putImmutable(`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`,Buffer.from(bytes));const imported={...event,sequence:events.length+1,operation:'replica_import',revisionSha256:createHash('sha256').update(bytes).digest('hex')};await this.appendEvent(imported);killAtBoundary('fork_install.after_conflict_record');await atomicWriteVolatile(this.root,`.mdb/heads/${doc.id}.json`,JSON.stringify(imported),this.options.fault);await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.evictRevisions(doc.id);this.noteProjections([doc.path]);
+    });
+  }
+  /** Install an authoritative branch when a local provisional child already diverged from its parent. */
+  async installReplicatedFork(bytes:Uint8Array,event:CommitEvent,baseRevisionId:string,candidateRevisionIds:string[],capability:object):Promise<void>{
+    if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();
+    if(!candidateRevisionIds.length||candidateRevisionIds.length>100||candidateRevisionIds.includes(event.revisionId))throw new MDBError('INVALID_INPUT','Invalid replicated fork candidates');
+    const raw=Buffer.from(bytes),text=raw.toString('utf8'),doc=parseDocument(text);
+    if(doc.id!==event.objectId||doc.revisionId!==event.revisionId||scopeKey(doc.scope)!==scopeKey(event.scope)||(event.previousRevisionId??null)!==baseRevisionId)throw new MDBError('INVALID_INPUT','Replicated fork and event disagree');
+    if(!(await this.canAccess(event.scope,'write')))throw inaccessible();
+    await withVaultLock(this.root,async()=>{const events=await this.repairJournal(),current=events.findLast(e=>e.objectId===event.objectId);if(current?.revisionId===event.revisionId)return;
+      const base=events.find(e=>e.objectId===event.objectId&&e.revisionId===baseRevisionId);if(!base)throw new MDBError('CONFLICT','Fork base revision is missing');
+      const candidates=candidateRevisionIds.map(id=>events.find(e=>e.objectId===event.objectId&&e.revisionId===id));
+      if(candidates.some((candidate,index)=>!candidate||(candidate.previousRevisionId??null)!==(index?candidateRevisionIds[index-1]:baseRevisionId)))throw new MDBError('CONFLICT','Fork candidate chain is invalid');
+      if((current?.revisionId??null)!==candidateRevisionIds.at(-1))throw new MDBError('CONFLICT','Fork candidate is not the current local head');
+      killAtBoundary('fork_install.before_conflict_record');await this.store.putImmutable(`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`,raw);
+      const imported:CommitEvent={...event,sequence:events.length+1,operation:'replica_import',replicatedFork:{baseRevisionId,candidateRevisionIds:[...candidateRevisionIds]},revisionSha256:createHash('sha256').update(raw).digest('hex')};
+      await this.appendEvent(imported);killAtBoundary('fork_install.after_conflict_record');await atomicWriteVolatile(this.root,`.mdb/heads/${doc.id}.json`,JSON.stringify(imported),this.options.fault);await atomicWriteVolatile(this.root,doc.path,text,this.options.fault);this.evictRevisions(doc.id);this.noteProjections([doc.path]);
+    });
+  }
+  /** Create a merge revision on the pulled server head while retaining a local candidate branch. */
+  async replicaResolveConflict(input:{objectId:string;serverHeadId:string;candidateRevisionIds:string[];baseRevisionId:string;title:string;body:string},capability:object):Promise<Document>{
+    if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();if(!input.candidateRevisionIds.length)throw new MDBError('INVALID_INPUT','Conflict resolution requires a candidate');
+    return this.visible(await withVaultLock(this.root,async()=>{const events=await this.repairJournal(),base=await this.rawDocument(input.objectId,input.serverHeadId),current=events.findLast(event=>event.objectId===input.objectId);if(!current||current.revisionId===input.serverHeadId)throw new MDBError('CONFLICT','Local candidate branch is not current');
+      const byId=new Map(events.filter(event=>event.objectId===input.objectId).map(event=>[event.revisionId,event]));for(const id of input.candidateRevisionIds)if(!byId.has(id))throw new MDBError('CONFLICT','Conflict candidate revision is missing');
+      const prior=byId.get(input.candidateRevisionIds.at(-1)!);if(prior?.revisionId!==current.revisionId)throw new MDBError('CONFLICT','Conflict candidate is not the local head');
+      const resolvedFrom=[...input.candidateRevisionIds,input.serverHeadId];return this.commit({scope:base.scope,kind:base.kind,title:input.title,body:input.body,tags:base.tags,links:base.links,evidence:base.evidence,status:base.status,metadata:{...base.metadata,resolvedFrom}},base,'replica_resolution',undefined,{capability,fork:{baseRevisionId:input.baseRevisionId,candidateRevisionIds:[...input.candidateRevisionIds]}});
+    }));
+  }
+  /** Reconcile only a locally committed replica_push after the server accepts it. */
+  async reconcileReplicaRevision(event: CommitEvent, bytes: Uint8Array, capability: object): Promise<void> {
+    if(capability!==REPLICATION_INSTALL_CAPABILITY)throw inaccessible();
+    const incoming=parseDocument(Buffer.from(bytes).toString('utf8'));
+    if(incoming.id!==event.objectId||incoming.revisionId!==event.revisionId||scopeKey(incoming.scope)!==scopeKey(event.scope))throw new MDBError('INVALID_INPUT','Authoritative revision and event disagree');
+    await withVaultLock(this.root,async()=>{
+      const events=await this.rawEvents(),index=events.findIndex(item=>item.objectId===event.objectId&&item.revisionId===event.revisionId&&!['replica_import','replica_push','purge','delete'].includes(item.operation));
+      if(index<0)throw new MDBError('NOT_FOUND_OR_FORBIDDEN','Accepted provisional revision not found');
+      const current=events[index]!,oldBytes=Buffer.from(await this.store.read(`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`)),old=parseDocument(oldBytes.toString('utf8'));
+      const stable=(doc:Document)=>{const{createdBy,createdAt,updatedAt,...rest}=doc;return rest;};
+      if(JSON.stringify(stable(old))!==JSON.stringify(stable(incoming)))throw new MDBError('CONFLICT','Authoritative revision changed client-owned fields');
+      const digest=createHash('sha256').update(bytes).digest('hex');
+      if(oldBytes.equals(Buffer.from(bytes))&&current.revisionSha256===digest){await atomicWriteVolatile(this.root,`.mdb/heads/${event.objectId}.json`,JSON.stringify(current),this.options.fault);await atomicWriteVolatile(this.root,incoming.path,Buffer.from(bytes).toString('utf8'),this.options.fault);return;}
+      this.options.fault?.('replica_reconcile.before_replace');
+      await atomicWrite(this.root,`.mdb/objects/${event.objectId}/revs/${event.revisionId}.md`,bytes,this.options.fault);
+      this.evictRevisions(event.objectId);
+      const updated={...current,revisionSha256:digest};events[index]=updated;
+      await atomicWrite(this.root,'.mdb/events/commits.jsonl',events.map(item=>JSON.stringify(item)).join('\n')+'\n',this.options.fault);
+      this.journalCache=undefined;
+      this.options.fault?.('replica_reconcile.after_replace');
+      await atomicWriteVolatile(this.root,`.mdb/heads/${event.objectId}.json`,JSON.stringify(updated),this.options.fault);
+      await atomicWriteVolatile(this.root,incoming.path,Buffer.from(bytes).toString('utf8'),this.options.fault);
+    });
+  }
   async patch(input:PatchInput):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const previous=await this.rawDocument(input.objectId);await this.requireAccess(previous.scope,'write');if(previous.kind==='source')throw new MDBError('INVALID_INPUT','Source manifests are immutable; import a new source');if(input.metadataPatch&&Object.keys(input.metadataPatch).some(k=>k.startsWith('_')))throw new MDBError('INVALID_INPUT','Protected metadata cannot be patched');if(input.metadataRemove!==undefined&&(!Array.isArray(input.metadataRemove)||input.metadataRemove.length>40||input.metadataRemove.some(k=>typeof k!=='string'||!k||k.startsWith('_'))))throw new MDBError('INVALID_INPUT','metadataRemove must list up to 40 unprotected metadata keys');const patch={...input,idempotencyKey:undefined};const replayHash=payloadHash('patch',patch);if(input.idempotencyKey){const prior=(await this.rawEvents()).find(e=>e.idempotencyKey===input.idempotencyKey&&scopeKey(e.scope)===scopeKey(previous.scope));if(prior){if(prior.idempotencyPayloadHash!==replayHash||prior.idempotencyActorId!==this.actor.actorId||prior.operation!=='patch'||prior.objectId!==previous.id)throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(prior.objectId,prior.revisionId);}}if(previous.revisionId!==input.expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({scope:previous.scope,kind:previous.kind,title:input.title??previous.title,body:input.body??previous.body,tags:input.tags??previous.tags,links:input.links??previous.links,evidence:input.evidence??previous.evidence,status:input.status??previous.status,metadata:Object.fromEntries(Object.entries({...previous.metadata,...input.metadataPatch}).filter(([k])=>!input.metadataRemove?.includes(k))),idempotencyKey:input.idempotencyKey},previous,'patch',replayHash);}));}
   async delete(objectId:string,expectedRevisionId:string,idempotencyKey?:string):Promise<Document> {return this.visible(await withVaultLock(this.root,async()=>{const d=await this.rawDocument(objectId);await this.requireAccess(d.scope,'write');if(idempotencyKey){const prior=(await this.rawEvents()).find(e=>e.idempotencyKey===idempotencyKey&&e.operation==='delete'&&e.objectId===objectId);if(prior){if(prior.idempotencyActorId!==this.actor.actorId||prior.previousRevisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Idempotency key was already used for a different operation');return this.rawDocument(objectId,prior.revisionId);}}if(d.revisionId!==expectedRevisionId)throw new MDBError('CONFLICT','Expected revision is no longer current');return this.commit({...d,body:'',status:'deleted',...(idempotencyKey?{idempotencyKey}:{})},d,'delete');}));}
   async history(objectId:string):Promise<Document[]> {await this.rawDocument(objectId);const result:Document[]=[];for(const e of await this.rawEvents())if(e.objectId===objectId)result.push(await this.get(objectId,e.revisionId));return result;}
@@ -388,8 +490,8 @@ export class Vault {
     }
   }
   private async findTemps(directory:string):Promise<string[]> {let entries:string[];try{entries=await fs.readdir(await safePath(this.root,directory));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT'||(e as NodeJS.ErrnoException).code==='ENOTDIR')return [];throw e;}return entries.filter(name=>/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(name)).map(name=>`${directory}/${name}`);}
-  async recover():Promise<{committed:number;repaired:number;orphans:number;tempRemoved:number}> {
-    this.requireOwner();
+  async recover(capability?:object):Promise<{committed:number;repaired:number;orphans:number;tempRemoved:number}> {
+    if(capability!==REPLICATION_INSTALL_CAPABILITY)this.requireOwner();
     // Journal repair and purge completion are serialized. The potentially large
     // verification pass is read-only and runs outside the global writer lock.
     let events=await withVaultLock(this.root,async()=>{let current=await this.repairJournal();for(const event of current)if(event.operation==='purge')await this.finishPurge(event.objectId);return this.rawEvents();});
@@ -486,7 +588,7 @@ export class Vault {
       const removed=await this.finishPurge(objectId);return{purged:objectId,removed,limitations:['External backups and future replicas cannot be erased by local purge.','Generated navigation is cleared and requires rebuilding.']};
     });
   }
-  async verify():Promise<{ok:boolean;issues:string[];objects:number}> {this.requireOwner();const issues:string[]=[];let objects=0;try{const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));for(const e of events){if(purged.has(e.objectId))continue;objects++;try{const revisionBytes=Buffer.from(await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`));if(e.revisionSha256&&createHash('sha256').update(revisionBytes).digest('hex')!==e.revisionSha256)issues.push(`Revision content hash mismatch: ${e.objectId}/${e.revisionId}`);const d=parseDocument(revisionBytes.toString('utf8'));if(d.id!==e.objectId||d.revisionId!==e.revisionId||scopeKey(d.scope)!==scopeKey(e.scope))issues.push(`Journal mismatch: ${e.objectId}`);if(d.kind==='source'&&typeof d.metadata.originalPath==='string'){const b=await this.store.read(d.metadata.originalPath);if(createHash('sha256').update(b).digest('hex')!==d.metadata.sha256)issues.push(`Source hash mismatch: ${e.objectId}`);}}catch{issues.push(`Missing or invalid revision: ${e.objectId}`);}}}catch{issues.push('Invalid journal');}return{ok:issues.length===0,issues,objects};}
+  async verify(capability?:object):Promise<{ok:boolean;issues:string[];objects:number}> {if(capability!==REPLICATION_INSTALL_CAPABILITY)this.requireOwner();const issues:string[]=[];let objects=0;try{const events=await this.rawEvents();const purged=new Set(events.filter(e=>e.operation==='purge').map(e=>e.objectId));for(const e of events){if(purged.has(e.objectId))continue;objects++;try{const revisionBytes=Buffer.from(await this.store.read(`.mdb/objects/${e.objectId}/revs/${e.revisionId}.md`));if(e.revisionSha256&&createHash('sha256').update(revisionBytes).digest('hex')!==e.revisionSha256)issues.push(`Revision content hash mismatch: ${e.objectId}/${e.revisionId}`);const d=parseDocument(revisionBytes.toString('utf8'));if(d.id!==e.objectId||d.revisionId!==e.revisionId||scopeKey(d.scope)!==scopeKey(e.scope))issues.push(`Journal mismatch: ${e.objectId}`);if(e.replicatedFork){const fork=e.replicatedFork,hasBase=fork.baseRevisionId==='',base=hasBase?undefined:events.find(x=>x.objectId===e.objectId&&x.revisionId===fork.baseRevisionId),candidates=fork.candidateRevisionIds.map(id=>events.find(x=>x.objectId===e.objectId&&x.revisionId===id)),expectedBase=fork.baseRevisionId||null,resolution=e.operation==='replica_resolution'&&Array.isArray(d.metadata.resolvedFrom)&&fork.candidateRevisionIds.every(id=>(d.metadata.resolvedFrom as unknown[]).includes(id))&&(d.metadata.resolvedFrom as unknown[]).includes(e.previousRevisionId),validCandidates=candidates.every((candidate,index)=>candidate&&((index>0&&(candidate.previousRevisionId??null)===fork.candidateRevisionIds[index-1])||(index===0&&((candidate.previousRevisionId??null)===expectedBase||(resolution&&candidate.revisionId===expectedBase)))));if(!(e.operation==='replica_import'&&e.previousRevisionId===expectedBase)&&!resolution||(!hasBase&&!base)||!fork.candidateRevisionIds.length||!validCandidates||!candidates.some(candidate=>candidate!.sequence<e.sequence))issues.push(`Invalid replicated fork: ${e.objectId}/${e.revisionId}`);}else if(e.operation==='replicatedFork')issues.push(`Unrecorded replicated fork: ${e.objectId}/${e.revisionId}`);if(d.kind==='source'&&typeof d.metadata.originalPath==='string'){try{const b=await this.store.read(d.metadata.originalPath);if(createHash('sha256').update(b).digest('hex')!==d.metadata.sha256)issues.push(`Source hash mismatch: ${e.objectId}`);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT'||!(await fs.access(path.resolve(this.root,'..','.replica/device.json')).then(()=>true,()=>false)))issues.push(`Source original missing: ${e.objectId}`);}}}catch{issues.push(`Missing or invalid revision: ${e.objectId}`);}}}catch{issues.push('Invalid journal');}return{ok:issues.length===0,issues,objects};}
   watch(options:{intervalMs?:number;onError?:(error:unknown)=>void}={}):{close():Promise<void>;watcherAvailable:boolean} {
     this.requireOwner();let closed=false,running=false;const intervalMs=Math.max(50,options.intervalMs??5000);
     const reconcile=async()=>{if(closed||running)return;running=true;try{await this.reconcile();}catch(error){options.onError?.(error);}finally{running=false;}};

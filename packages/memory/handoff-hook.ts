@@ -50,7 +50,8 @@ export async function runHandoffHook(options: { host: string; stdin: string; pro
     if (!used.some(isWork)) return skip('no files or Engram records were written in this session', sessionId);
     if (used.some(call => /engram_handoff_write/.test(call.name))) return skip('the session already wrote a handoff', sessionId);
     const scope = { type: 'workspace' as const, workspaceId: found.binding.workspaceId }; let exists = false;
-    if (found.binding.serverUrl) {
+    if(found.binding.mode==='replica'&&found.binding.replicaId){const{openReplica}=await import('../replication/client.js');const{store}=await openReplica(found.binding.replicaId);exists=!!(await store.vault.byIdempotencyKey(`handoff:${sessionId}`,scope));}
+    else if (found.binding.serverUrl) {
       const token = found.binding.credentialRef ? env[found.binding.credentialRef] : undefined; if (!token) return skip('no credential available to check for an existing handoff', sessionId);
       try { const s = await openRemoteSession({ url: found.binding.serverUrl, token, workspaceId: found.binding.workspaceId, timeoutMs: options.timeoutMs ?? 1500 }); exists = !!((await s.call('engram_handoff_status', { scope, sessionId })).value as { exists?: boolean } | undefined)?.exists; }
       catch (error) { return skip(error instanceof RemoteError ? error.message : 'server unreachable; no handoff requested', sessionId); }

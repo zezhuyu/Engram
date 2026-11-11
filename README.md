@@ -69,6 +69,8 @@ The dashboard also provides a guided Anthropic MCP Tunnels research preview for 
 
 Run the client outbox delivery watcher persistently on macOS or Linux with `mdb service install`; see [client daemon setup](docs/client-daemon.md) for secure token-file configuration, lifecycle commands, and the macOS server-version menu bar app.
 
+To keep selected project workspaces available offline on a Client machine, use `mdb init --project --mode replica --workspace ID --server URL --token-file FILE`, then `mdb service install`. The project writes to its local replica while `engram-remote` remains available for uncached authorized areas. Replicas hold readable workspace content on disk; see [replica setup](docs/remote-client-setup.md) and [replication security](docs/security.md).
+
 After building, import the SDK from `./dist/packages/sdk/index.js` (or `engram-mdb` when installed):
 
 ```js

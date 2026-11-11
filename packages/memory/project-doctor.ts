@@ -14,8 +14,8 @@ const INSTRUCTION_FILE: Record<BindingHost, string> = { 'claude-code': 'CLAUDE.m
 const cap = (status: FeatureStatus, detail: string): Capability => ({ status, detail });
 export interface HostReport { instructions: Capability; mcpConfig: Capability; capture: Capability; sessionContext: Capability }
 export interface ProjectDoctorReport {
-  projectDir: string; binding: { present: boolean; trusted?: boolean; workspaceId?: string; hosts?: string[]; serverUrl?: string; credentialRef?: string; tokenAvailable?: boolean; registrationId?: string; error?: string };
-  hosts: Record<string, HostReport>; features: { capture: Capability; context: Capability; notes: Capability; remote: Capability; offline: Capability; sessionContext: Capability; fileSync: Capability };
+  projectDir: string; binding: { present: boolean; trusted?: boolean; workspaceId?: string; hosts?: string[]; serverUrl?: string; credentialRef?: string; tokenAvailable?: boolean; registrationId?: string; mode?:string; replicaId?:string; error?: string };
+  hosts: Record<string, HostReport>; features: { capture: Capability; context: Capability; notes: Capability; remote: Capability; offline: Capability; sessionContext: Capability; fileSync: Capability; replica:Capability };
   summary: Record<FeatureStatus, number>;
 }
 
@@ -47,7 +47,11 @@ async function hostReport(dir: string, host: BindingHost, binding: ProjectBindin
       const present = host === 'claude-code' ? /"engram"[\s\S]*mdb-mcp\.js/.test(text) : /\[mcp_servers\.engram\][\s\S]*mdb-mcp\.js/.test(text);
       mcpConfig = !present ? cap('INCOMPLETE', 'local mode: the agent has no tool connection to the built-in server; rerun init (or this installation has no built-in server)') : !text.includes(binding.workspaceId) ? cap('INCOMPLETE', 'the local connection is bound to a different workspace; rerun init') : cap('PASS', 'local agent connects to the built-in server over stdio (file check only)');
     }
-    else if (host === 'claude-code') {
+    else if(binding.mode==='replica'&&host==='claude-code'){
+      const config=JSON.parse(await fs.readFile(path.join(dir,'.mcp.json'),'utf8')) as {mcpServers?:Record<string,{type?:string;args?:string[]}>};const e=config.mcpServers?.engram;mcpConfig=e?.type==='stdio'&&e.args?.includes('--replica')&&e.args[e.args.indexOf('--replica')+1]===binding.replicaId&&e.args.includes(binding.workspaceId)?cap('PASS','local replica stdio entry and workspace match the binding'):cap('FAIL','replica MCP entry is missing or differs from this binding');
+    } else if(binding.mode==='replica'&&host==='codex'){
+      const toml=await fs.readFile(path.join(dir,'.codex','config.toml'),'utf8');mcpConfig=toml.includes('[mcp_servers.engram]')&&toml.includes(`"--replica", "${binding.replicaId}"`)&&toml.includes(binding.workspaceId)?cap('PASS','local replica stdio entry and workspace match the binding'):cap('FAIL','replica MCP entry is missing or differs from this binding');
+    } else if (host === 'claude-code') {
       const config = JSON.parse(await fs.readFile(path.join(dir, '.mcp.json'), 'utf8')) as { mcpServers?: { engram?: { url?: string; type?: string; command?: string; args?: string[]; env?: Record<string, string>; headers?: Record<string, string> } } }; const e = config.mcpServers?.engram;
       if (e?.type === 'stdio') mcpConfig = await proxyEntryStatus(e.command, e.args, e.env && Object.keys(e.env)[0], binding);
       else mcpConfig = !e ? cap('FAIL', '.mcp.json has no engram server') : e.url !== binding.serverUrl ? cap('FAIL', 'server URL differs from the binding') : e.headers?.['X-Engram-Workspace'] !== binding.workspaceId ? cap('INCOMPLETE', 'workspace header missing or different; rerun init') : cap('PASS', 'entry present with the bound workspace header (file check only; see remote)');
@@ -111,7 +115,7 @@ async function fileSyncFeature(dir: string, binding: ProjectBinding, settingsPat
 const include = (binding: ProjectBinding): string => binding.notesInclude.join(', ');
 export async function projectDoctor(projectDir: string, options: { settingsPaths?: Partial<Record<BindingHost, string>>; probeRemote?: boolean } = {}): Promise<ProjectDoctorReport> {
   const dir = path.resolve(projectDir); let binding: ProjectBinding;
-  const none = (error: string): ProjectDoctorReport => { const features = { capture: cap('NOT_RUN', error), context: cap('NOT_RUN', error), notes: cap('NOT_RUN', error), remote: cap('NOT_RUN', error), offline: cap('NOT_RUN', error), sessionContext: cap('NOT_RUN', error), fileSync: cap('NOT_RUN', error) }; return { projectDir: dir, binding: { present: false, error }, hosts: {}, features, summary: summarize(features) }; };
+  const none = (error: string): ProjectDoctorReport => { const features = { capture: cap('NOT_RUN', error), context: cap('NOT_RUN', error), notes: cap('NOT_RUN', error), remote: cap('NOT_RUN', error), offline: cap('NOT_RUN', error), sessionContext: cap('NOT_RUN', error), fileSync: cap('NOT_RUN', error), replica:cap('NOT_RUN',error) }; return { projectDir: dir, binding: { present: false, error }, hosts: {}, features, summary: summarize(features) }; };
   try { binding = await readBinding(dir); } catch (error) { return none((error as NodeJS.ErrnoException).code === 'ENOENT' ? `no ${BINDING_FILE}: this project is not initialized` : error instanceof Error ? error.message : String(error)); }
   const trusted = await isTrusted(dir, binding);
   const hosts: Record<string, HostReport> = {}; for (const host of binding.hosts) hosts[host] = await hostReport(dir, host, binding, options.settingsPaths?.[host] ?? projectSettingsPath(dir, host));
@@ -119,6 +123,7 @@ export async function projectDoctor(projectDir: string, options: { settingsPaths
   let remote: Capability, notes: Capability;
   if (!trusted) { remote = cap('FAIL', 'this binding is not trusted on this machine (it was not created by `mdb init` here, or it changed): hooks ignore it and no server is contacted. Run `mdb init --project` here.'); notes = cap('INCOMPLETE', 'not verified: untrusted binding'); }
   else if (!binding.serverUrl) { remote = cap('DISABLED', 'local mode'); notes = cap('PASS', 'local vault'); }
+  else if(binding.mode==='replica'){remote=cap('PASS','replicated workspace is served from the local replica; unreplicated scopes remain live remote MCP calls');notes=cap('PASS','workspace tools use the local replica');}
   else if (options.probeRemote === false) { remote = cap('NOT_RUN', 'remote probe skipped'); notes = cap('NOT_RUN', 'remote probe skipped'); }
   else if (!token) { remote = cap('INCOMPLETE', `$${binding.credentialRef} is not set in this shell`); notes = cap('INCOMPLETE', 'not verified without a token'); }
   else try {
@@ -132,14 +137,16 @@ export async function projectDoctor(projectDir: string, options: { settingsPaths
   catch (error) { offline = cap('FAIL', error instanceof Error ? error.message : String(error)); }
   const hostValues = Object.values(hosts);
   const worst = (parts: Capability[], empty: Capability): Capability => !parts.length ? empty : parts.find(p => p.status === 'FAIL') ?? parts.find(p => p.status === 'INCOMPLETE') ?? parts.find(p => p.status === 'NOT_RUN') ?? parts.find(p => p.status === 'DISABLED') ?? parts[0]!;
+  let replica:Capability=cap('DISABLED','project is not bound to a local replica');if(binding.mode==='replica'&&binding.replicaId){try{const {replicaStatus}=await import('../replication/client.js');const s=await replicaStatus(binding.replicaId);replica=cap(s.state==='synced'?'PASS':s.state==='refused'||s.state==='epoch-changed'?'FAIL':'INCOMPLETE',`daemon ${s.daemonRunning?'running':'stopped'}, state ${s.state}, pending ${s.pendingPush}, conflicts ${s.diverged}, deferred ${s.deferred}; last pull ${s.lastPullAt??'never'}, last push ${s.lastPushAt??'never'}`);}catch(error){replica=cap('FAIL',error instanceof Error?error.message:'replica status unavailable');}}
+  if(binding.mode==='replica'){offline=cap('PASS','local workspace reads and writes remain available offline');}
   const features = {
     capture: worst(hostValues.map(h => h.capture), cap('DISABLED', 'no hosts bound')),
-    context: worst(hostValues.map(h => h.instructions), cap('NOT_RUN', 'no hosts bound')),
+    context: worst(hostValues.map(h => h.instructions), cap('NOT_RUN', 'no hosts bound')), replica,
     notes, remote, offline,
     sessionContext: worst(hostValues.map(h => h.sessionContext), cap('NOT_RUN', 'no hosts bound')),
     fileSync: await fileSyncFeature(dir, binding, options.settingsPaths),
   };
-  return { projectDir: dir, binding: { present: true, trusted, workspaceId: binding.workspaceId, hosts: binding.hosts, ...(binding.serverUrl ? { serverUrl: binding.serverUrl } : {}), ...(binding.credentialRef ? { credentialRef: binding.credentialRef, tokenAvailable: !!token } : {}), ...(binding.registrationId ? { registrationId: binding.registrationId } : {}) }, hosts, features, summary: summarize(features) };
+  return { projectDir: dir, binding: { present: true, trusted, workspaceId: binding.workspaceId, hosts: binding.hosts, ...(binding.serverUrl ? { serverUrl: binding.serverUrl } : {}), ...(binding.credentialRef ? { credentialRef: binding.credentialRef, tokenAvailable: !!token } : {}), ...(binding.registrationId ? { registrationId: binding.registrationId } : {}),mode:binding.mode,...(binding.replicaId?{replicaId:binding.replicaId}:{}) }, hosts, features, summary: summarize(features) };
 }
 function summarize(features: Record<string, Capability>): Record<FeatureStatus, number> { const out: Record<FeatureStatus, number> = { PASS: 0, INCOMPLETE: 0, DISABLED: 0, FAIL: 0, NOT_RUN: 0 }; for (const f of Object.values(features)) out[f.status]++; return out; }
 

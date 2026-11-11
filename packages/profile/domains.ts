@@ -8,7 +8,8 @@ export interface DomainRecord {
   slug: string; label: string; description: string; keywords: string[]; origin: DomainOrigin;
   firstSeen: string; evidence: string[]; status: DomainStatus; mergedInto?: string; cycleId?: string;
 }
-export interface DomainRegistry { schema: 1; domains: DomainRecord[]; autoApply: boolean }
+export interface PendingDomainCandidate { proposal: { slug: string; label: string; description: string; keywords: string[] }; evidence: string[]; count: number; firstSeen: string; updatedAt: string; reason?: string }
+export interface DomainRegistry { schema: 1; domains: DomainRecord[]; autoApply: boolean; pendingDomainCandidates?: PendingDomainCandidate[] }
 const SEED_KEYWORDS: Record<string, string[]> = {
   coding: ['code', 'coding', 'program', 'software', 'repo', 'repository', 'test', 'typescript', 'python', 'rust', 'git', 'pull request', 'debug', 'refactor', 'agent', 'claude', 'codex', 'markdown', 'instructions', 'engram', 'mdb', 'memory database', 'profile'],
   investing: ['stock', 'invest', 'investment', 'portfolio', 'equity', 'shares', 'risk tolerance', 'position sizing', 'leverage', 'rebalance', 'valuation', 'growth'],
@@ -31,13 +32,37 @@ export function validateDomains(value: unknown, allowed: readonly string[] = PRO
 }
 export function parseDomains(value: string, allowed: readonly string[] = PROFILE_DOMAINS): ProfileDomain[] { return validateDomains(value.split(',').map(x => x.trim()).filter(Boolean), allowed); }
 export function activeDomains(registry: DomainRegistry): DomainRecord[] { return registry.domains.filter(d => d.status === 'active'); }
+const DOMAIN_KEYWORD_STOP_WORDS = new Set(['about', 'after', 'again', 'also', 'always', 'area', 'based', 'being', 'both', 'could', 'does', 'each', 'from', 'have', 'into', 'more', 'most', 'other', 'over', 'same', 'some', 'than', 'that', 'their', 'them', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'under', 'using', 'very', 'with', 'would', 'your', 'the', 'and', 'for', 'from', 'with', 'into', 'using']);
+/** Filter model keywords to distinctive terms that do not overlap other domains. */
+export function normalizeDiscoveredKeywords(value: unknown, ownSlug: string, registry: DomainRegistry): string[] {
+  if (!Array.isArray(value)) return [];
+  const otherTerms = new Set(activeDomains(registry).filter(domain => domain.slug !== ownSlug).flatMap(domain => domain.keywords.map(normalizeKeyword)));
+  const unique = new Set<string>();
+  for (const raw of value) {
+    if (typeof raw !== 'string') continue;
+    const keyword = normalizeKeyword(raw);
+    const tokens = keyword.split(' ').filter(token => !DOMAIN_KEYWORD_STOP_WORDS.has(token));
+    const specific = tokens.join(' ');
+    if (!specific || tokens.some(token => token.length === 1 || /^\d+$/.test(token))) continue;
+    if (specific !== ownSlug && (otherTerms.has(specific) || tokens.some(token => otherTerms.has(token)))) continue;
+    unique.add(specific);
+  }
+  return [...unique].sort((a, b) => specificity(b) - specificity(a) || b.length - a.length || a.localeCompare(b)).slice(0, 6);
+}
+function normalizeKeyword(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' '); }
+function specificity(value: string): number { return value.split(' ').length * 10 + Math.min(value.length, 30); }
 /** Conservative keyword classifier. General is used only when none of the registered domain terms match. */
 export function suggestDomains(claim: string, registry: DomainRegistry = seedRegistry()): ProfileDomain[] {
   const text = claim.toLowerCase();
-  const result = activeDomains(registry).filter(domain => domain.slug !== 'general' && domain.keywords.some(keyword => {
+  const scores = activeDomains(registry).filter(domain => domain.slug !== 'general').map(domain => ({ domain, hits: new Set(domain.keywords.filter(keyword => {
     const escaped = keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'i').test(text);
-  })).map(domain => domain.slug).slice(0, 3);
+  }).map(normalizeKeyword)).size }));
+  const legacyMatches = scores.filter(({ domain, hits }) => domain.origin !== 'discovered' && hits > 0).map(({ domain }) => domain.slug);
+  const discoveredMatches = scores.filter(({ domain, hits }) => domain.origin === 'discovered' && hits >= 2)
+    .filter(candidate => !scores.some(other => other.domain.slug !== candidate.domain.slug && other.hits > candidate.hits))
+    .map(({ domain }) => domain.slug);
+  const result = [...new Set([...legacyMatches, ...discoveredMatches])].slice(0, 3);
   return result.length ? result : ['general'];
 }
 export function normalizedDomains(value: unknown, allowed?: readonly string[]): ProfileDomain[] {
@@ -55,12 +80,14 @@ export function sanitizeDomainProposal(input: unknown, evidence: string[], regis
   try { slug = validateSlug(value.slug); } catch { return { reason: 'invalid slug' }; }
   const label = typeof value.label === 'string' ? neutralText(value.label, 40) : '';
   const description = typeof value.description === 'string' ? neutralText(value.description, 120) : '';
-  const keywords = Array.isArray(value.keywords) ? value.keywords.filter((x): x is string => typeof x === 'string').map(x => neutralText(x, 40)).filter(Boolean).slice(0, 12) : [];
-  if (!label || !description || !keywords.length || !evidence.length) return { reason: 'label, description, keywords and evidence are required' };
-  const duplicate = registry.domains.find(domain => domain.status === 'active' && (domain.slug === slug || domain.label.toLowerCase() === label.toLowerCase() || domain.keywords.some(k => keywords.some(n => n.toLowerCase() === k.toLowerCase()))));
+  const keywords = normalizeDiscoveredKeywords(Array.isArray(value.keywords) ? value.keywords.filter((x): x is string => typeof x === 'string').map(x => neutralText(x, 40)) : [], slug, registry);
+  if (!label || !description || !evidence.length) return { reason: 'label, description, keywords and evidence are required' };
+  const rawKeywords = Array.isArray(value.keywords) ? value.keywords.filter((x): x is string => typeof x === 'string').map(x => normalizeKeyword(neutralText(x, 40))) : [];
+  const duplicate = registry.domains.find(domain => domain.status === 'active' && (domain.slug === slug || domain.label.toLowerCase() === label.toLowerCase() || domain.keywords.some(k => rawKeywords.some(n => n === normalizeKeyword(k)))));
   if (duplicate) return { mergeInto: duplicate.slug, reason: 'near duplicate' };
   if (activeDomains(registry).length >= Math.min(24, limits.maxActive ?? 24)) return { reason: 'active domain cap reached' };
   if (cycleId && registry.domains.filter(domain => domain.origin === 'discovered' && domain.cycleId === cycleId).length >= Math.min(3, limits.maxPerDreamCycle ?? 3)) return { reason: 'per-cycle discovery cap reached' };
+  if (!keywords.length) return { reason: 'label, description, keywords and evidence are required' };
   return { record: { slug, label, description, keywords, origin: 'discovered', firstSeen: now, evidence: [...new Set(evidence)], status: 'active', ...(cycleId ? { cycleId } : {}) } };
 }
 function neutralText(value: string, max: number): string {

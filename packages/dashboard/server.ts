@@ -8,6 +8,13 @@ import type { Engram } from '../sdk/index.js';
 import { assets } from './assets.js';
 import { logoAssets } from './ui/logo-assets.js';
 import { createHttpCredential, listHttpCredentials, revokeHttpCredential, rotateHttpCredential } from '../mcp/credentials.js';
+import { deleteCredentialPresence, deriveClientPresenceState, listClientPresence } from '../mcp/client-presence.js';
+import { listReplicaDevices, unenrollReplicaDevice } from '../replication/devices.js';
+import { deriveReplicaPill } from './replica-view.js';
+import { replicaWorkspaceSize } from './replica-size.js';
+import { listReplicaConfigs, openReplica, initializeReplica, enrollWorkspace, unenrollWorkspace, syncReplica } from '../replication/client.js';
+import { syncOnce } from '../replication/sync.js';
+import { manageClientService } from '../cli/service.js';
 import { connectorConfig, saveConnectorConfig, testConnectorConnection, claudeWebConfig, saveClaudeWebConfig, rotateClaudeWebKey, deleteClaudeWebKey, claudeWebProbe, type ConnectorName, type HostResolver } from './connectors.js';
 import { localClaudeState, previewClaudeLocal, applyClaudeLocal } from './claude-local.js';
 import { allowedHost, allowedRemoteHost, equalToken, requestOrigin, validRequestOrigin } from './auth.js';
@@ -33,14 +40,14 @@ import { newUrlNoteJobId, parseUrlNoteDraft, readUrlNotesEnabled, runUrlNoteAgen
 import { createDashboardCredential, listDashboardCredentials, resolveDashboardCredential, revokeDashboardCredential } from './credentials.js';
 import { connectionSecret, listConnections, markConnectionSuccess, removeConnection, saveConnection } from './connections.js';
 import { isTailnetHost } from '../core/private-network.js';
-import { manageClientService } from '../cli/service.js';
 import { defaultOutboxDirectory, outboxStatus, readLog } from '../memory/outbox.js';
 import { drainOutboxNow } from '../memory/mcp-proxy.js';
 import { promises as fsPromises } from 'node:fs';
 import { parseStrictJson } from '../../scripts/lib/strict-json.js';
 import { readUserConfig } from '../memory/user-config.js';
 import { remoteCaptureSpoolStatus } from '../memory/remote-spool.js';
-import { trustFilePath } from '../core/project-trust.js';
+import { trustFilePath, bindingFingerprint } from '../core/project-trust.js';
+import { readBinding } from '../core/project-binding.js';
 import { getClientServer, previewClientServer, applyClientServer } from './client-server.js';
 import { openAIConfig, openAIStatus, saveOpenAIConfig, upsertOpenAIWorkspace, removeOpenAIWorkspace, rotateOpenAIWorkspace, controlOpenAIServices, restartOpenAIServicesIfRunning, setOpenAIByNameEnabled, setOpenAIWorkspaceWriteAccess, setOpenAIWriteEnabled, serviceStatus } from './openai-tunnel.js';
 import { anthropicTunnelStatus, saveAnthropicTunnel, generateAnthropicCertificates, controlAnthropicTunnel } from './anthropic-tunnel.js';
@@ -53,7 +60,7 @@ const BODY_LIMIT = 64 * 1024, DOCUMENT_BODY_LIMIT = 256 * 1024, ACTION_TIMEOUT_M
 const captureReachabilityCache = new Map<string, { checkedAt: number; reachable: boolean }>();
 const parsedBodies = new WeakMap<IncomingMessage, unknown>();
 type Action = { id: string; type: string; state: 'running' | 'complete' | 'failed' | 'cancelled'; startedAt: string; result?: unknown; error?: string; timer?: NodeJS.Timeout; controller: AbortController };
-export interface DashboardOptions { engram: Engram; host?: string; allowRemote?: boolean; port?: number; token?: string; idleMs?: number; actionTimeoutMs?: number; chatTimeoutMs?: number; rateLimit?: number; failedTokenLimit?: number; sessionIdleMs?: number; sessionMaxAgeMs?: number; maxSessions?: number; urlNoteEnv?: NodeJS.ProcessEnv; authLocation?: DashboardAuthLocationOptions; tlsCert?: string; tlsKey?: string; clientMode?: boolean; resolveHost?: HostResolver }
+export interface DashboardOptions { engram: Engram; host?: string; allowRemote?: boolean; port?: number; token?: string; idleMs?: number; actionTimeoutMs?: number; chatTimeoutMs?: number; rateLimit?: number; failedTokenLimit?: number; sessionIdleMs?: number; sessionMaxAgeMs?: number; maxSessions?: number; urlNoteEnv?: NodeJS.ProcessEnv; authLocation?: DashboardAuthLocationOptions; tlsCert?: string; tlsKey?: string; clientMode?: boolean; resolveHost?: HostResolver; serviceManager?: (action: 'install') => Promise<unknown> }
 export interface DashboardHandle { server: Server; host: string; port: number; token: string; close(): Promise<void> }
 const SESSION_IDLE_MS = 12 * 60 * 60_000, SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 export function dashboardEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -290,6 +297,46 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       if (!options.clientMode && path === '/api/client/status') return fail(res, 404, 'NOT_FOUND', 'Client dashboard mode is not enabled');
       if (!sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'Sign in with the local dashboard password to manage connections');
       if (!options.clientMode && (path === '/api/client/settings' || path.startsWith('/api/client/service') || path === '/api/client/outbox/drain' || path.startsWith('/api/client/server'))) return fail(res, 404, 'NOT_FOUND', 'Client dashboard mode is not enabled');
+      if (path.startsWith('/api/client/replica')) {
+        if (!options.clientMode) return fail(res, 404, 'NOT_FOUND', 'Replica dashboard routes are available only in client mode');
+        const base = undefined;
+        const configs = await listReplicaConfigs(base);
+        const parseBody = async () => { const value = await readBody(req); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid request'); return value as Record<string, unknown>; };
+        const validId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value);
+        if (req.method === 'GET' && path === '/api/client/replica') {
+          const replicas = await Promise.all(configs.map(async config => {
+            const opened = await openReplica(config.replicaId, base), status = await (await import('../replication/client.js')).replicaStatus(config.replicaId, base);
+            const statusFile = pathUtil.join(opened.store.state, 'status.json'); let daemon: any, ageMs: number | null = null;
+            try { const stat = await fsPromises.stat(statusFile); ageMs = Math.max(0, Date.now() - stat.mtimeMs); daemon = JSON.parse(await fsPromises.readFile(statusFile, 'utf8')); } catch {}
+            const alive = Number.isSafeInteger(daemon?.pid) && (() => { try { process.kill(daemon.pid, 0); return true; } catch { return false; } })();
+            const state = deriveReplicaPill({status:daemon??null,daemonRunning:alive,statusAgeMs:ageMs,now:Date.now()});
+            const redacted = (value: unknown) => String(value ?? '').replace(/Bearer\s+\S+/ig, 'Bearer [redacted]').replace(/(?:token|secret)[=: ]+\S+/ig, 'credential=[redacted]').slice(0, 300);
+            return { replicaId: config.replicaId, state, daemonRunning: alive, daemonAgeMs: ageMs, status: { ...status, serverUrl: undefined, deviceId: undefined, conflicts: status.conflicts.map((item: any) => ({ objectId: item.objectId, localRevisionId: item.localRevisionId, serverHeadId: item.serverHeadId, detectedAt: item.detectedAt, state: item.state })), lastError: redacted(daemon?.lastError), pid: daemon?.pid ?? null, startedAt: daemon?.startedAt ?? null, backoffMs: daemon?.backoffMs ?? 0, nextAttemptAt: daemon?.backoffMs ? new Date(Date.now() + daemon.backoffMs).toISOString() : null, updatedAt: daemon?.updatedAt ?? null } };
+          }));
+          const rank = ['Daemon stopped','Epoch changed','Access refused','Conflict','Cache mode (offline)','Paused','Syncing','Sync mode']; replicas.sort((a,b)=>rank.indexOf(a.state)-rank.indexOf(b.state));
+          return send(res, 200, { enabled: configs.length > 0, state: configs.length ? replicas[0]?.state : 'disabled', lastSyncAt: replicas.map(r => r.status.lastPullAt ?? r.status.lastPushAt).filter(Boolean).sort().at(-1) ?? null, replicas });
+        }
+        if (req.method === 'GET' && path === '/api/client/replica/projects') {
+          const rows = [];
+          let trustedBindings: Array<{workspaceId:string;replicaId:string;folderName:string;path:string}> = []; try { const registry=JSON.parse(await fsPromises.readFile(trustFilePath(),'utf8')); if(registry.schemaVersion===1&&Array.isArray(registry.entries)) for(const entry of registry.entries.slice(0,2000)){try{const binding=await readBinding(entry.root);if(entry.fingerprint===bindingFingerprint(binding)&&binding.mode==='replica'&&binding.replicaId)trustedBindings.push({workspaceId:binding.workspaceId,replicaId:binding.replicaId!,folderName:pathUtil.basename(entry.root),path:entry.root});}catch{if(typeof entry.root==='string'&&entry.mode==='replica'&&typeof entry.replicaId==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(entry.replicaId)&&typeof entry.workspaceId==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(entry.workspaceId)&&typeof entry.fingerprint==='string'&&/^[a-f0-9]{64}$/.test(entry.fingerprint))trustedBindings.push({workspaceId:entry.workspaceId,replicaId:entry.replicaId,folderName:pathUtil.basename(entry.root),path:entry.root});}} }catch{}
+          for (const config of configs) { const {store} = await openReplica(config.replicaId, base); const status = await (await import('../replication/client.js')).replicaStatus(config.replicaId, base); const conflicts = store.conflicts.filter(item => item.state === 'open');
+            for (const workspace of status.workspaceStatus) { const workspaceConflicts=[]; for(const item of conflicts) { const doc=await store.vault.get(item.objectId).catch(()=>undefined); if(doc?.scope.type==='workspace'&&doc.scope.workspaceId===workspace.workspaceId) workspaceConflicts.push({objectId:item.objectId,localRevisionId:item.localRevisionId,serverHeadId:item.serverHeadId,detectedAt:item.detectedAt}); } const folders=trustedBindings.filter(item=>item.workspaceId===workspace.workspaceId&&item.replicaId===config.replicaId); const folderDetails=await Promise.all(folders.map(async item=>({name:item.folderName,path:item.path,mounted:await fsPromises.access(item.path).then(()=>true,()=>false)}))); const size=await replicaWorkspaceSize(store,workspace.workspaceId); rows.push({ replicaId: config.replicaId, workspaceId: workspace.workspaceId, folders: folderDetails, mounted: folderDetails.length===0||folderDetails.some(folder=>folder.mounted), state: workspaceConflicts.length ? 'conflict' : status.state, pendingPush: workspace.pendingPush, diverged: workspace.diverged, deferred: workspace.deferred, held: workspace.held, lastPullAt: workspace.lastPullAt, lastPushAt: workspace.lastPushAt, diskSizeBytes:size.bytes, diskSizeFiles:size.files, diskSizeApproximate:size.approximate, diskQuotaBytes:store.limits.maxReplicaBytes, diskQuotaWarning:size.bytes>=store.limits.maxReplicaBytes*0.8, pendingBytes:status.quotas.pendingBytes, pendingByteQuota:store.limits.maxPendingBytes, pendingOpQuota:store.limits.maxPendingOps, openConflicts: workspaceConflicts }); }
+          }
+          return send(res, 200, { rows, profileSnapshotAt: configs.length ? (await (await import('../replication/client.js')).replicaStatus(configs[0]!.replicaId, base)).profileSnapshotAt : null });
+        }
+        if (req.method === 'GET' && path === '/api/client/replica/conflicts') {
+          const rows=[]; for (const config of configs) { const {store}=await openReplica(config.replicaId,base); for(const conflict of store.conflicts.filter(item=>item.state==='open')) { const document=await store.vault.get(conflict.objectId).catch(()=>undefined), local=await store.vault.get(conflict.objectId,conflict.localRevisionId).catch(()=>undefined); if(document&&local) { const cap=(text:string)=>({text:text.slice(0,100_000),truncated:text.length>100_000}); rows.push({replicaId:config.replicaId,objectId:conflict.objectId,localRevisionId:conflict.localRevisionId,serverHeadId:conflict.serverHeadId,detectedAt:conflict.detectedAt,title:document.title.slice(0,500),kind:document.kind,server:{title:document.title.slice(0,500),...cap(document.body)},local:{title:local.title.slice(0,500),...cap(local.body)}}); } } } return send(res,200,{rows});
+        }
+        if (req.method === 'POST') {
+          const body=await parseBody();
+          if (path === '/api/client/replica/enable') { const cfg=await localClientConfig(), url=cfg.ENGRAM_MCP_URL, tokenFile=cfg.ENGRAM_TOKEN_FILE; if(!url||!tokenFile) return fail(res,400,'REPLICA_CONFIG_REQUIRED','Configure the server URL and private token file in Client settings first'); const existing=configs[0]; const made=existing?{replicaId:existing.replicaId}:await initializeReplica({serverUrl:url,tokenFile}); const service=options.serviceManager?await options.serviceManager('install'):await manageClientService({action:'install'} as never); return send(res,existing?200:201,{enabled:true,replicaId:made.replicaId,service}); }
+          if (path === '/api/client/replica/add') { if(typeof body.workspaceId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(body.workspaceId))return fail(res,400,'INVALID_INPUT','Workspace ID is invalid'); const cfg=await localClientConfig(); const replicaId=typeof body.replicaId==='string'?body.replicaId:configs[0]?.replicaId; if(!replicaId||!validId(replicaId))return fail(res,400,'REPLICA_NOT_ENABLED','Replica sync is not enabled'); try{return send(res,200,await enrollWorkspace(replicaId,body.workspaceId,base));}catch{return fail(res,400,'WORKSPACE_UNAVAILABLE','Workspace could not be enrolled');} }
+          if (path === '/api/client/replica/sync') { const replicaId=typeof body.replicaId==='string'?body.replicaId:configs[0]?.replicaId;if(!replicaId||!validId(replicaId))return fail(res,404,'NOT_FOUND','Replica not found');return send(res,200,await syncReplica(replicaId,base)); }
+          if (path === '/api/client/replica/remove') { if(!validId(body.replicaId)||typeof body.workspaceId!=='string')return fail(res,400,'INVALID_INPUT','Replica and workspace are required');return send(res,200,await unenrollWorkspace(body.replicaId,body.workspaceId,base)); }
+          if (path === '/api/client/replica/conflicts/resolve' || path === '/api/client/replica/conflicts/discard') { if(!validId(body.replicaId)||typeof body.objectId!=='string')return fail(res,400,'INVALID_INPUT','Replica and conflict are required');const {store,transport}=await openReplica(body.replicaId,base); if(path.endsWith('/discard')) await store.discardCandidate(body.objectId); else {const conflict=store.conflicts.find(item=>item.objectId===body.objectId&&item.state==='open');if(!conflict)return fail(res,404,'NOT_FOUND','Open conflict not found');let title=typeof body.title==='string'?body.title:'',text=typeof body.text==='string'?body.text:'';if(body.choice==='server')await store.discardCandidate(body.objectId);else {if(body.choice==='mine'){const doc=await store.vault.get(body.objectId,conflict.localRevisionId);title=doc.title;text=doc.body;}if(body.choice!=='mine'&&body.choice!=='edited')return fail(res,400,'INVALID_INPUT','Resolution choice is invalid');await store.resolveConflict(body.objectId,conflict.localRevisionId,title,text);}}const sync=await syncOnce(store,transport);return send(res,200,{resolved:true,sync}); }
+        }
+        if (path.startsWith('/api/client/replica/') || path === '/api/client/replica') return fail(res,405,'METHOD_NOT_ALLOWED','Method not allowed');
+      }
       if (options.clientMode && req.method === 'GET' && path === '/api/client/status') {
         const [user, outbox, service, clientConfig] = await Promise.all([readUserConfig().catch(() => undefined), outboxStatus(defaultOutboxDirectory()).catch(() => undefined), manageClientService({ action: 'status' }).catch(() => undefined), localClientConfig().catch(() => ({} as { ENGRAM_MCP_URL?: string; ENGRAM_TOKEN_FILE?: string }))]);
         const captureUrl = user?.serverUrl ?? process.env.ENGRAM_MCP_URL ?? clientConfig.ENGRAM_MCP_URL;
@@ -416,6 +463,56 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       } catch (error) { return fail(res, 502, 'PROXY_FAILED', (error as Error).message); }
     }
     if (clientMode) return fail(res, 404, 'NOT_FOUND', 'This route is available only in server dashboard mode');
+    if (path === '/api/clients' || path === '/api/clients/revoke' || path === '/api/clients/unenroll') {
+      if (!sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'Sign in with the dashboard password to view connected clients');
+      if (!options.engram.vault.actor.permissions.includes('*')) return fail(res, 403, 'FORBIDDEN', 'Owner access is required');
+      if (req.method === 'GET' && path === '/api/clients') {
+        const query = new URL(req.url ?? '/', 'http://localhost').searchParams;
+        const limit = Math.max(1, Math.min(100, Number(query.get('limit') ?? 50) || 50));
+        const offset = Math.max(0, Math.min(100_000, Number(query.get('offset') ?? 0) || 0));
+        const [credentials, presence, replicaDevices] = await Promise.all([listHttpCredentials(options.engram.vault), listClientPresence(root), listReplicaDevices(root)]);
+        const now = Date.now(), activeCredentials = credentials.filter(item => !item.expiresAt || Date.parse(item.expiresAt) > now);
+        const rows = activeCredentials.map(credential => {
+          const clients = presence.filter(item => item.credentialId === credential.id);
+          const projected = clients.map(client => ({ ...client, ...deriveClientPresenceState(client.serverReceivedAt, now) }));
+          const expectedDigest = createHash('sha256').update(JSON.stringify({ credential, clients })).digest('hex');
+          const devices = replicaDevices.filter(device => device.credentialId === credential.id).map(device => ({ deviceId: device.deviceId, label: device.label, enrolledScopes: device.enrolledScopes.map(scope => scope.workspaceId), lastFetchAt: device.lastFetchAt }));
+          return { credential, clients: projected, replicaDevices: devices, expectedDigest };
+        });
+        return send(res, 200, { total: rows.length, offset, limit, rows: rows.slice(offset, offset + limit) });
+      }
+      if (req.method === 'POST' && path === '/api/clients/unenroll') {
+        if (!sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'A dashboard session is required');
+        if (!await verifyPassword(root, req.headers['x-engram-reauth-password'], options.authLocation)) return fail(res, 401, 'REAUTH_REQUIRED', 'Re-enter the dashboard password to unenroll this workspace');
+        let body: any; try { body = await readBody(req); } catch (error) { const e = error as Error & { status?: number; code?: string }; return fail(res, e.status ?? 400, e.code ?? 'INVALID_REQUEST', e.message); }
+        if (!body || Object.keys(body).some(key => !['credentialId','deviceId','workspaceId'].includes(key)) || typeof body.credentialId !== 'string' || !/^cred_[a-f0-9]{20}$/.test(body.credentialId) || typeof body.deviceId !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.deviceId) || typeof body.workspaceId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(body.workspaceId)) return fail(res, 400, 'INVALID_INPUT', 'Credential, device, and workspace are required');
+        const device = await unenrollReplicaDevice(root, body.credentialId, body.deviceId, body.workspaceId);
+        if (!device) return fail(res, 404, 'NOT_FOUND', 'Device enrollment not found');
+        await appendAudit(root, { at: new Date().toISOString(), key: 'clients.replica.unenroll', oldValue: { credentialId: body.credentialId, deviceId: body.deviceId, workspaceId: body.workspaceId }, newValue: { unenrolled: true }, result: 'applied' });
+        return send(res, 200, { unenrolled: true });
+      }
+      if (req.method === 'POST' && path === '/api/clients/revoke') {
+        if (!sessionAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'A dashboard session is required');
+        if (!await verifyPassword(root, req.headers['x-engram-reauth-password'], options.authLocation)) return fail(res, 401, 'REAUTH_REQUIRED', 'Re-enter the dashboard password to revoke this credential');
+        let body: any; try { body = await readBody(req); } catch (error) { const e = error as Error & { status?: number; code?: string }; return fail(res, e.status ?? 400, e.code ?? 'INVALID_REQUEST', e.message); }
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['credentialId','expectedDigest'].includes(key)) || typeof body.credentialId !== 'string' || !/^cred_[a-f0-9]{20}$/.test(body.credentialId) || typeof body.expectedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedDigest)) return fail(res, 400, 'INVALID_INPUT', 'Credential and confirmation digest are required');
+        const [credentials, presence] = await Promise.all([listHttpCredentials(options.engram.vault), listClientPresence(root)]);
+        const credential = credentials.find(item => item.id === body.credentialId && (!item.expiresAt || Date.parse(item.expiresAt) > Date.now()));
+        if (!credential) return fail(res, 404, 'NOT_FOUND', 'Active credential not found');
+        const clients = presence.filter(item => item.credentialId === credential.id);
+        const digest = createHash('sha256').update(JSON.stringify({ credential, clients })).digest('hex');
+        if (body.expectedDigest !== digest) return fail(res, 409, 'STALE_CONFIRMATION', 'Credential or connected-client details changed; review the updated list');
+        const revoked = await revokeHttpCredential(options.engram.vault, credential.id);
+        if (revoked) {
+          await deleteCredentialPresence(root, credential.id);
+          await appendAudit(root, { at: new Date().toISOString(), key: 'clients.credential.revoke', oldValue: { credentialId: credential.id, actorId: credential.actorId, permissions: credential.permissions, lastUsedAt: credential.lastUsedAt, clients: clients.map(client => ({ clientId: client.clientId, displayName: client.displayName })) }, newValue: { credentialId: credential.id, revoked: true }, result: 'applied' });
+        }
+        const [remainingCredentials, remainingPresence] = await Promise.all([listHttpCredentials(options.engram.vault), listClientPresence(root)]);
+        const remainingRows = remainingCredentials.filter(item => !item.expiresAt || Date.parse(item.expiresAt) > Date.now()).map(credential => ({ credential, clients: remainingPresence.filter(item => item.credentialId === credential.id) }));
+        return send(res, 200, { revoked, rows: remainingRows });
+      }
+      return fail(res, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+    }
     if (options.clientMode && req.method === 'GET' && path === '/api/client/mode') return send(res, 200, { clientMode: true });
     if ((path === '/api/dashboard/credentials' || /^\/api\/dashboard\/credentials\/[^/]+$/.test(path)) && !sessionAuthorized && !bearerAuthorized) return fail(res, 401, 'SESSION_REQUIRED', 'Sign in with the dashboard password to manage dashboard credentials');
     if (req.method === 'GET' && path === '/api/dashboard/credentials') return send(res, 200, await listDashboardCredentials(root));
@@ -551,6 +648,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
         }
         if (operation === 'rotate') {
           const rotated = await rotateHttpCredential(options.engram.vault, connectorCredential![1]!);
+          await deleteCredentialPresence(root, connectorCredential![1]!);
           await appendAudit(root, { at: new Date().toISOString(), key: 'connectors.credential.rotate', oldValue: null, newValue: { credentialId: connectorCredential![1], replacementId: rotated.id }, result: 'applied' });
           return send(res, 200, rotated);
         }
@@ -726,10 +824,10 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       try {
         if (!(await options.engram.vault.canAccess({ type: 'global', area: 'profile' }, 'read'))) return fail(res, 403, 'FORBIDDEN', 'Profile access is owner-only');
         const docs = await options.engram.listDocuments({ scopes: [{ type: 'global', area: 'profile' }] });
-        const items = docs.filter(d => d.kind === 'user_insight' && d.status === 'accepted' && ['preference', 'working_style'].includes(String(d.metadata.category)) && d.metadata.sensitivity !== 'sensitive').map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, domains: Array.isArray(d.metadata.domains) ? d.metadata.domains : ['general'] }));
+        const items = docs.filter(d => d.kind === 'user_insight' && d.status === 'accepted' && ['preference', 'working_style'].includes(String(d.metadata.category)) && d.metadata.sensitivity !== 'sensitive').map(d => ({ id: d.id, revisionId: d.revisionId, claim: d.body, domains: Array.isArray(d.metadata.domains) ? d.metadata.domains : ['general'], ...(typeof d.metadata.domainRejectionReason === 'string' ? { rejectedReason: d.metadata.domainRejectionReason } : {}) }));
         const { registry, revisionId } = await readDomainRegistry(options.engram.vault);
         const counts = new Map<string, number>(); for (const item of items) for (const domain of Array.isArray(item.domains) ? item.domains : ['general']) counts.set(domain, (counts.get(domain) ?? 0) + 1);
-        return send(res, 200, { domains: activeDomains(registry).map(domain => ({ ...domain, itemCount: counts.get(domain.slug) ?? 0 })), registry: registry.domains, registryRevisionId: revisionId, autoApply: registry.autoApply, items });
+        return send(res, 200, { domains: activeDomains(registry).map(domain => ({ ...domain, itemCount: counts.get(domain.slug) ?? 0 })), registry: registry.domains, pendingDomainCandidates: registry.pendingDomainCandidates ?? [], minEvidence: (await options.engram.config()).profile?.domains?.minEvidence ?? 2, registryRevisionId: revisionId, autoApply: registry.autoApply, items });
       } catch (error) { return routeError(error); }
     }
     if (req.method === 'POST' && path === '/api/profile/domains') {

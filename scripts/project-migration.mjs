@@ -7,8 +7,8 @@ import { spawnSync } from 'node:child_process';
 
 const ownDir = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(ownDir, '..');
-const valueFlags = new Set(['project-dir', 'workspace', 'hosts', 'backup-root', 'backup-dir', 'notes-include-file', 'mcp-url', 'token-env', 'size-cap', 'hash-limit-mb', 'runtime-ignore', 'node-bin', 'mdb-bin']);
-const boolFlags = new Set(['apply', 'rollback', 'file-sync-consent', 'help']);
+const valueFlags = new Set(['project-dir', 'workspace', 'hosts', 'backup-root', 'backup-dir', 'notes-include-file', 'mcp-url', 'token-env', 'size-cap', 'hash-limit-mb', 'runtime-ignore', 'node-bin', 'mdb-bin', 'domains']);
+const boolFlags = new Set(['apply', 'rollback', 'file-sync-consent', 'help', 'no-profile-in-files']);
 const args = process.argv.slice(2), flags = new Map();
 for (let i = 0; i < args.length; i++) {
   const raw = args[i];
@@ -20,7 +20,9 @@ for (let i = 0; i < args.length; i++) {
     if (key === 'runtime-ignore') flags.set(key, [...(flags.get(key) ?? []), value]); else flags.set(key, value);
   }
 }
-const usage = `Usage: node scripts/project-migration.mjs --project-dir DIR --hosts claude-code[,codex] [options]\n\nSequence: preview (default), inspect the saved report, then rerun with --apply; rollback with --rollback --backup-dir DIR.\nBackup layout: <backup-root>/<project>/<timestamp>/{targets...,SHA256SUMS,TARGETS.json,dry-run.json,integrity-manifest.json}\n\nFlags: --project-dir DIR --workspace NAME --hosts LIST --backup-root DIR --backup-dir DIR\n       --notes-include-file FILE --file-sync-consent --mcp-url URL --token-env NAME\n       --size-cap BYTES (default 64 GiB) --hash-limit-mb N (default 256 MiB/file)\n       --runtime-ignore GLOB (repeatable; adds to the documented default ignore list)\n       --node-bin PATH --mdb-bin PATH (use the installed app's runtime so project hooks do not point at a development checkout)
+const usage = `Usage: node scripts/project-migration.mjs --project-dir DIR --hosts claude-code[,codex] [options]\n\nSequence: preview (default), inspect the saved report, then rerun with --apply; rollback with --rollback --backup-dir DIR.\nBackup layout: <backup-root>/<project>/<timestamp>/{targets...,SHA256SUMS,TARGETS.json,dry-run.json,integrity-manifest.json}\n\nFlags: --project-dir DIR --workspace NAME --hosts LIST --backup-root DIR --backup-dir DIR\n       --notes-include-file FILE --file-sync-consent --mcp-url URL --token-env NAME\n       --size-cap BYTES (default 64 GiB) --hash-limit-mb N (default 256 MiB/file)\n       --runtime-ignore GLOB (repeatable; adds to the documented default ignore list)\n       --no-profile-in-files (opt out of writing the domain-filtered accepted preferences into CLAUDE.md/AGENTS.md; default is ON)
+       --domains LIST (project preference domains, set during init so the binding is trusted)
+       --node-bin PATH --mdb-bin PATH (use the installed app's runtime so project hooks do not point at a development checkout)
        --apply --rollback --help\n`;
 if (flags.has('help')) { process.stdout.write(usage); process.exit(0); }
 const val = (key, fallback) => flags.get(key) ?? fallback;
@@ -175,7 +177,7 @@ if (flags.has('rollback')) {
   await backup();
   const notesFile = val('notes-include-file');
   const include = notesFile ? (await fs.readFile(path.resolve(notesFile), 'utf8')).split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [];
-  const command = [mdbBin, 'init', '--project', '--project-dir', realA, '--workspace', workspace, '--hosts', hosts, '--no-profile-in-files'];
+  const command = [mdbBin, 'init', '--project', '--project-dir', realA, '--workspace', workspace, '--hosts', hosts, ...(flags.has('no-profile-in-files') ? ['--no-profile-in-files'] : ['--profile-in-files']), ...(val('domains') ? ['--domain', val('domains')] : [])];
   const mcpUrl = val('mcp-url'); if (mcpUrl) command.push('--mcp-url', mcpUrl, '--token-env', val('token-env', 'ENGRAM_MCP_TOKEN'));
   if (flags.has('file-sync-consent') && notesFile) {
     if (!include.length) throw new Error('The notes include-list file is empty; refusing to apply file-sync consent with default patterns');

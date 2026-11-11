@@ -14,6 +14,7 @@ import { remoteUrlAllowed } from '../core/private-network.js';
 const exec = promisify(execFile);
 const LABEL = 'dev.engram.outbox-watch';
 const DASHBOARD_LABEL = 'dev.engram.client-dashboard';
+const REPLICA_LABEL='dev.engram.replica-sync';
 type Options = { action: string; platform?: 'macos' | 'linux'; role?: 'client' | 'server'; home?: string; noteFile?: string; uid?: number; url?: string; tokenFile?: string; workspace?: string; outbox?: string; projectDir?: string; dryRun?: boolean; allowRoot?: boolean };
 function fail(message: string): never { throw new Error(message); }
 
@@ -129,6 +130,8 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
   const dashboardLog = path.join(home, 'Library/Logs/Engram/client-dashboard.log');
   const dashboardNote = path.join(home, '.config/engram/client-dashboard.txt');
   const dashboardUnitName = platform === 'macos' ? DASHBOARD_LABEL : 'engram-client-dashboard.service';
+  const replicaUnitFile=path.join(directory,platform==='macos'?`${REPLICA_LABEL}.plist`:'engram-replica-sync.service');
+  const replicaUnitName=platform==='macos'?REPLICA_LABEL:'engram-replica-sync.service';
   const domain = `gui/${uid}`;
   const call = async (bin: string, args: string[]) => {
     try { const result = await exec(bin, args, { env, timeout: 10_000 }); return { code: 0, output: `${result.stdout}${result.stderr}` }; }
@@ -136,6 +139,18 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
   };
   const systemctl = async (...args: string[]) => call('systemctl', ['--user', ...args]);
   const launchctl = async (...args: string[]) => call('launchctl', args);
+  const replicaService=async(action:'install'|'status'|'start'|'stop'|'uninstall')=>{
+    const {listReplicaConfigs}=await import('../replication/client.js');const configs=await listReplicaConfigs();
+    const status=async()=>{const installed=await fs.access(replicaUnitFile).then(()=>true,()=>false);if(platform==='linux'){const r=await systemctl('show',replicaUnitName,'--property=LoadState,ActiveState,MainPID','--no-pager');return{installed,running:/ActiveState=active/.test(r.output),loaded:/LoadState=loaded/.test(r.output),output:r.output};}const r=await launchctl('print',`${domain}/${REPLICA_LABEL}`);return{installed,running:/state\s*=\s*running/.test(r.output),loaded:r.code===0,output:r.output};};
+    if(!configs.length){if(action==='status')return{installed:false,configured:false,reason:'replica sync daemon is unavailable until mdb replica init creates a replica'};return{installed:false,configured:false,reason:'no initialized replica; replica sync service was not installed'};}
+    if(configs.length!==1)return{installed:false,configured:true,reason:'replica sync service expects one configured replica; multiple replicas are configured'};
+    const id=configs[0]!.replicaId,node=process.execPath,mdb=process.argv[1]??'mdb.js',args=[node,mdb,'replica','daemon','--id',id];const xml=(v:string)=>v.replace(/&/g,'&amp;').replace(/</g,'&lt;');const unit=platform==='macos'?`<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${REPLICA_LABEL}</string><key>ProgramArguments</key><array>${args.map(a=>`<string>${xml(a)}</string>`).join('')}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer></dict></plist>\n`:`[Unit]\nDescription=Engram replica synchronization daemon\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${args.map(shellQuote).join(' ')}\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n`;
+    if(action==='status'){const s=await status();return{...s,unitFile:replicaUnitFile,replicaId:id};}
+    if(action==='install'){await fs.mkdir(directory,{recursive:true,mode:0o700});await fs.writeFile(replicaUnitFile,unit,{mode:0o600});await fs.chmod(replicaUnitFile,0o600);if(platform==='linux'){const reload=await systemctl('daemon-reload');if(reload.code)fail(reload.output);const r=await systemctl('enable','--now',replicaUnitName);if(r.code)fail(r.output);}else{const loaded=await launchctl('print',`${domain}/${REPLICA_LABEL}`);if(loaded.code===0)await launchctl('bootout',`${domain}/${REPLICA_LABEL}`);const r=await launchctl('bootstrap',domain,replicaUnitFile);if(r.code)fail(r.output);}return{installed:true,unitFile:replicaUnitFile,replicaId:id};}
+    const s=await status();if(action==='start'){if(!s.installed)throw new Error('replica sync service is not installed');const r=platform==='linux'?await systemctl('start',replicaUnitName):s.loaded?await launchctl('kickstart','-k',`${domain}/${REPLICA_LABEL}`):await launchctl('bootstrap',domain,replicaUnitFile);if(r.code)fail(r.output);return{started:true,replicaId:id};}
+    if(action==='stop'){if(!s.installed)return{stopped:true,installed:false};const r=platform==='linux'?await systemctl('stop',replicaUnitName):await launchctl('bootout',`${domain}/${REPLICA_LABEL}`);if(r.code&&s.loaded)fail(r.output);return{stopped:true,installed:true};}
+    if(s.installed){const r=platform==='linux'?await systemctl('disable','--now',replicaUnitName):await launchctl('bootout',`${domain}/${REPLICA_LABEL}`);if(r.code&&s.loaded)fail(r.output);}await fs.rm(replicaUnitFile,{force:true});if(platform==='linux')await systemctl('daemon-reload');return{removed:true,installed:false};
+  };
   const rotateLog = async () => {
     const rotate = async (file: string, limit: number) => {
       const size = await fs.stat(file).then(s => s.size).catch(() => 0);
@@ -187,7 +202,7 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
     const stored = await fs.readFile(metadataFile, 'utf8').then(JSON.parse).catch(() => undefined) as { url?: string; tokenFile?: string } | undefined;
     const urlValue = o.url ?? stored?.url;
     if (urlValue) { try { host = new URL(urlValue).host; } catch { fail('--url must be a valid URL'); } }
-    return { ...status, serverHost: host, serverUrl: stored?.url ?? null, tokenFile: stored?.tokenFile ?? null, clientDashboard };
+    return { ...status, serverHost: host, serverUrl: stored?.url ?? null, tokenFile: stored?.tokenFile ?? null, clientDashboard, replicaSync:await replicaService('status') };
   }
   if (o.action === 'logs') {
     if (platform === 'linux') { const r = await call('journalctl', ['--user', '-u', unitName, '-n', '200', '--no-pager']); return r.output || 'No service journal entries yet.'; }
@@ -302,7 +317,7 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
         if (dashboardResult === 'unchanged' && !dashboardExisting.running) { const enabled = await systemctl('enable', '--now', dashboardUnitName); if (enabled.code) fail(enabled.output); }
       }
       else { if (!existing.loaded) { const result = await launchctl('bootstrap', domain, unitFile); if (result.code) fail(result.output); } if (dashboardResult === 'unchanged' && !dashboardExisting.loaded) { const result = await launchctl('bootstrap', domain, dashboardUnitFile); if (result.code) fail(result.output); } }
-      return { installed: true, outbox: outboxResult, dashboard: dashboardResult, clientDashboard: dashboardExisting, changed: outboxResult !== 'unchanged' || dashboardResult !== 'unchanged', unitFile, dashboardUnitFile };
+      return { installed: true, outbox: outboxResult, dashboard: dashboardResult, clientDashboard: dashboardExisting, replicaSync:await replicaService('install'), changed: outboxResult !== 'unchanged' || dashboardResult !== 'unchanged', unitFile, dashboardUnitFile };
     }
     if (dashboardExisting.installed) fail('client dashboard is already installed without its outbox service; uninstall before reinstalling both units');
     await fs.mkdir(directory, { recursive: true, mode: 0o700 }); if (logFile) { await fs.mkdir(path.dirname(logFile), { recursive: true, mode: 0o700 }); await rotateLog(); }
@@ -317,7 +332,7 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
       if (platform === 'linux') { const reload = await systemctl('daemon-reload'); if (reload.code) fail(reload.output); const enable = await systemctl('enable', '--now', unitName); if (enable.code) fail(enable.output); const dashboardEnable = await systemctl('enable', '--now', dashboardUnitName); if (dashboardEnable.code) fail(dashboardEnable.output); }
       else { const load = await launchctl('bootstrap', domain, unitFile); if (load.code) fail(load.output); const dashboardLoad = await launchctl('bootstrap', domain, dashboardUnitFile); if (dashboardLoad.code) fail(dashboardLoad.output); }
     } catch (error) { await fs.rm(unitFile, { force: true }); await fs.rm(dashboardUnitFile, { force: true }); await fs.rm(dashboardWrapper, { force: true }); if (metadataCreated) await fs.rm(metadataFile, { force: true }); if (platform === 'linux') await systemctl('daemon-reload'); throw error; }
-    return { installed: true, outbox: 'installed', dashboard: 'installed', changed: true, unitFile, dashboardUnitFile, dashboardPort: dashboard.port, serverHost: url.host };
+    return { installed: true, outbox: 'installed', dashboard: 'installed', replicaSync:await replicaService('install'), changed: true, unitFile, dashboardUnitFile, dashboardPort: dashboard.port, serverHost: url.host };
   }
   const status = await runningInfo();
   if (o.action === 'start') {
@@ -331,17 +346,17 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
     if (platform === 'linux') { const r = await systemctl('start', dashboardUnitName); if (r.code) fail(r.output); }
     else if (dashboardStatus.loaded) { const r = await launchctl('kickstart', '-k', `${domain}/${DASHBOARD_LABEL}`); if (r.code) fail(r.output); }
     else { const r = await launchctl('bootstrap', domain, dashboardUnitFile); if (r.code) fail(r.output); }
-    return { started: true, clientDashboard: dashboardStatus };
+    return { started: true, clientDashboard: dashboardStatus, replicaSync:await replicaService('start') };
   }
   if (o.action === 'stop') {
     const dashboardStatus = await dashboardRunningInfo();
-    if (!status.installed && !dashboardStatus.installed) return { stopped: true, installed: false };
+    if (!status.installed && !dashboardStatus.installed) return { stopped: true, installed: false, replicaSync:await replicaService('stop') };
     if (dashboardStatus.installed) { const r = platform === 'linux' ? await systemctl('stop', dashboardUnitName) : await launchctl('bootout', `${domain}/${DASHBOARD_LABEL}`); if (r.code && dashboardStatus.loaded) fail(r.output); }
     if (status.installed) { const r = platform === 'linux' ? await systemctl('stop', unitName) : await launchctl('bootout', `${domain}/${LABEL}`); if (r.code && status.loaded) fail(r.output); }
-    return { stopped: true, installed: status.installed || dashboardStatus.installed };
+    return { stopped: true, installed: status.installed || dashboardStatus.installed, replicaSync:await replicaService('stop') };
   }
   const dashboardStatus = await dashboardRunningInfo();
-  if (!status.installed && !dashboardStatus.installed) return { installed: false, removed: false };
+  if (!status.installed && !dashboardStatus.installed) return { installed: false, removed: false, replicaSync:await replicaService('uninstall') };
   if (platform === 'linux') {
     if (dashboardStatus.installed) { const disabled = await systemctl('disable', '--now', dashboardUnitName); if (disabled.code) fail(disabled.output); }
     if (status.installed) { const disabled = await systemctl('disable', '--now', unitName); if (disabled.code) fail(disabled.output); }
@@ -351,7 +366,7 @@ export async function manageClientService(o: Options, env: NodeJS.ProcessEnv = p
     if (dashboardStatus.loaded) { const r = await launchctl('bootout', `${domain}/${DASHBOARD_LABEL}`); if (r.code) fail(r.output); }
     if (status.loaded) { const r = await launchctl('bootout', `${domain}/${LABEL}`); if (r.code) fail(r.output); }
   }
-  await fs.rm(unitFile, { force: true }); await fs.rm(dashboardUnitFile, { force: true }); await fs.rm(dashboardWrapper, { force: true }); await fs.rm(metadataFile, { force: true }); return { installed: false, removed: true };
+  await fs.rm(unitFile, { force: true }); await fs.rm(dashboardUnitFile, { force: true }); await fs.rm(dashboardWrapper, { force: true }); await fs.rm(metadataFile, { force: true }); return { installed: false, removed: true, replicaSync:await replicaService('uninstall') };
 }
 
 export async function runClientDaemon(options: { url: string; tokenFile: string; workspace?: string; outbox?: string; projectDir?: string; logFile?: string; allowRoot?: boolean }, env: NodeJS.ProcessEnv = process.env): Promise<void> {

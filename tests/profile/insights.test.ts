@@ -196,7 +196,10 @@ test('projection recovers an interrupted supersession from the durable correctio
   await new IntelligenceEngine(w.vault).projectProfile();
   assert.equal((await w.vault.get(old.id)).status, 'superseded', 'projection restart reconciles the old status');
   const projected = await read(w.root, 'PROFILE.md'); assert.match(projected, /long detailed answers/); assert.doesNotMatch(projected, /Very short answers/);
-  assert.equal((await w.vault.history(old.id)).length, 2, 'the earlier accepted revision remains immutable and traceable');
+  const oldHistory = await w.vault.history(old.id);
+  assert.equal(oldHistory.length, 3, 'the earlier accepted revision remains immutable, with a later domain-evidence rejection revision');
+  assert.equal(oldHistory[0]?.body, old.body, 'the original claim bytes remain traceable');
+  assert.match(String((await w.vault.get(old.id)).metadata.domainRejectionReason), /approval provenance/);
   recordCase({ suite: 'profile', name: 'interrupted-supersession-projection-recovery', status: 'PASS' });
 });
 

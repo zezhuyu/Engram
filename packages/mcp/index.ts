@@ -20,6 +20,8 @@ import { createRegistration, drainSpool, enqueueEvent, eventFromHostPayload, rea
 import { FairRequestAdmission } from './http-admission.js';
 import { correctInsight, type InsightCategory } from '../intelligence/insights.js';
 import { ensurePersonalCollection, listLiveChatConversations, PREFERENCE_SCOPE, recordLiveChatTurn } from '../chat/live.js';
+import { ClientPresenceError, writeClientHeartbeat } from './client-presence.js';
+import { handleReplicaRoute } from './replica-http.js';
 
 type Schema = { type?: string; properties?: Record<string, Schema>; required?: string[]; additionalProperties?: boolean; items?: Schema; enum?: unknown[]; anyOf?: Schema[]; minimum?: number; maximum?: number };
 const string: Schema = { type: 'string' };
@@ -274,12 +276,12 @@ function allowedOrigin(origin: string | undefined, env: NodeJS.ProcessEnv): bool
     .split(',').map(item => item.trim()).filter(Boolean);
   return allowed.includes(origin);
 }
-function readHttpBody(request: IncomingMessage): Promise<unknown> {
+function readHttpBody(request: IncomingMessage, limit = MAX_HTTP_BODY): Promise<unknown> {
   return new Promise((resolveBody, reject) => {
     const declared = Number(request.headers['content-length'] ?? 0);
-    if (Number.isFinite(declared) && declared > MAX_HTTP_BODY) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
+    if (Number.isFinite(declared) && declared > limit) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
     const chunks: Buffer[] = []; let size = 0, oversized = false;
-    request.on('data', chunk => { size += chunk.length; if (size > MAX_HTTP_BODY && !oversized) { oversized = true; request.pause(); reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); } else if (!oversized) chunks.push(chunk); });
+    request.on('data', chunk => { size += chunk.length; if (size > limit && !oversized) { oversized = true; request.pause(); reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); } else if (!oversized) chunks.push(chunk); });
     request.on('end', () => {
       if (oversized) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
       try { resolveBody(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(Object.assign(new Error('Parse error'), { statusCode: 400 })); }
@@ -422,6 +424,47 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
       jsonResponse(response, 401, { error: 'Unauthorized' }, { 'WWW-Authenticate': metadataUrl ? `Bearer resource_metadata=\"${metadataUrl}\"` : 'Bearer', Connection: 'close' }); response.once('finish', () => request.socket.destroy()); return;
     }
     if (!allowedOrigin(request.headers.origin, env)) { jsonResponse(response, 403, { error: 'Origin not allowed' }); return; }
+    if (endpoint.pathname.startsWith('/replica/v1/')) {
+      const credentialId = actor.authId?.startsWith('credential:') ? actor.authId.slice('credential:'.length) : undefined;
+      if (!actor.credentialBound || !credentialId || !/^cred_[a-f0-9]{20}$/.test(credentialId)) { jsonResponse(response,403,{error:'A scoped revocable credential is required'}); return; }
+      const cancelled = new AbortController(); const cancelAdmission = () => cancelled.abort(); request.once('aborted',cancelAdmission);
+      const release = await admission.acquire(actor.actorId,cancelled.signal); request.off('aborted',cancelAdmission);
+      if (!release) { jsonResponse(response,503,{error:'Server is busy'},{'Retry-After':'1'}); return; }
+      response.once('finish',() => process.stderr.write(`replica request ${request.method ?? 'GET'} ${endpoint.pathname.startsWith('/replica/v1/blobs/')?'/replica/v1/blobs/:digest':endpoint.pathname} ${response.statusCode} credential=${credentialId}\n`));
+      try { await handleReplicaRoute(root,new Engram(root,actor).vault,actor,credentialId,request,response,endpoint,readHttpBody,jsonResponse); }
+      finally { release(); }
+      return;
+    }
+    if (endpoint.pathname === '/client/heartbeat') {
+      if (request.method !== 'POST') { jsonResponse(response, 405, { error: 'Method not allowed' }, { Allow: 'POST' }); return; }
+      if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers['content-type'] ?? '')) { jsonResponse(response, 415, { error: 'Content-Type must be application/json' }); return; }
+      const credentialId = actor.authId?.startsWith('credential:') ? actor.authId.slice('credential:'.length) : undefined;
+      const scopedCredential = !!actor.credentialBound && !!credentialId && /^cred_[a-f0-9]{20}$/.test(credentialId);
+      let body: unknown;
+      try {
+        body = await readHttpBody(request, 16 * 1024);
+      } catch (error) {
+        const status = (error as { statusCode?: number }).statusCode ?? 400;
+        if (!scopedCredential && status !== 413) jsonResponse(response, 403, { error: 'A scoped revocable credential is required' });
+        else { jsonResponse(response, status, { error: status === 413 ? 'Request body too large' : 'Invalid heartbeat JSON' }, status === 413 ? { Connection: 'close' } : {}); if (status === 413) request.resume(); }
+        return;
+      }
+      if (!scopedCredential) { jsonResponse(response, 403, { error: 'A scoped revocable credential is required' }); return; }
+      try {
+        const address = request.socket.remoteAddress ?? 'unknown';
+        const sourceBucket = address.includes(':') ? address.split(':').slice(0, 4).join(':') + '::/64' : address.split('.').slice(0, 3).join('.') + '.0/24';
+        const presence = await writeClientHeartbeat(root, credentialId, actor.actorId, body, sourceBucket);
+        jsonResponse(response, 202, { accepted: true, serverReceivedAt: presence.serverReceivedAt }, { 'Cache-Control': 'no-store' });
+      } catch (error) {
+        const failure = error as Error & { statusCode?: number; status?: number; code?: string };
+        const status = failure.statusCode ?? failure.status ?? 400;
+        if (status === 413) request.resume();
+        if (status === 429) jsonResponse(response, status, { error: 'Heartbeat rate limit exceeded' }, { 'Retry-After': '60' });
+        else if (error instanceof ClientPresenceError) jsonResponse(response, status, { error: failure.message, code: failure.code });
+        else jsonResponse(response, status, { error: status === 413 ? 'Request body too large' : 'Heartbeat could not be accepted' });
+      }
+      return;
+    }
     const authenticatedAt = Date.now(); const rateKey = actor.actorId; let rate = requestsByPrincipal.get(rateKey);
     if (!rate || authenticatedAt - rate.window >= 60_000) { rate = { window: authenticatedAt, count: 0 }; requestsByPrincipal.set(rateKey, rate); }
     rate.count++;
@@ -596,6 +639,8 @@ async function runStdio(tools: Tool[]): Promise<void> {
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const transport = env.MDB_MCP_TRANSPORT ?? 'stdio';
   if (transport !== 'stdio' && transport !== 'http') throw new Error('MDB_MCP_TRANSPORT must be exactly "stdio" or "http"');
+  const replicaArg=process.argv.indexOf('--replica');
+    if(replicaArg>=0){if(transport!=='stdio')throw new Error('replica mode is available only over stdio');const replicaId=process.argv[replicaArg+1],workspaceArg=process.argv.indexOf('--workspace'),workspaceId=workspaceArg>=0?process.argv[workspaceArg+1]:undefined;if(!replicaId||!workspaceId)throw new Error('--replica requires an id and --workspace');const{openReplica}=await import('../replication/client.js');const{store}=await openReplica(replicaId);const scope={type:'workspace' as const,workspaceId};if(!(await store.vault.canAccess(scope,'read',store.vault.actor)))throw new Error('workspace is not enrolled in this replica');const client=new Engram(store.vault.root,store.vault.actor,undefined,{vault:store.vault});await runStdio(withDefaultWorkspace(toolsFor(client),workspaceId));return;}
   const rootArg = process.argv.indexOf('--root');
   const root = resolveRoot(rootArg >= 0 ? process.argv[rootArg + 1] : undefined);
   const unconfigured = new Engram(root, hostActor(env));

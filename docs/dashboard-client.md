@@ -21,3 +21,18 @@ After a Client app update, `mdb service install` reconciles executable and bundl
 The Server form accepts only HTTPS, loopback HTTP, or an explicitly trusted tailnet URL, with no embedded credentials, query, or fragment. The token is never entered into the form: provide a path to an owned regular file with mode `0600` or `0400`. Preview binds a digest to the normalized URL, token-file path, and current configuration files; apply refuses a stale preview. Updates preserve unrelated `client.env` entries and comments, use atomic file replacement, and roll back changed targets when a later update fails. Targets that are absent, including MCP entries and hooks, are shown as skipped and are never created. The audit records target names and the URL host only.
 
 **Connections** administers a remote server dashboard. Its Dashboard server URL and dashboard credential are separate from the capture server URL and token file configured by **Server**. Credentials remain in private local files and are never returned to the browser. See [client-daemon.md](client-daemon.md) for service lifecycle details.
+
+
+## Replica sync and cached projects
+
+The **Cached projects** tab reports each initialized replica and enrolled workspace. The replica status distinguishes **Sync mode**, **Syncing**, **Cache mode (offline)**, **Conflict**, **Access refused**, **Paused**, **Epoch changed**, and **Daemon stopped**. A daemon status older than three 30-second intervals is considered stopped, so stale status cannot appear green. The tab shows queue counts, last pull/push, daemon process details and redacted last error.
+
+Use **Enable replica sync** after configuring the server URL and private token-file path in Client settings. The dashboard reads those saved settings and never asks for or displays the token. Add workspaces by ID, sync them on demand, and resolve conflicts by choosing the server version, the local candidate, or edited text. Conflict versions are rendered as plain text. Removing a workspace unenrolls it and keeps the local data; purge remains a CLI-only operation.
+
+Personal memory, wiki, shared knowledge, discoveries and unrelated workspace data remain live remote requests and are never cached.
+
+## Replica sync and cached projects
+
+The client dashboard header reports replica health, the overall last sync (relative and absolute), and a detail panel for server contact, pull/push, profile snapshot, queues, daemon uptime, retry timing, and redacted errors. A missing daemon, missing status file, or status older than three daemon intervals is shown as **Daemon stopped**. The **Cached projects** tab lists enrolled workspaces, trusted project-folder bindings, replica counters, and an approximate on-disk byte count. Size measurement scans only that replica workspace and immutable revision files attributed to it by the local commit journal; it stops after 20,000 files or 250 ms and marks capped results approximate. Results are cached for 60 seconds.
+
+Conflict versions are presented as plain text. The dashboard limits each returned conflict body to 100 KB and indicates when text was truncated; it never interprets Markdown or HTML. Take server, take mine, edited text, and discard actions use the replica conflict APIs and preserve immutable candidate revisions. Personal, wiki, and shared data remain live server data and are never cached. **Enable replica sync** uses the URL and private token file already saved in Client settings and installs the per-user daemon service; token contents are never displayed.

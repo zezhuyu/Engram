@@ -277,7 +277,7 @@ export async function commitInsight(vault: Vault, input: PutInput, proposalId: s
 }
 
 /** A direct statement or correction by the user. Accepted immediately; every earlier insight or explicit note on the same subject and scope is superseded, with its history intact. */
-export async function correctInsight(vault: Vault, input: { scope: Scope; storageScope?: Scope; preferenceKey: string; claim: string; category: InsightCategory; reason?: string; source?: { uri: string; revisionId: string; span?: string }; sensitive?: boolean }): Promise<Document> {
+export async function correctInsight(vault: Vault, input: { scope: Scope; storageScope?: Scope; preferenceKey: string; claim: string; category: InsightCategory; reason?: string; source?: { uri: string; revisionId: string; span?: string }; sensitive?: boolean; idempotencyKey?: string }): Promise<Document> {
   if (!KEY.test(input.preferenceKey)) throw new MDBError('INVALID_INPUT', 'preferenceKey must be a lowercase slug');
   if (!CATEGORIES.includes(input.category)) throw new MDBError('INVALID_INPUT', 'Invalid category');
   const claim = input.claim.trim(); if (!claim || claim.length > 500) throw new MDBError('INVALID_INPUT', 'The claim must be one concise statement');
@@ -291,13 +291,23 @@ export async function correctInsight(vault: Vault, input: { scope: Scope; storag
   }
   const label = input.scope.type === 'global' ? 'global' : input.scope.workspaceId; void scopeEqual;
   const earlier = (await loadDocuments(vault, await readableEntries(vault, { pk: input.preferenceKey }))).filter(d => applicability(d) === label && !['superseded', 'rejected', 'deleted'].includes(d.status) && (d.kind === 'user_insight' || d.metadata.explicitPreference === true) && normalize(d.body) !== normalize(claim));
-  const doc = await vault.put({ scope: input.storageScope ?? { type: 'global', area: 'profile' }, kind: 'user_insight', title: claim.slice(0, 120), body: claim, status: 'accepted', evidence, tags: ['insight', input.category], metadata: { actorId: vault.actor.actorId, insightSchema: 1, category: input.category, preferenceKey: input.preferenceKey, evidenceClass: 'explicit', confidenceLabel: 'high', extractionConfidence: 0.95, factualCertainty: 'user_reported', sources, scopeLabel: label, validFrom: new Date().toISOString().slice(0, 10), visibility: 'user_private', sensitivity: input.sensitive ? 'sensitive' : 'none', origin: 'user_statement', reviewed: true, reviewReason: input.reason ?? 'Stated or corrected by the user', ...(earlier.length ? { supersedes: earlier.map(d => d.id) } : {}) } });
+  const doc = await vault.put({ scope: input.storageScope ?? { type: 'global', area: 'profile' }, kind: 'user_insight', title: claim.slice(0, 120), body: claim, status: 'accepted', evidence, tags: ['insight', input.category], metadata: { actorId: vault.actor.actorId, insightSchema: 1, category: input.category, preferenceKey: input.preferenceKey, evidenceClass: 'explicit', confidenceLabel: 'high', extractionConfidence: 0.95, factualCertainty: 'user_reported', sources, scopeLabel: label, validFrom: new Date().toISOString().slice(0, 10), visibility: 'user_private', sensitivity: input.sensitive ? 'sensitive' : 'none', origin: 'user_statement', reviewed: true, reviewReason: input.reason ?? 'Stated or corrected by the user', ...(earlier.length ? { supersedes: earlier.map(d => d.id) } : {}) }, ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}) });
   for (const old of earlier) await vault.patch({ objectId: old.id, expectedRevisionId: old.revisionId, status: 'superseded', metadataPatch: { supersededBy: doc.uri, supersededByRevision: doc.revisionId, supersededReason: input.reason ?? 'corrected by the user' } });
   await projectProfile(vault).catch(() => undefined);
   return doc;
 }
 
 const clean = (t: string) => t.replace(/[\r\n]+/g, ' ').slice(0, 300);
+/** Shared deterministic profile markdown renderer used by persisted views and filtered replica snapshots. */
+export function renderProfileProjection(docs: Document[], options: { readableWorkspaceLabels?: ReadonlySet<string>; omitSensitiveCounts?: boolean } = {}): { profile: string; userInsight: string } {
+  const visible = docs.filter(d => { const label = applicability(d); return label === 'global' || !options.readableWorkspaceLabels || options.readableWorkspaceLabels.has(label); });
+  const line = (d: Document) => `- **${d.metadata.category}** — ${clean(d.body)} _(extraction confidence ${typeof d.metadata.extractionConfidence === 'number' ? d.metadata.extractionConfidence.toFixed(2) : d.metadata.confidenceLabel}, factual certainty ${String(d.metadata.factualCertainty ?? d.metadata.evidenceClass)}, since ${d.metadata.validFrom}${typeof d.metadata.validUntil === 'string' ? `, only until ${d.metadata.validUntil}` : ''})_ [history](${d.uri})`;
+  const order = (a: Document, b: Document) => String(a.metadata.category).localeCompare(String(b.metadata.category)) || a.body.localeCompare(b.body) || a.id.localeCompare(b.id);
+  const render = (list: Document[]) => { const shown = list.filter(d => d.metadata.sensitivity !== 'sensitive').sort(order); const hidden = list.length - shown.length; return [...(shown.length ? shown.map(line) : ['_No accepted items._']), ...(hidden && !options.omitSensitiveCounts ? [`_${hidden} sensitive item(s) not listed here._`] : [])]; };
+  const labels = [...new Set(visible.map(applicability))].filter(label => label !== 'global').sort();
+  const section = (list: Document[]) => { const output: string[] = []; for (const label of ['global', ...labels]) { const part = list.filter(d => applicability(d) === label); if (!part.length && label !== 'global') continue; output.push(`### ${label === 'global' ? 'Global' : `Workspace: ${clean(label)}`}`, ...render(part)); } return output.join('\n'); };
+  return { profile: section(visible.filter(d => d.metadata.evidenceClass === 'explicit')), userInsight: section(visible.filter(d => d.metadata.evidenceClass !== 'explicit')) };
+}
 /**
  * Regenerates the readable projections from the accepted insight objects: root PROFILE.md (what the user stated), root USER_INSIGHT.md (inferred
  * and exposure items) and each workspace's PROFILE.md. They are derived views: authored text outside the generated block is untouched, output is
@@ -320,14 +330,11 @@ export async function projectProfile(owner: Vault, options: { now?: Date } = {})
     try { await owner.patch({ objectId: old.id, expectedRevisionId: old.revisionId, status: 'superseded', metadataPatch: { supersededBy: replacement.uri, supersededByRevision: replacement.revisionId, supersededReason: 'reconciled from the accepted correction after interruption' } }); } catch { /* the durable supersedes relation still hides the old value from this projection */ }
   }
   const docs = accepted.filter(d => !supersededIds.has(d.id));
-  const line = (d: Document) => `- **${d.metadata.category}** — ${clean(d.body)} _(extraction confidence ${typeof d.metadata.extractionConfidence === 'number' ? d.metadata.extractionConfidence.toFixed(2) : d.metadata.confidenceLabel}, factual certainty ${String(d.metadata.factualCertainty ?? d.metadata.evidenceClass)}, since ${d.metadata.validFrom}${typeof d.metadata.validUntil === 'string' ? `, only until ${d.metadata.validUntil}` : ''})_ [history](${d.uri})`;
-  const order = (a: Document, b: Document) => String(a.metadata.category).localeCompare(String(b.metadata.category)) || a.body.localeCompare(b.body) || a.id.localeCompare(b.id);
-  const render = (list: Document[], hiddenLabel: string) => { const shown = list.filter(d => d.metadata.sensitivity !== 'sensitive').sort(order); const hidden = list.length - shown.length; return [...(shown.length ? shown.map(line) : ['_No accepted items._']), ...(hidden ? [`_${hidden} sensitive item(s) not listed ${hiddenLabel}._`] : [])]; };
   // Everything is projected into the two root files (workspace-applicable items in their own sections), never into workspace directories that agents with workspace access can read.
   const labels = [...new Set(docs.map(applicability))].filter(l => l !== 'global').sort();
-  const section = (list: Document[]) => { const labelsOut: string[] = []; for (const label of ['global', ...labels]) { const part = list.filter(d => applicability(d) === label); if (!part.length && label !== 'global') continue; labelsOut.push(`### ${label === 'global' ? 'Global' : `Workspace: ${clean(label)}`}`, ...render(part, 'here')); } return labelsOut; };
-  await guarded(owner.root, 'PROFILE.md', 'PROFILE', section(docs.filter(d => d.metadata.evidenceClass === 'explicit')));
-  await guarded(owner.root, 'USER_INSIGHT.md', 'USER_INSIGHT', section(docs.filter(d => d.metadata.evidenceClass !== 'explicit')));
+  const rendered = renderProfileProjection(docs);
+  await guarded(owner.root, 'PROFILE.md', 'PROFILE', rendered.profile.split('\n'));
+  await guarded(owner.root, 'USER_INSIGHT.md', 'USER_INSIGHT', rendered.userInsight.split('\n'));
   const global = docs.filter(d => applicability(d) === 'global'); const workspaces = labels.length;
   void SOURCE_PRIORITY;
   return { global: global.length, workspaces };

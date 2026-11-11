@@ -143,7 +143,7 @@ async function validateModelChange(engram: Engram, key: string, value: unknown, 
   try { createProviderFromConfig(next); return true; }
   catch (error) {
     const message = error instanceof Error ? error.message : '';
-    if (/model\.(?:baseUrl|modelName) is required|model\.baseUrl is required|model\.modelName is required|requires model\.allowNetwork|was not found on PATH|Environment variable .* is not set/u.test(message)) return false;
+    if (/model\.(?:baseUrl|modelName) is required|model\.baseUrl is required|model\.modelName is required|requires model\.allowNetwork|(?:was not found|No local agent CLI .* found) on PATH|Environment variable .* is not set/u.test(message)) return false;
     throw error;
   }
 }

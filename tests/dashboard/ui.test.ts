@@ -61,8 +61,20 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/assets/app.js']!.body, /Workspace access/);
   assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/status/);
   assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/workspaces/);
+  assert.match(assets['/assets/app.js']!.body, /data-key','client-/);
+  assert.match(assets['/assets/app.js']!.body, /Every holder of this token loses access immediately/);
+  assert.match(assets['/assets/app.js']!.body, /Queued writes remain on client machines/);
   assert.match(assets['/assets/app.js']!.body, /'Connected'/);
   assert.match(assets['/assets/app.js']!.body, /Running, not ready/);
+  assert.match(assets['/assets/app.js']!.body, /Status unavailable, retrying/);
+  assert.match(assets['/assets/app.js']!.body, /status\.gateway\?\.state==='unknown'/);
+  const pillLabel = new vm.Script(`${assets['/assets/app.js']!.body.match(/function tunnelStatusLabel\([^}]+}/)?.[0]}; tunnelStatusLabel`).runInNewContext() as (state: string, reason?: string) => string;
+  assert.equal(pillLabel('unknown'), 'Status unavailable, retrying');
+  const actionDisabled = new vm.Script(`${assets['/assets/app.js']!.body.match(/function tunnelActionDisabled\([^}]+}/)?.[0]}; tunnelActionDisabled`).runInNewContext() as (action: string, state: string, statusUnknown: boolean) => boolean;
+  assert.equal(actionDisabled('start', 'connected', true), false);
+  assert.equal(actionDisabled('stop', 'stopped', true), false);
+  assert.equal(actionDisabled('start', 'connected', false), true);
+  assert.equal(actionDisabled('stop', 'stopped', false), true);
   assert.match(assets['/assets/app.js']!.body, /connector-tunnel-details/);
   assert.match(assets['/assets/app.js']!.body, /Tunnel connected/);
   assert.match(assets['/assets/app.js']!.body, /Starting…/);
@@ -405,7 +417,7 @@ test('served dashboard script completes its first refresh and renders every scre
     get firstChild(): Element | null { return this.children[0] ?? null; }
     get innerText(): string { return this.textContent + this.children.map(item => item.innerText).join(''); }
   }
-  const screens = ['overview','storage','jobs','dream','capture','connections','client-settings','settings','audit','knowledge','chat','workspaces','wiki-review','settings-error','client-first-setup'];
+  const screens = ['overview','storage','jobs','dream','capture','clients','connections','client-settings','settings','audit','knowledge','chat','workspaces','wiki-review','settings-error','client-first-setup'];
   for (const screen of screens) {
     const elements = new Map<string, Element>();
     const document = {
@@ -420,7 +432,7 @@ test('served dashboard script completes its first refresh and renders every scre
     const fetch = async (path: string) => {
       if (path === '/api/auth/status') return response({ passwordSet: screen !== 'client-first-setup', clientMode: screen === 'client-first-setup' });
       if (path === '/api/status') return response({ generatedAt: new Date().toISOString(), doctor:{state:'ok',checks:[]}, index:{available:true,journalSequence:1,manifest:{entries:0}}, jobs:{}, scheduler:{}, capture:{}, storage:{}, dream:{}, wiki:{}, proposals:{} });
-      if (path === '/api/connectors/openai/status') return response({config:{profileName:'engram-keyed',apiKeySet:false,workspaces:[]},status:{gateway:{healthy:false},tunnelClient:{loaded:false},binaryFound:false,profilePresent:false}});
+      if (path === '/api/connectors/openai/status') return response({config:{profileName:'engram-keyed',apiKeySet:false,workspaces:[]},status:{gateway:{healthy:false,state:screen==='settings'?'unknown':'stopped'},keyedGateway:{loaded:false,running:false,statusUnknown:screen==='settings'},tunnelClient:{loaded:false,state:screen==='settings'?'unknown':'stopped'},binaryFound:false,profilePresent:false}});
       if (path === '/api/connectors/claude/local') return response({node:'/usr/bin/node',mdbMcp:'/app/mdb-mcp.js',root:'/tmp/vault',claudeCode:{state:{engramPresent:false}},desktop:{file:'/tmp/Claude/claude_desktop_config.json',state:{engramPresent:false}},entry:{command:'/usr/bin/node',args:['/app/mdb-mcp.js','--root','/tmp/vault'],env:{MDB_ACTOR_ID:'local-dashboard'}},command:'claude mcp add',snippets:{desktopJson:'{}',remote:'{}'}});
       if (path === '/api/connectors/claude/web') return response({config:{url:'',mode:'authless',headerName:'x-api-key',keySet:false}});
       if (path === '/api/connectors') return response({connectors:{claude:Object.fromEntries(['publicUrl','tunnelName','tunnelId','tunnelToken','oauthClientId','oauthClientSecret'].map(key=>[key,{set:false,value:null}]))},credentials:[],authMode:'scoped MCP credentials'});
@@ -429,6 +441,7 @@ test('served dashboard script completes its first refresh and renders every scre
       if (path === '/api/url-notes/settings') return response({ enabled:false, readiness:{claude:{found:false},codex:{found:false}} });
       if (path === '/api/chat/capabilities') return response({ modelConfigured:false, ready:false, remote:false, consentGiven:false });
       if (path.startsWith('/api/documents')) return response({ items:[], cursor:null });
+      if (path.startsWith('/api/clients')) return response({ total:1, rows:[{credential:{id:'cred_01234567890123456789',actorId:'studio',permissions:['workspace:proj:read'],lastUsedAt:'2026-11-10T12:00:00Z'},expectedDigest:'digest',clients:[{clientId:'00000000-0000-4000-8000-000000000001',displayName:'Studio Air',hostLabel:'macOS',mode:'cached',state:'Connected',serverReceivedAt:'2026-11-10T12:00:00Z',appVersion:'1.0',lastSync:{serverContactAt:null,outboxDeliveredAt:null,fileSyncCommittedAt:null,contextFetchedAt:null},queues:{outbox:0,fileSync:0,capture:0,queuedBytes:0},projects:[]}]}]});
       if (path === '/api/proposals' || path === '/api/audit' || path === '/api/workspaces') return response([]);
       return response({});
     };
@@ -443,9 +456,18 @@ test('served dashboard script completes its first refresh and renders every scre
     const rendered = document.querySelector('#content').innerText;
     assert.notEqual(rendered, 'Waiting for first refresh', `${screen} should refresh`);
     assert.doesNotMatch(rendered, /Loading effective settings…/, `${screen} should not remain in a loading state`);
+    if (screen === 'clients') { assert.match(rendered, /Studio Air/); assert.match(rendered, /Revoke credential/); }
     if (screen === 'settings-error') assert.match(rendered, /Effective settings could not be loaded/);
     assert.equal(document.querySelector('#updated').textContent.startsWith('Updated '), true, `${screen} should show refresh completion`);
   }
+});
+
+test('Domains panel shows its evidence threshold, pending candidates, and no-model behavior', async () => {
+  const source = assets['/assets/app.js']!.body;
+  assert.match(source, /Minimum evidence:/);
+  assert.match(source, /pendingDomainCandidates/);
+  assert.match(source, /pending\.evidence\|\|\[\]\)\.join/);
+  assert.match(source, /discovery is unavailable/);
 });
 
 test('client refresh uses client status and leaves Connecting on success or failure', async t => {
@@ -453,6 +475,8 @@ test('client refresh uses client status and leaves Connecting on success or fail
   const client = await createDashboardServer({ engram: vault.engram, clientMode: true, host: '127.0.0.1', port: 0, authLocation: { env: {}, homeDir: vault.root, platform: 'linux' } });
   t.after(async () => { await client.close(); await vault.cleanup(); });
   const script = await fetch(`http://127.0.0.1:${client.port}/assets/app.js`).then(response => response.text());
+  const clientScreens = script.match(/^const screens=.*;$/m)?.[0] ?? '';
+  assert.doesNotMatch(clientScreens, /['"]clients['"]/);
   assert.match(script, /api\('\/api\/client\/status'\)/);
   assert.match(script, /textContent='DEVICE'/);
   assert.match(script, /This device'\+\(result\.captureHost/);
@@ -499,10 +523,15 @@ class FakeText { nodeType = 3; parent: FakeEl | null = null; constructor(public 
 class FakeEl {
   nodeType = 1; parent: FakeEl | null = null; childNodes: Array<FakeEl | FakeText> = []; attrs = new Map<string, string>(); value = ''; type = 'text'; files: unknown[] = [];
   constructor(public tagName: string) {}
+  get parentNode() { return this.parent; }
   get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })); }
   setAttribute(name: string, value: string) { this.attrs.set(name, String(value)); }
+  hasAttribute(name: string) { return this.attrs.has(name); }
+  removeAttribute(name: string) { this.attrs.delete(name); }
   getAttribute(name: string) { return this.attrs.get(name) ?? null; }
   append(...items: Array<FakeEl | FakeText>) { for (const item of items) { item.parent = this; this.childNodes.push(item); } }
+  insertBefore(item: FakeEl | FakeText, before: FakeEl | FakeText | null) { item.parent = this; const index = before ? this.childNodes.indexOf(before) : -1; if (index < 0) this.childNodes.push(item); else this.childNodes.splice(index, 0, item); }
+  remove() { if (this.parent) this.parent.childNodes = this.parent.childNodes.filter(item => item !== this); }
   replaceChildren(...items: Array<FakeEl | FakeText>) { this.childNodes = []; this.append(...items); }
   replaceWith(next: FakeEl | FakeText) { const siblings = this.parent!.childNodes; next.parent = this.parent; siblings[siblings.indexOf(this)] = next; }
   querySelectorAll(): FakeEl[] { const found: FakeEl[] = []; const walk = (el: FakeEl) => { for (const child of el.childNodes) if (child.nodeType === 1) { if (['INPUT', 'TEXTAREA', 'SELECT'].includes((child as FakeEl).tagName)) found.push(child as FakeEl); walk(child as FakeEl); } }; walk(this); return found; }
@@ -564,4 +593,36 @@ test('poll refresh replaces everything that changed when nothing has been typed'
   assert.notEqual(current, page, 'with nothing typed the changed page is replaced as a whole');
   assert.equal(((current.childNodes[0] as FakeEl).childNodes[0] as FakeText).data, 'b');
   assert.equal(((current.childNodes[1] as FakeEl).childNodes.length), 2, 'new structure is applied when no input is dirty');
+});
+
+test('replica poll leaves unchanged area untouched, patches only changed keyed rows, and preserves conflict textarea focus and typing', () => {
+  const t = patchHarness();
+  const textarea = h('textarea', { 'aria-label': 'Resolve with edited text' }); textarea.value = 'draft from user';
+  const stable = h('tr', { 'data-key': 'replica-b-proj' }, h('td', {}, 'unchanged'));
+  const changed = h('tr', { 'data-key': 'replica-a-proj' }, h('td', {}, 'Syncing'));
+  const area = h('div', { 'data-connector-live': 'true' }, stable, changed, textarea); t.content.append(area);
+  t.document.activeElement = textarea;
+  t.patchContent(h('div', { 'data-connector-live': 'true' }, h('tr', { 'data-key': 'replica-b-proj' }, h('td', {}, 'unchanged')), h('tr', { 'data-key': 'replica-a-proj' }, h('td', {}, 'Conflict')), h('textarea', { 'aria-label': 'Resolve with edited text' })));
+  const current = t.content.childNodes[0] as FakeEl;
+  assert.equal(current, area, 'the replica area is not rebuilt');
+  assert.equal(current.childNodes[0], stable, 'unchanged workspace row remains the same element');
+  assert.equal(current.childNodes[1], changed, 'only the changed row is patched in place');
+  assert.equal(((changed.childNodes[0] as FakeEl).childNodes[0] as FakeText).data, 'Conflict');
+  assert.equal(current.childNodes[2], textarea, 'the focused conflict editor stays mounted');
+  assert.equal(textarea.value, 'draft from user');
+});
+
+test('replica UI exposes every state, capped size, and plain-text conflict rendering', () => {
+  const js = assets['/assets/app.js']!.body;
+  const start = js.indexOf('function updateReplicaHeader(data){'), end = js.indexOf('\nasync function refresh()', start); assert.ok(start >= 0 && end > start);
+  const pill: { className?: string; label?: { textContent?: string; }; querySelector: () => { textContent?: string } } = { querySelector: () => pill.label! };
+  const updated = { textContent: '' }, labels: string[] = [], clock = { value: 1_000_000 }; let tick: () => void = () => {};
+  class FakeDate extends Date { static now() { return clock.value; } }
+  const update = vm.runInNewContext(`let replicaTick=0; ${js.slice(start, end)}; updateReplicaHeader`, { document: { querySelector: () => pill }, updated, Date: FakeDate, setInterval: (fn: () => void) => { tick = fn; return 1; }, clearInterval: () => undefined }) as (data: { enabled: boolean; state: string; lastSyncAt: string | null }) => void;
+  for (const state of ['Sync mode','Syncing','Cache mode (offline)','Conflict','Access refused','Paused','Epoch changed','Daemon stopped']) { pill.label = { textContent: '' }; update({ enabled: true, state, lastSyncAt: null }); labels.push(pill.label.textContent!); }
+  assert.deepEqual(labels, ['Sync mode','Syncing','Cache mode (offline)','Conflict','Access refused','Paused','Epoch changed','Daemon stopped']);
+  update({ enabled: true, state: 'Sync mode', lastSyncAt: new Date(clock.value - 1000).toISOString() }); assert.match(updated.textContent, /just now/); clock.value += 120_000; tick(); assert.match(updated.textContent, /2 min ago/);
+  assert.match(js, /diskSizeBytes/); assert.match(js, /item\.diskSizeApproximate/);
+  assert.match(js, /node\('pre','',String\(item\.server\.text\)\)/); assert.match(js, /node\('pre','',String\(item\.local\.text\)\)/);
+  assert.match(js, /setInterval\(paint,60000\)/); assert.match(js, /Replica · /); assert.match(js, /enrolledScopes/); assert.doesNotMatch(js, /\.innerHTML\b/);
 });

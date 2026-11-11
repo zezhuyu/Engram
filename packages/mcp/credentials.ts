@@ -4,6 +4,7 @@ import path from 'node:path';
 import { MDBError, type ActorContext } from '../core/types.js';
 import type { Vault } from '../core/vault.js';
 import { atomicWrite, safePath, withVaultLock } from '../storage-local/index.js';
+import { deleteCredentialReplicaDevices } from '../replication/devices.js';
 
 const FILE = '.mdb/http-credentials.json';
 const actorPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
@@ -14,6 +15,7 @@ export interface CredentialAuditEvent { at: string; action: 'created' | 'revoked
 type CredentialStore = { version: 1; credentials: Credential[]; audit?: CredentialAuditEvent[] };
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
 const lastUsedUpdates = new Map<string, { writtenAt: number; pending: boolean }>();
+const expiredDeviceCleanup = new Set<string>();
 const auditCap = 10_000;
 const appendAudit = (store: CredentialStore, event: CredentialAuditEvent): CredentialAuditEvent[] => [...(store.audit ?? []), event].slice(-auditCap);
 
@@ -84,6 +86,7 @@ export async function revokeHttpCredential(owner: Vault, credentialId: string): 
     removed = next.length !== store.credentials.length;
     if (removed) await atomicWrite(owner.root, FILE, JSON.stringify({ ...store, credentials: next, audit: appendAudit(store, { at: new Date().toISOString(), action: 'revoked', actorId: owner.actor.actorId, credentialId, permissions: removedCredential?.permissions }) }, null, 2));
   });
+  if (removed) await deleteCredentialReplicaDevices(owner.root, credentialId);
   return removed;
 }
 
@@ -103,6 +106,7 @@ export async function rotateHttpCredential(owner: Vault, credentialId: string, p
     const audit = appendAudit(store, { at: created.createdAt, action: 'rotated', actorId: owner.actor.actorId, credentialId: old.id, replacementId: created.id, permissions: nextPermissions });
     await atomicWrite(owner.root, FILE, JSON.stringify({ ...store, credentials, audit }, null, 2));
   });
+  await deleteCredentialReplicaDevices(owner.root, credentialId);
   return { id, token };
 }
 
@@ -114,6 +118,7 @@ export async function resolveHttpActor(root: string, authorization: string | und
   }
   const token = match[1]!; const digest = Buffer.from(hash(token));
   const store = await readStore(root);
+  for (const credential of store.credentials) if (credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) { const key = `${path.resolve(root)}:${credential.id}`; if (!expiredDeviceCleanup.has(key)) { await deleteCredentialReplicaDevices(root, credential.id); expiredDeviceCleanup.add(key); } }
   let resolved: ActorContext | undefined;
   for (const credential of store.credentials) {
     if (credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) continue;

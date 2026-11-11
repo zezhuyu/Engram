@@ -9,6 +9,9 @@ import { once } from 'node:events';
 import vm from 'node:vm';
 import { Engram } from '../../packages/sdk/index.js';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
+import { createHttpCredential, listHttpCredentials, resolveHttpActor } from '../../packages/mcp/credentials.js';
+import { writeClientHeartbeat, listClientPresence } from '../../packages/mcp/client-presence.js';
+import { enrollReplicaDevice, listReplicaDevices } from '../../packages/replication/devices.js';
 import { createDashboardCredential, listDashboardCredentials, resolveDashboardCredential, revokeDashboardCredential } from '../../packages/dashboard/credentials.js';
 import { dashboardAuthFile } from '../../packages/dashboard/password.js';
 import { remoteHookCommand } from '../../packages/memory/adapters.js';
@@ -17,6 +20,28 @@ import { disposableVault } from './helpers.js';
 
 const location = (root: string) => ({ env: {}, homeDir: root, platform: 'linux' as NodeJS.Platform });
 const api = (origin: string, route: string, cookie: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', headers: Record<string,string> = {}) => fetch(origin + route, { method, headers: { Cookie: cookie, Origin: origin, 'X-Engram-Dashboard': '1', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+
+test('owner Clients API is session-only and revoke requires CSRF, password re-auth, digest confirmation, audit, and immediate credential removal', async t => {
+  const v = await disposableVault(), server = await createDashboardServer({ engram:v.engram, host:'127.0.0.1', idleMs:60_000, authLocation:location(v.root) });
+  t.after(async()=>{await server.close();await v.cleanup()});
+  const credential=await createHttpCredential(v.engram.vault,'client-agent',['workspace:proj:read']);
+  await enrollReplicaDevice(v.root,credential.id,'client-agent','00000000-0000-4000-8000-000000000101','Laptop','proj','scope-v1');
+  await writeClientHeartbeat(v.root,credential.id,'client-agent',{schemaVersion:1,clientId:'00000000-0000-4000-8000-000000000001',displayName:'Studio Air',hostLabel:'Mac',appVersion:'1.0',mode:'cached',lastSync:{serverContactAt:null,outboxDeliveredAt:null,fileSyncCommittedAt:null,contextFetchedAt:null},queues:{outbox:1,fileSync:0,capture:0,queuedBytes:10},projects:[]},'127.0.0.0/24');
+  const origin=`http://127.0.0.1:${server.port}`, password='correct horse battery staple';
+  assert.equal((await fetch(origin+'/api/clients',{headers:{Authorization:'Bearer '+server.token}})).status,401);
+  const setup=await fetch(origin+'/api/auth/setup',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({token:server.token,password,confirm:password})});assert.equal(setup.status,200);
+  const login=await fetch(origin+'/api/auth/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({password})});const cookie=login.headers.get('set-cookie')!.split(';')[0]!;
+  const listed=await api(origin,'/api/clients',cookie);assert.equal(listed.status,200);const data=await listed.json() as any;assert.equal(data.rows[0].clients[0].displayName,'Studio Air');assert.equal(data.rows[0].clients[0].state,'Connected');assert.deepEqual(data.rows[0].replicaDevices,[{deviceId:'00000000-0000-4000-8000-000000000101',label:'Laptop',enrolledScopes:['proj'],lastFetchAt:null}]);
+  const payload={credentialId:credential.id,expectedDigest:data.rows[0].expectedDigest};
+  assert.equal((await api(origin,'/api/clients/revoke',cookie,payload)).status,401);
+  const stale=await api(origin,'/api/clients/revoke',cookie,{credentialId:credential.id,expectedDigest:'0'.repeat(64)},'POST',{'X-Engram-Reauth-Password':password});assert.equal(stale.status,409);
+  const badCsrf=await fetch(origin+'/api/clients/revoke',{method:'POST',headers:{Cookie:cookie,'X-Engram-Dashboard':'1','X-Engram-Reauth-Password':password,'Content-Type':'application/json'},body:JSON.stringify(payload)});assert.equal(badCsrf.status,401);
+  const revoked=await api(origin,'/api/clients/revoke',cookie,payload,'POST',{'X-Engram-Reauth-Password':password});assert.equal(revoked.status,200);assert.equal((await revoked.json() as any).revoked,true);
+  assert.equal(await resolveHttpActor(v.root,'Bearer '+credential.token),undefined);assert.equal((await listClientPresence(v.root)).length,0);
+  assert.equal((await listReplicaDevices(v.root)).length,0);
+  assert.match(await fs.readFile(path.join(v.root,'.mdb/dashboard/audit.jsonl'),'utf8'),/clients\.credential\.revoke/);
+  assert.equal((await listHttpCredentials(v.engram.vault)).some(item=>item.id===credential.id),false);
+});
 
 test('dashboard credentials are hashed, expire, enforce view-only, and audit remote access without secrets', async t => {
   const v = await disposableVault(), old = process.env.MDB_DASHBOARD_REMOTE_ADMIN; process.env.MDB_DASHBOARD_REMOTE_ADMIN = 'true';

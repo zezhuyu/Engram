@@ -58,10 +58,15 @@ export async function upsertTyped(client: Engram, input: Upsert): Promise<TypedR
   const createKey = `${input.kind}:${stableId}`;
   const existing = await client.vault.byIdempotencyKey(createKey, input.scope);
   const done = (doc: Document, created: boolean, unchanged: boolean): TypedResult => ({ persistence: 'COMMITTED', kind: input.kind, stableId, objectId: doc.id, revisionId: doc.revisionId, revisionNumber: doc.revisionNumber, created, unchanged, contentHash, redactions, uri: doc.uri });
+  if (input.offline && existing) {
+    const prior = (await client.vault.history(existing.id)).find(doc => (doc.metadata.merge as { entryId?: string } | undefined)?.entryId === input.offline!.entryId);
+    if (prior) return done(prior, false, true);
+  }
   if (input.offline && existing) return mergeOfflineWrite(client, input, { existing, createKey, title: input.title, body, tags, contentHash, done });
   if (!existing) {
     if (input.expectedRevisionId && input.expectedRevisionId !== 'none' && !input.offline) throw new MDBError('CONFLICT', 'Expected revision given but the record does not exist yet');
-    return done(await client.put({ scope: input.scope, kind: input.kind, title: input.title, body, tags, ...(input.status ? { status: input.status } : {}), metadata, ...(input.evidence ? { evidence: input.evidence } : {}), idempotencyKey: createKey }), true, false);
+    const queued = input.offline ? { entryId: input.offline.entryId, ...(input.offline.queuedAt ? { queuedAt: input.offline.queuedAt } : {}), ...(input.offline.serverTime ? { serverTime: input.offline.serverTime } : {}) } : undefined;
+    return done(await client.put({ scope: input.scope, kind: input.kind, title: input.title, body, tags, ...(input.status ? { status: input.status } : {}), metadata: queued ? { ...metadata, merge: queued } : metadata, ...(input.evidence ? { evidence: input.evidence } : {}), idempotencyKey: createKey }), true, false);
   }
   const head = await client.vault.get(existing.id);
   // 'none' means: create it, and if somebody else already has, never overwrite (identical content is simply already there).
