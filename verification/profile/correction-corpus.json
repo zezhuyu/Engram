@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "purpose": "Supplemental real-model regression for unaligned preference keys and explicit correction supersession. This is not the gold corpus or an independent holdout.",
+  "thresholds": {
+    "precision": 0.9,
+    "recall": 0.8,
+    "falsePositiveRate": 0.1,
+    "jobSuccessRate": 0.9,
+    "scopeAccuracy": 1,
+    "evidenceGrounding": 1
+  },
+  "cases": [
+    { "id": "correction-detailed-feedback-direct", "scope": "global", "text": "I used to prefer concise code review feedback, but I now prefer detailed feedback with the reasoning explained.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-thorough-vs-brief", "scope": "global", "text": "Correction: make my code review feedback thorough and detailed rather than brief. I have changed my mind.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-expanded-explanations", "scope": "global", "text": "I no longer want terse code review feedback. I want detailed explanations and examples instead.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-negative-short", "scope": "global", "text": "For future code reviews, do not keep feedback short; give me detailed reasoning for each finding.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-project-detailed", "scope": "project:orion", "text": "For this project, I now prefer detailed code review feedback with context, not concise comments.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-synonym-comprehensive", "scope": "global", "text": "I changed my mind: code review feedback should be comprehensive and detailed, rather than a short summary.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-project-rationale", "scope": "project:orion", "text": "In this repository, replace brief code review feedback with detailed explanations of the rationale.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" },
+    { "id": "correction-opposite-value", "scope": "global", "text": "Actually, I now prefer long, detailed code review feedback. Please stop using very short review answers.", "expected": { "category": "preference", "key": "review-feedback-detail", "terms": ["code review", "detailed"] }, "supersedes": "code-review-style" }
+  ]
+}
