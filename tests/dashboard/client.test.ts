@@ -130,7 +130,7 @@ test('two-process client dashboard proxies status, settings, document lifecycle,
   const credentialFile = path.join(clientRoot, 'server.token'); await fs.writeFile(credentialFile, credential.token, { mode: 0o600 });
   const children: ChildProcess[] = [];
   const start = async (root: string, clientMode = false) => {
-    const child = spawn(process.execPath, [path.resolve('bin/mdb.js'), 'dashboard', '--root', root, '--host', '127.0.0.1', '--port', '0', ...(clientMode ? ['--client'] : [])], { cwd: process.cwd(), env: { ...process.env, NODE_ENV: 'test', MDB_DASHBOARD_REMOTE_ADMIN: 'true', MDB_DASHBOARD_AUTH_FILE: path.join(root, '.local-auth', 'auth.json') }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path.resolve('bin/mdb.js'), 'dashboard', '--root', root, '--host', '127.0.0.1', '--port', '0', ...(clientMode ? ['--client'] : [])], { cwd: process.cwd(), env: { ...process.env, MDB_DASHBOARD_ALERT: 'false', NODE_ENV: 'test', MDB_DASHBOARD_REMOTE_ADMIN: 'true', MDB_DASHBOARD_AUTH_FILE: path.join(root, '.local-auth', 'auth.json') }, stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child); let stdout = '', stderr = '';
     child.stdout!.on('data', chunk => { stdout += String(chunk); }); child.stderr!.on('data', chunk => { stderr += String(chunk); });
     const began = Date.now(); let match: RegExpMatchArray | null = null;
@@ -228,7 +228,7 @@ test('client dashboard can start without a vault and isolates its auth state', a
   const script = await fetch(origin + '/assets/app.js').then(response => response.text());
   assert.match(script, /const screens=clientScreens;/);
   const screens = script.match(/const clientScreens=\[(.*?)\];/)?.[1] ?? '';
-  assert.deepEqual([...screens.matchAll(/\['([^']+)'/g)].map(match => match[1]), ['this-device','server','cached-projects','connections','client-settings']);
+  assert.deepEqual([...screens.matchAll(/\['([^']+)'/g)].map(match => match[1]), ['this-device','server','workspaces','cached-projects','connections','client-settings']);
   assert.match(script, /Local state of this device/); assert.match(script, /This is not a copy of the server/); assert.match(script, /Refresh/);
   assert.doesNotMatch(script, /innerHTML|outerHTML|\beval\s*\(|localStorage/);
 });

@@ -8,7 +8,7 @@ import { disposableVault } from './helpers.js';
 const repoRoot = process.cwd();
 async function startDashboard(vaultRoot: string, extraEnv: NodeJS.ProcessEnv = {}, extraArgs: string[] = []) {
   const child = spawn(process.execPath, [path.join(repoRoot, 'bin/mdb.js'), 'dashboard', '--root', vaultRoot, ...extraArgs], {
-    cwd: repoRoot, env: { ...process.env, MDB_DASHBOARD_AUTH_FILE: path.join(vaultRoot, '.test-auth', 'auth.json'), ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: repoRoot, env: { ...process.env, MDB_DASHBOARD_AUTH_FILE: path.join(vaultRoot, '.test-auth', 'auth.json'), ...extraEnv, MDB_DASHBOARD_ALERT: 'false' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '', errorOutput = '';
   child.stderr!.on('data', chunk => { errorOutput += String(chunk); });

@@ -11,9 +11,9 @@ export interface RemoteSession { sessionId: string; tools: string[]; call(name: 
 export async function openRemoteSession(options: { url: string; token: string; workspaceId?: string; timeoutMs?: number }): Promise<RemoteSession> {
   const url = new URL(options.url);
   if (!remoteUrlAllowed(url)) throw new RemoteError('transport-refused', 'Refusing to send a credential over plain HTTP to a non-private host');
-  const timeout = options.timeoutMs ?? 4000;
+  const timeout = options.timeoutMs ?? 4000, startedAt = Date.now();
   const post = async (body: unknown, headers: Record<string, string> = {}): Promise<Response> => {
-    try { return await fetch(url, { method: 'POST', redirect: 'manual', headers: { Authorization: `Bearer ${options.token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeout) }); }
+    try { const remaining = timeout - (Date.now() - startedAt); if (remaining <= 0) throw new Error('timeout'); return await fetch(url, { method: 'POST', redirect: 'manual', headers: { Authorization: `Bearer ${options.token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(remaining) }); }
     catch { throw new RemoteError('network', 'The Engram server did not answer'); }
   };
   const init = await post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'engram-setup', version: '1' } } }, options.workspaceId ? { 'X-Engram-Workspace': options.workspaceId } : {});

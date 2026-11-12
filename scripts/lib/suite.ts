@@ -172,7 +172,7 @@ export async function runSuite(spec: SuiteSpec, outRoot = process.env.MDB_VERIFI
   const args = ['--test', `--test-timeout=${perTestTimeoutMs}`, '--test-reporter=tap', ...(spec.concurrency ? [`--test-concurrency=${spec.concurrency}`] : []), ...spec.files];
   const started = Date.now();
   let run: Awaited<ReturnType<typeof runTestProcess>>;
-  try { run = await runTestProcess(args, { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env }, suiteTimeoutMs); }
+  try { run = await runTestProcess(args, { ...process.env, VERIFY_CASES_FILE: casesFile, ...spec.env, MDB_DASHBOARD_ALERT: 'false' }, suiteTimeoutMs); }
   catch (error) { run = { status: 1, signal: null, stdout: '', stderr: `[runner] could not start test process: ${(error as Error).message}`, timedOut: false }; }
   const durationMs = Date.now() - started;
   const tests: TestResult[] = [];

@@ -63,7 +63,7 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
   await engram.close();
   const dashboardPort = await freePort(); browserPort = await freePort();
   dashboard = spawn(process.execPath, [path.join(repository, 'bin/mdb.js'), 'dashboard', '--root', vaultRoot, '--host', '127.0.0.1', '--port', String(dashboardPort)], {
-    cwd: repository, env: { ...process.env, PATH: fakeBin + path.delimiter + (process.env.PATH || ''), MDB_DASHBOARD_AUTH_FILE: authFile, MDB_DASHBOARD_ENABLED: 'true' }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: repository, env: { ...process.env, MDB_DASHBOARD_ALERT: 'false', PATH: fakeBin + path.delimiter + (process.env.PATH || ''), MDB_DASHBOARD_AUTH_FILE: authFile, MDB_DASHBOARD_ENABLED: 'true' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
   dashboard.stdout?.on('data', chunk => { stdout += String(chunk); });

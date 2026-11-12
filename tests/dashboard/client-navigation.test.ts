@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { disposableVault } from './helpers.js';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 
-const expected = ['This device', 'Server', 'Cached projects', 'Connections', 'Client settings'];
+const expected = ['This device', 'Server', 'Workspaces', 'Cached projects', 'Connections', 'Client settings'];
 class Element {
   children: Element[] = []; listeners = new Map<string, () => void>(); attrs = new Map<string, string>(); textContent = '';
   href = ''; scrollLeft = 0; clientWidth = 1000; offsetLeft = 0; offsetWidth = 100; className = '';
@@ -19,7 +19,7 @@ class Element {
 }
 const flatten = (el: Element): Element[] => [el, ...el.children.flatMap(flatten)];
 
-test('served client rewrite keeps one five-tab nav and routes Cached projects', async t => {
+test('served client rewrite keeps one six-tab nav and routes Workspaces and Cached projects', async t => {
   const vault = await disposableVault();
   const server = await createDashboardServer({ engram: vault.engram, clientMode: true, host: '127.0.0.1', port: 0, idleMs: 60_000 });
   t.after(async () => { await server.close(); await vault.cleanup(); });
@@ -29,7 +29,7 @@ test('served client rewrite keeps one five-tab nav and routes Cached projects', 
   assert.match(html, /Engram Client/);
   assert.doesNotMatch(html, /#overview|#knowledge|#settings/);
   assert.match(source, /const screens=clientScreens;/);
-  assert.match(source, /clientScreens=\[\['this-device','This device','⌂'\],\['server','Server','⇄'\],\['cached-projects','Cached projects','▤'\],\['connections','Connections','⇄'\],\['client-settings','Client settings','⚙'\]\]/);
+  assert.match(source, /clientScreens=\[\['this-device','This device','⌂'\],\['server','Server','⇄'\],\['workspaces','Workspaces','▦'\],\['cached-projects','Cached projects','▤'\],\['connections','Connections','⇄'\],\['client-settings','Client settings','⚙'\]\]/);
   assert.doesNotMatch(source.match(/^const screens=.*;$/m)?.[0] ?? '', /overview|knowledge|settings|clients/);
   assert.match(source, /page=clientScreens\.some\(\(\[id\]\)=>id===location\.hash\.slice\(1\)\)\?location\.hash\.slice\(1\):'this-device'/);
 
@@ -45,7 +45,7 @@ test('served client rewrite keeps one five-tab nav and routes Cached projects', 
   }) as { go: (id: string) => void };
   const navLabels = () => flatten(nav).filter(el => el.tagName === 'span' && !el.className).map(el => el.textContent);
   assert.deepEqual(navLabels(), expected, 'initial client nav');
-  for (const [index, id] of ['this-device','server','cached-projects','connections','client-settings'].entries()) {
+  for (const [index, id] of ['this-device','server','workspaces','cached-projects','connections','client-settings'].entries()) {
     if (index > 0) flatten(nav).find(el => el.tagName === 'a' && el.href === `#${id}`)!.listeners.get('click')!();
     assert.deepEqual(navLabels(), expected, `nav labels after navigating to ${id}`);
   }
@@ -57,7 +57,7 @@ test('served client rewrite keeps one five-tab nav and routes Cached projects', 
   const override = source.slice(renderStart, renderEnd);
   assert.match(override, /page==='cached-projects'\)view=await cachedProjectsPage\(\)/);
   assert.match(override, /else view=await thisDevicePage\(\)/);
-  assert.match(override, /content\.replaceChildren\(view\)/);
+  assert.match(override, /patchContent\(view\)/);
 
   const foldersStart = source.indexOf('async function cachedProjectsPage(){'), foldersEnd = source.indexOf('\nasync function ', foldersStart + 1);
   assert.ok(foldersStart >= 0 && foldersEnd > foldersStart, 'served Cached projects page is available');
@@ -78,4 +78,21 @@ test('served client rewrite keeps one five-tab nav and routes Cached projects', 
   assert.match(populated, /Enable replica sync/);
   const empty = collect(await makePage([]));
   assert.match(empty, /No project folders are bound on this machine/);
+
+  const workspaceStart = source.indexOf('async function clientWorkspacesPage(){'), workspaceEnd = source.indexOf('return area}', source.indexOf('return area}', workspaceStart) + 1) + 'return area}'.length;
+  assert.ok(workspaceStart >= 0 && workspaceEnd > workspaceStart, 'served Workspaces page is available');
+  const workspaceCode = source.slice(workspaceStart, workspaceEnd);
+  const makeWorkspacePage = async (data: unknown) => {
+    const node = (tag: string, className = '', text = '') => { const el = new Element(tag); el.className = className; el.textContent = text; return el; };
+    const api = async () => data;
+    const pageHeader = (title: string, text: string) => node('header', '', title + ' ' + text);
+    const page = vm.runInNewContext(`${workspaceCode};clientWorkspacesPage`, { node, api, pageHeader }) as () => Promise<Element>;
+    return page();
+  };
+  const workspaces = await makeWorkspacePage({ rows: [{ id:'alpha', name:'Alpha', connection:'connected', lastContactAt:'now', modes:['remote','cache-only'], cache:{ageMs:90000,stale:true}, queuedWrites:2, queuedBytes:40, replica:{state:'synced',pendingPush:1,pendingPull:0,conflicts:0}, folders:[{name:'alpha-project'}], writeAccess:null }] });
+  const workspaceText = (el: Element): string => [el.textContent, ...el.children.map(workspaceText)].join(' ');
+  assert.match(workspaceText(workspaces), /alpha-project.*STALE|STALE.*alpha-project/);
+  assert.equal(flatten(workspaces).find(el => el.getAttribute('data-key') === 'workspace-alpha')?.getAttribute('data-key'), 'workspace-alpha');
+  assert.match(workspaceText(await makeWorkspacePage({ rows:[] })), /No workspaces yet/);
+  assert.match(workspaceText(await makeWorkspacePage({ rows:[], error:'offline' })), /Workspace status unavailable/);
 });
