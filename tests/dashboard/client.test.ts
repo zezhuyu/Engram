@@ -226,8 +226,9 @@ test('client dashboard can start without a vault and isolates its auth state', a
   await assert.rejects(fs.access(path.join(home, '.Engram')));
   const page = await fetch(origin + '/'); const html = await page.text(); assert.match(html, /Engram Client/);
   const script = await fetch(origin + '/assets/app.js').then(response => response.text());
-  const screens = script.match(/const screens=\[(.*?)\];/)?.[1] ?? '';
-  assert.deepEqual([...screens.matchAll(/\['([^']+)'/g)].map(match => match[1]), ['this-device','server','connections','client-settings']);
+  assert.match(script, /const screens=clientScreens;/);
+  const screens = script.match(/const clientScreens=\[(.*?)\];/)?.[1] ?? '';
+  assert.deepEqual([...screens.matchAll(/\['([^']+)'/g)].map(match => match[1]), ['this-device','server','cached-projects','connections','client-settings']);
   assert.match(script, /Local state of this device/); assert.match(script, /This is not a copy of the server/); assert.match(script, /Refresh/);
   assert.doesNotMatch(script, /innerHTML|outerHTML|\beval\s*\(|localStorage/);
 });
