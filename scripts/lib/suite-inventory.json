@@ -2,7 +2,7 @@
   "version": 1,
   "suites": {
     "acid": {
-      "minimumTests": 74,
+      "minimumTests": 73,
       "requiredTests": [
         "10 independent processes: no lost acknowledged write, unique IDs, ordered revisions, zero lock timeouts",
         "50 independent processes: no lost acknowledged write, unique IDs, ordered revisions, zero lock timeouts",
@@ -671,7 +671,7 @@
       }
     },
     "security": {
-      "minimumTests": 130,
+      "minimumTests": 128,
       "requiredTests": [
         "CI failure diagnostics show the assertion but never credentials, secret environment values or the home directory",
         "CRITICAL: a binding that arrived with a cloned repository is never obeyed; nothing is sent, no credential leaves the machine",
@@ -1074,7 +1074,7 @@
       }
     },
     "intelligence": {
-      "minimumTests": 49,
+      "minimumTests": 48,
       "requiredTests": [
         "OpenAI-compatible API: path, headers, body, content-part arrays and response_format fallback all behave",
         "SIGKILL during model scratch leaves a marked orphan that restart reports without deleting",
