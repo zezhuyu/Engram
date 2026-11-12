@@ -135,15 +135,25 @@ test('server applyOperation SIGKILL points replay idempotently over real HTTP', 
   const serverCode = `import {createServer} from 'node:http';const {Vault}=await import(${JSON.stringify(vaultUrl)});const {handleReplicaRoute}=await import(${JSON.stringify(routeUrl)});const root=process.env.ORIGIN_ROOT,actor={actorId:'matrix-agent',permissions:['workspace:project:read','workspace:project:write'],credentialBound:true},vault=new Vault(root,actor);const server=createServer(async(req,res)=>{const chunks=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));const send=(_res,status,value,headers={})=>{res.writeHead(status,{'content-type':'application/json',...headers});res.end(JSON.stringify(value));};if(req.headers.authorization!=='Bearer '+process.env.MATRIX_TOKEN){send(res,401,{error:'Unauthorized'});return;}try{await handleReplicaRoute(root,vault,actor,process.env.CREDENTIAL_ID,req,res,new URL(req.url??'/','http://127.0.0.1'),async()=>JSON.parse(Buffer.concat(chunks).toString('utf8')),send);}catch(error){if(!res.headersSent)send(res,500,{error:String(error)});}});server.listen(0,'127.0.0.1',()=>process.stdout.write(JSON.stringify({port:server.address().port})+'\\n'));`;
   const startServer = async (point?: string) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', serverCode], { cwd: process.cwd(), env: { ...process.env, NODE_ENV: 'test', ...(point ? { MDB_FAULT_KILL_AT: point } : {}), ORIGIN_ROOT: originRoot, MATRIX_TOKEN: credential.token, CREDENTIAL_ID: credential.id }, stdio: ['ignore', 'pipe', 'inherit'] });
+    const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
     let pending = '';
     const port = await new Promise<number>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('HTTP fault server did not start')), 10_000);
       child.stdout!.on('data', (chunk: Buffer) => { pending += chunk.toString(); const newline = pending.indexOf('\n'); if (newline >= 0) { clearTimeout(timeout); resolve((JSON.parse(pending.slice(0, newline)) as { port: number }).port); } });
       child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`HTTP fault server exited before ready (${code}/${signal}): ${pending}`)); });
     });
-    return { child, url: `http://127.0.0.1:${port}` };
+    return { child, exit, url: `http://127.0.0.1:${port}` };
   };
-  const stop = async (child: ReturnType<typeof spawn>) => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once('exit', () => resolve())); };
+  const waitForExit = async (exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>, context: string) => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        exit,
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`${context}: child did not exit within 20 seconds`)), 20_000); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  const stop = async (server: Awaited<ReturnType<typeof startServer>>) => { if (server.child.exitCode === null && server.child.signalCode === null) server.child.kill('SIGTERM'); await waitForExit(server.exit, 'HTTP fault server shutdown'); };
   const outcomes: Array<{ point: string; outcome: string }> = [];
   for (const point of ['server.after_vault_commit_before_result_store', 'server.after_result_store_before_response']) {
     await store.vault.put({ scope, kind: 'note', title: `server commit ${point}`, body: 'must survive server process death' });
@@ -152,7 +162,7 @@ test('server applyOperation SIGKILL points replay idempotently over real HTTP', 
     const firstRequest = fetch(`${first.url}/replica/v1/push`, { method: 'POST', headers: { Authorization: `Bearer ${credential.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ v: 1, deviceId: store.deviceId, ops: [op] }) });
     try { const response = await firstRequest; const detail = `${point}: expected server SIGKILL, got HTTP ${response.status} ${await response.text()}`; first.child.kill('SIGTERM'); assert.fail(detail); }
     catch (error) { if (String(error).includes('expected server SIGKILL')) throw error; }
-    const killed = await new Promise<NodeJS.Signals | null>(resolve => first.child.once('exit', (_code, signal) => resolve(signal)));
+    const killed = (await waitForExit(first.exit, `${point}: SIGKILL fault server`)).signal;
     assert.equal(killed, 'SIGKILL', point);
     const second = await startServer();
     try {
@@ -173,7 +183,7 @@ test('server applyOperation SIGKILL points replay idempotently over real HTTP', 
       assert.equal((await origin.verify()).ok, true, point); assert.equal((await store.verify()).ok, true, point);
       assert.equal(store.status().pendingPush, 0, point);
       outcomes.push({ point, outcome: `${payload.results[0]!.code}; one revision; HTTP retry converged; verify ok` });
-    } finally { await stop(second.child); }
+    } finally { await stop(second); }
   }
   process.stdout.write(`server crash matrix\n${outcomes.map(row => `${row.point}\t${row.outcome}`).join('\n')}\n`);
 });
