@@ -13,7 +13,72 @@ import { suiteEvidenceStatus } from '../scripts/lib/release-policy.js';
 import { inventoryDrift } from '../scripts/lib/suite-inventory.js';
 import { loadSuiteReport } from '../scripts/lib/suite.js';
 import { getSkipClassification, skipClassificationHash, skipClassificationId } from '../scripts/lib/skip-classifications.js';
+import { currentSourceEvidence } from '../scripts/lib/source-evidence.js';
 import { createReleaseFixture } from './helpers/release-fixture.js';
+
+async function sourceEvidenceGitFixture(): Promise<string> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'engram-source-evidence-guards-'));
+  await mkdir(path.join(root, 'scripts'), { recursive: true });
+  await writeFile(path.join(root, 'scripts', 'tracked.ts'), 'tracked source\n');
+  await writeFile(path.join(root, '.gitignore'), 'AGENTS.md\ndocs/\n');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+  execFileSync('git', ['add', '.gitignore', 'scripts/tracked.ts'], { cwd: root });
+  execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: root });
+  return root;
+}
+
+test('ignored untracked source files do not change the fingerprint or tree state', async () => {
+  const root = await sourceEvidenceGitFixture();
+  try {
+    const before = await currentSourceEvidence(root);
+    await writeFile(path.join(root, 'AGENTS.md'), 'private instructions\n');
+    await mkdir(path.join(root, 'docs'));
+    await writeFile(path.join(root, 'docs', 'private.md'), 'private docs\n');
+    const after = await currentSourceEvidence(root);
+    assert.equal(after.fingerprint, before.fingerprint);
+    assert.equal(after.treeState.state, 'clean');
+    assert.deepEqual(after.treeState.modified, []);
+    assert.deepEqual(after.treeState.untracked, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unignored untracked source files mark tree state dirty', async () => {
+  const root = await sourceEvidenceGitFixture();
+  try {
+    await writeFile(path.join(root, 'scripts', 'new.ts'), 'new source\n');
+    const evidence = await currentSourceEvidence(root);
+    assert.equal(evidence.treeState.state, 'dirty');
+    assert.deepEqual(evidence.treeState.untracked, ['scripts/new.ts']);
+    assert.ok(evidence.files['scripts/new.ts']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('modified tracked source files mark tree state dirty', async () => {
+  const root = await sourceEvidenceGitFixture();
+  try {
+    await writeFile(path.join(root, 'scripts', 'tracked.ts'), 'modified source\n');
+    const evidence = await currentSourceEvidence(root);
+    assert.equal(evidence.treeState.state, 'dirty');
+    assert.deepEqual(evidence.treeState.modified, ['scripts/tracked.ts']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('ignored private files do not affect fingerprints across equivalent checkouts', async () => {
+  const withoutPrivateFiles = await sourceEvidenceGitFixture();
+  const withPrivateFiles = await sourceEvidenceGitFixture();
+  try {
+    await writeFile(path.join(withPrivateFiles, 'AGENTS.md'), 'machine-specific instructions\n');
+    await mkdir(path.join(withPrivateFiles, 'docs'));
+    await writeFile(path.join(withPrivateFiles, 'docs', 'private.md'), 'machine-specific docs\n');
+    const plain = await currentSourceEvidence(withoutPrivateFiles);
+    const privateCheckout = await currentSourceEvidence(withPrivateFiles);
+    assert.equal(privateCheckout.fingerprint, plain.fingerprint);
+    assert.equal(privateCheckout.treeState.state, 'clean');
+  } finally { await Promise.all([rm(withoutPrivateFiles, { recursive: true, force: true }), rm(withPrivateFiles, { recursive: true, force: true })]); }
+});
 
 function hasForbiddenKeys(text: string): boolean {
   let i = 0;

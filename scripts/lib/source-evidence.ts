@@ -55,6 +55,11 @@ export async function currentSourceEvidence(root = process.cwd()): Promise<Sourc
   const gitTop = git(['rev-parse', '--show-toplevel']).trim();
   const [canonicalGitTop, canonicalRoot] = await Promise.all([gitTop ? fs.realpath(gitTop).catch(() => '') : Promise.resolve(''), fs.realpath(root).catch(() => path.resolve(root))]);
   const gitDir = !!canonicalGitTop && canonicalGitTop === canonicalRoot;
+  // In a checkout, only files Git considers part of the source set participate:
+  // indexed files (including staged additions) and untracked, non-ignored files.
+  // This keeps local/private ignored material out of both the fingerprint and
+  // dirty-tree decision while retaining the filesystem-only behavior without Git.
+  const gitSourceFiles = gitDir ? new Set(git(['ls-files', '--cached', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean)) : undefined;
   if (gitDir) {
     const tracked = git(['ls-tree', '-r', '-z', '--name-only', 'HEAD']).split('\0').filter(Boolean);
     for (const name of tracked) if (ROOT_FILES.includes(name) || EVALUATION_INPUTS.includes(name) || SOURCE_DIRS.some(dir => name.startsWith(`${dir}/`))) {
@@ -63,8 +68,8 @@ export async function currentSourceEvidence(root = process.cwd()): Promise<Sourc
       names.add(name);
     }
   }
-  for (const name of ROOT_FILES) { const stat = await sourceStat(name); if (stat?.isFile() || stat?.isSymbolicLink()) names.add(name); }
-  for (const name of EVALUATION_INPUTS) { const stat = await sourceStat(name); if (stat?.isFile() || stat?.isSymbolicLink()) names.add(name); }
+  for (const name of ROOT_FILES) { const stat = await sourceStat(name); if ((!gitSourceFiles || gitSourceFiles.has(name)) && (stat?.isFile() || stat?.isSymbolicLink())) names.add(name); }
+  for (const name of EVALUATION_INPUTS) { const stat = await sourceStat(name); if ((!gitSourceFiles || gitSourceFiles.has(name)) && (stat?.isFile() || stat?.isSymbolicLink())) names.add(name); }
   const walk = async (relative: string): Promise<void> => {
     const absolute = path.join(root, relative);
     const directoryStat = await fs.lstat(absolute).catch(() => undefined);
@@ -75,11 +80,11 @@ export async function currentSourceEvidence(root = process.cwd()): Promise<Sourc
       if (entry.name === '.DS_Store' || entry.name === 'node_modules' || entry.name === 'dist') continue;
       const child = path.posix.join(relative.split(path.sep).join(path.posix.sep), entry.name);
       if (entry.isDirectory()) await walk(child);
-      else if (entry.isSymbolicLink()) { names.add(child); symlinks.add(child); }
+      else if (entry.isSymbolicLink()) { if (!gitSourceFiles || gitSourceFiles.has(child)) { names.add(child); symlinks.add(child); } }
       // These directories are the declared release input set. Include extensionless and
       // dot-example deployment files too; a filename extension is not a security boundary.
-      else if (entry.isFile()) names.add(child);
-      else throw new Error(`Unsupported special file in fingerprinted source: ${child}`);
+      else if (entry.isFile()) { if (!gitSourceFiles || gitSourceFiles.has(child)) names.add(child); }
+      else if (!gitSourceFiles || gitSourceFiles.has(child) || !git(['check-ignore', '--', child]).trim()) throw new Error(`Unsupported special file in fingerprinted source: ${child}`);
     }
   };
   for (const directory of SOURCE_DIRS) await walk(directory);
@@ -105,7 +110,7 @@ export async function currentSourceEvidence(root = process.cwd()): Promise<Sourc
     const index = new Map<string, string>();
     for (const row of git(['ls-files', '-s', '-z']).split('\0').filter(Boolean)) { const [meta, name] = row.split('\t'); if (name && meta) index.set(name, meta); }
     const tracked = paths.filter(name => head.has(name) || index.has(name));
-    const untrackedSet = new Set(git(['ls-files', '--others', '-z', '--', ...paths]).split('\0').filter(Boolean));
+    const untrackedSet = new Set(git(['ls-files', '--others', '--exclude-standard', '-z', '--', ...paths]).split('\0').filter(Boolean));
     const untracked = paths.filter(name => untrackedSet.has(name)).sort();
     const modified: string[] = [];
     for (const name of tracked) {

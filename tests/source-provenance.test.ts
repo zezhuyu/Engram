@@ -48,15 +48,15 @@ test('untracked fingerprinted source is dirty and no-git roots are identified', 
   } finally { await Promise.all([rm(root, { recursive: true, force: true }), rm(archive, { recursive: true, force: true })]); }
 });
 
-test('ignored untracked files remain dirty when they enter the fingerprinted source set', async () => {
+test('ignored untracked files do not enter the fingerprinted source set', async () => {
   const root = await fixture();
   try {
-    await writeFile(path.join(root, '.gitignore'), 'scripts/ignored.ts\n');
+    await writeFile(path.join(root, '.git', 'info', 'exclude'), 'scripts/ignored.ts\n');
     await writeFile(path.join(root, 'scripts', 'ignored.ts'), 'included in evidence');
     const evidence = await currentSourceEvidence(root);
-    assert.ok(evidence.files['scripts/ignored.ts']);
-    assert.ok(evidence.treeState.untracked.includes('scripts/ignored.ts'));
-    assert.equal(evidence.treeState.state, 'dirty');
+    assert.equal(evidence.files['scripts/ignored.ts'], undefined);
+    assert.deepEqual(evidence.treeState.untracked, []);
+    assert.equal(evidence.treeState.state, 'clean');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
