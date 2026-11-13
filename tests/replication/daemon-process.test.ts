@@ -13,6 +13,22 @@ const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const spawnMdb = (args: string[], env: NodeJS.ProcessEnv) => spawn(process.execPath, [path.join(repo, 'bin/mdb.js'), ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 const exited = (child: ChildProcess) => new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
 const alive = (child: ChildProcess) => child.exitCode === null && child.signalCode === null;
+const waitForDaemonReady = async (child: ChildProcess, statusFile: string, getOutput: () => string, timeoutMs = 5000) => {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus: unknown;
+  while (Date.now() < deadline) {
+    assert.equal(alive(child), true, `daemon exited before readiness: ${getOutput()}`);
+    try {
+      const status = JSON.parse(await readFile(statusFile, 'utf8')) as { pid?: number; state?: string };
+      lastStatus = status;
+      if (status.pid === child.pid && ['offline', 'syncing', 'synced', 'refused', 'epoch-changed', 'paused', 'conflict'].includes(status.state ?? '')) return status;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await wait(25);
+  }
+  assert.fail(`daemon did not become ready within ${timeoutMs}ms (last status: ${JSON.stringify(lastStatus)}): ${getOutput()}`);
+};
 
 test('real daemon survives offline polling, writes atomic status, recovers a killed lock, and stops on SIGTERM', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'engram-daemon-process-'));
@@ -36,11 +52,7 @@ test('real daemon survives offline polling, writes atomic status, recovers a kil
   child.stderr!.setEncoding('utf8'); child.stderr!.on('data', chunk => { output += chunk; });
   const statusFile = path.join(replicaDir, 'process-daemon', '.replica', 'status.json');
   const samples: number[] = [];
-  const startupDeadline = Date.now() + 5000;
-  while (Date.now() < startupDeadline) {
-    try { JSON.parse(await readFile(statusFile, 'utf8')); break; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; await wait(25); }
-  }
+  await waitForDaemonReady(child, statusFile, () => output);
   for (let i = 0; i < 10; i++) {
     assert.equal(alive(child), true, `daemon exited early: ${output}`);
     const until = Date.now() + 1000;
@@ -63,8 +75,7 @@ test('real daemon survives offline polling, writes atomic status, recovers a kil
   daemon = restarted;
   output = '';
   restarted.stderr.setEncoding('utf8'); restarted.stderr.on('data', chunk => { output += chunk; });
-  await wait(300);
-  assert.equal(alive(restarted), true, `restart did not recover stale lock: ${output}`);
+  await waitForDaemonReady(restarted, statusFile, () => output);
   const stopped = exited(restarted);
   restarted.kill('SIGTERM');
   const result = await Promise.race([stopped, wait(15_000).then(() => 'timeout' as const)]);
@@ -144,6 +155,20 @@ test('replica stdio MCP process remains alive while idle', async t => {
   await store.enrollScope({ type: 'workspace', workspaceId: 'proj' });
   const child = spawn(process.execPath, [path.join(repo, 'bin/mdb-mcp.js'), '--replica', 'process-mcp', '--workspace', 'proj'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (alive(child)) child.kill('SIGTERM'); });
+  let stdout = '';
+  child.stdout!.setEncoding('utf8');
+  const initialized = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`replica stdio MCP did not answer initialize: ${stdout}`)), 5000);
+    child.stdout!.on('data', (chunk: string) => {
+      stdout += chunk;
+      for (const line of stdout.split('\n')) {
+        try { if (JSON.parse(line).id === 1) { clearTimeout(timeout); resolve(); return; } } catch { /* wait for a complete JSON-RPC line */ }
+      }
+    });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`replica stdio MCP exited before initialize (${code ?? signal}): ${stdout}`)); });
+  });
+  child.stdin!.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'daemon-process-test', version: '1' } } })}\n`);
+  await initialized;
   await wait(10_000);
   assert.equal(alive(child), true, 'replica stdio MCP server exited while idle');
   child.kill('SIGTERM');
@@ -157,6 +182,13 @@ test('outbox-watch CLI process remains alive while its queue is idle', async t =
   const env = { ...process.env, HOME: path.join(root, 'home'), XDG_CONFIG_HOME: path.join(root, 'config'), XDG_DATA_HOME: path.join(root, 'data'), XDG_STATE_HOME: path.join(root, 'state'), ENGRAM_OUTBOX: outbox };
   const child = spawnMdb(['outbox', 'watch', '--url', 'http://127.0.0.1:9', '--token-file', token, '--outbox', outbox, '--interval-sec', '1'], env);
   t.after(async () => { if (alive(child)) { child.kill('SIGKILL'); await exited(child); } await rm(root, { recursive: true, force: true }); });
+  let output = '';
+  child.stderr!.setEncoding('utf8');
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`outbox watcher did not report startup: ${output}`)), 5000);
+    child.stderr!.on('data', (chunk: string) => { output += chunk; if (output.includes('"event":"start"')) { clearTimeout(timeout); resolve(); } });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`outbox watcher exited before startup (${code ?? signal}): ${output}`)); });
+  });
   await wait(10_000);
   assert.equal(alive(child), true, 'outbox watcher exited while its queue was idle');
   const stopped = exited(child);
