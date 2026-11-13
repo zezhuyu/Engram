@@ -28,6 +28,10 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
   const outbox = options.outbox ?? defaultOutboxDirectory(), timeout = options.timeoutMs ?? 8000, doFetch = options.fetchImpl ?? fetch, log = options.log ?? (() => undefined);
   const identity = createHash('sha256').update(`${options.url}\0${options.workspaceId ?? ''}`).digest('hex').slice(0, 16);
   const cacheFile = path.join(outbox, `cache-${identity}.json`);
+  const warnCacheSave = (tool: string, error: unknown): void => {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    process.stderr.write(`engram proxy: could not persist remembered revision for ${tool}: ${typeof code === 'string' ? code : 'unknown error'}\n`);
+  };
   const mine = (entry: OutboxEntry) => entry.url === options.url && (entry.workspaceId ?? '') === (options.workspaceId ?? '');
   let id = 1000;
   type Cache = { initialize?: unknown; tools?: unknown; bases?: Record<string, string>; serverTime?: string };
@@ -47,8 +51,8 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
   };
   const saveCache = (): Promise<unknown> => { const job: Promise<unknown> = (async () => {
     await fs.mkdir(outbox, { recursive: true, mode: 0o700 });
-    await withLock(async () => { const other = await readCache(); const merged: Cache = { ...other, ...cache, bases: { ...other.bases, ...cache.bases } }; const temporary = `${cacheFile}.${process.pid}.${randomUUID()}.tmp`; await fs.writeFile(temporary, JSON.stringify(merged), { mode: 0o600 }); await fs.rename(temporary, cacheFile).catch(() => fs.rm(temporary, { force: true })); Object.assign(cache, { bases: merged.bases }); if (!cache.tools && merged.tools) cache.tools = merged.tools; if (!cache.initialize && merged.initialize) cache.initialize = merged.initialize; });
-  })().catch(() => undefined).finally(() => saves.delete(job)); saves.add(job); return job; };
+    await withLock(async () => { const other = await readCache(); const merged: Cache = { ...other, ...cache, bases: { ...other.bases, ...cache.bases } }; const temporary = `${cacheFile}.${process.pid}.${randomUUID()}.tmp`; await fs.writeFile(temporary, JSON.stringify(merged), { mode: 0o600 }); await fs.rename(temporary, cacheFile).catch(async error => { await fs.rm(temporary, { force: true }); throw error; }); Object.assign(cache, { bases: merged.bases }); if (!cache.tools && merged.tools) cache.tools = merged.tools; if (!cache.initialize && merged.initialize) cache.initialize = merged.initialize; });
+  })().finally(() => saves.delete(job)); saves.add(job); return job; };
 
   const post = async (body: unknown, extra: Record<string, string> = {}): Promise<Response> => {
     try { const response = await doFetch(url, { method: 'POST', redirect: 'manual', headers: { Authorization: `Bearer ${options.token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', ...(options.workspaceId ? { 'X-Engram-Workspace': options.workspaceId } : {}), ...extra }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeout) });
@@ -71,7 +75,7 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
     const response = await post({ jsonrpc: '2.0', id: id++, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'engram-proxy', version: '1' } } });
     classify(response); const sid = response.headers.get('mcp-session-id');
     if (response.status !== 200 || !sid) throw new Unreachable('offline', `Unexpected initialize response (${response.status})`);
-    const reply = await readReply(response); if (reply.result) { cache.initialize = reply.result; void saveCache(); }
+    const reply = await readReply(response); if (reply.result) { cache.initialize = reply.result; void saveCache().catch(() => undefined); }
     const initialized = await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, { 'Mcp-Session-Id': sid }); await initialized.arrayBuffer().catch(() => undefined);
     return sid;
   };
@@ -108,7 +112,7 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
       if (reply.error) { const refused = /scope|access|forbidden|not found/i.test(reply.error.message) || entry.attempts >= 7; if (refused) await appendLog(outbox, { event: 'rejected', id: entry.id, tool: entry.tool, key: entry.key, queuedAt: entry.queuedAt, reason: reply.error.message.slice(0, 200) }); return refused ? 'rejected' : 'retry'; }
       let parsed: { persistence?: string; revisionId?: string; merge?: { outcome?: string; conflictNoteId?: string; conflictingFields?: string[] }; error?: { code?: string; message?: string } } = {}; try { parsed = JSON.parse(body); } catch { /* plain text */ }
       if (!result?.isError) {
-        if (parsed.revisionId) { cache.bases![entry.key] = parsed.revisionId; delivered.set(entry.id, parsed.revisionId); void saveCache(); }
+        if (parsed.revisionId) { cache.bases![entry.key] = parsed.revisionId; delivered.set(entry.id, parsed.revisionId); await saveCache(); }
         await appendLog(outbox, { event: parsed.merge?.outcome === 'CONFLICT' ? 'conflict-note' : parsed.merge?.outcome === 'MERGED' ? 'merged' : 'delivered', id: entry.id, tool: entry.tool, key: entry.key, queuedAt: entry.queuedAt, outcome: parsed.merge?.outcome ?? parsed.persistence ?? 'COMMITTED', ...(parsed.revisionId ? { revisionId: parsed.revisionId } : {}), ...(parsed.merge?.conflictNoteId ? { conflictNoteId: parsed.merge.conflictNoteId, conflictingFields: parsed.merge.conflictingFields } : {}) });
         return 'delivered';
       }
@@ -133,7 +137,9 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
     };
     if ((await listOutbox(outbox, mine)).length) await drain(); // an older queued write for the same record must reach the server first
     if ((await listOutbox(outbox, entry => mine(entry) && entry.key === key)).length) return queue('an earlier write to the same record is still waiting for the server');
-    try { const reply = await forward('tools/call', { name: tool, arguments: args }); reply.id = message.id ?? null; try { const seen = JSON.parse((reply.result as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text ?? '{}') as { revisionId?: string }; if (seen.revisionId) { cache.bases![key] = seen.revisionId; void saveCache(); } } catch { /* not a typed result */ } void drain(); return reply; }
+    try { const reply = await forward('tools/call', { name: tool, arguments: args }); reply.id = message.id ?? null; let seen: { revisionId?: string } = {}; try { seen = JSON.parse((reply.result as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text ?? '{}') as { revisionId?: string }; } catch { /* not a typed result */ } if (seen.revisionId) { cache.bases![key] = seen.revisionId; try { await saveCache(); } catch (error) { // The server already committed this write; cache loss only weakens a future merge base.
+        warnCacheSave(tool, error);
+      } } void drain(); return reply; }
     catch (error) { if (error instanceof Unreachable) return queue(error.message); throw error; }
   };
   const handle = async (message: Rpc): Promise<RpcReply | undefined> => {
@@ -154,7 +160,7 @@ export async function runMcpProxy(options: ProxyOptions): Promise<void> {
           return { jsonrpc: '2.0', id: message.id, result: { ...(cache.initialize as object ?? { protocolVersion: requested, capabilities: { tools: {} }, serverInfo: { name: 'engram-offline-proxy', version: '1' } }), instructions: `The Engram server is unreachable right now (${error.message}). Task, note and handoff writes are kept on this machine and sent to the server automatically when it returns; reads fail until then.` } }; }
       }
       if (method === 'tools/call' && (WRITE_TOOLS as readonly string[]).includes(String(message.params?.name))) return await handleWrite(message);
-      try { const reply = await forward(method, message.params); reply.id = message.id; if (method === 'tools/list' && reply.result) { cache.tools = reply.result; void saveCache(); } void drain(); return reply; }
+      try { const reply = await forward(method, message.params); reply.id = message.id; if (method === 'tools/list' && reply.result) { cache.tools = reply.result; void saveCache().catch(() => undefined); } void drain(); return reply; }
       catch (error) {
         if (!(error instanceof Unreachable)) throw error;
         if (method === 'tools/list') return { jsonrpc: '2.0', id: message.id, result: cache.tools ?? { tools: [] } };

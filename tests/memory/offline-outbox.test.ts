@@ -3,15 +3,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import path, { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PassThrough } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { Engram } from '../../packages/sdk/index.js';
 import { createHttpCredential } from '../../packages/mcp/credentials.js';
 import { runMcpProxy } from '../../packages/memory/mcp-proxy.js';
-import { outboxStatus } from '../../packages/memory/outbox.js';
-import { drainOutboxNow } from '../../packages/memory/mcp-proxy.js';
+import { drainOutbox, enqueueWrite, outboxStatus } from '../../packages/memory/outbox.js';
+import { drainOutboxNow, proxyCall } from '../../packages/memory/mcp-proxy.js';
 import { rotateHttpCredential } from '../../packages/mcp/credentials.js';
 import { stat, readFile as readF } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
@@ -74,6 +75,78 @@ test('when the server returns, the queued write reaches it (after a restart that
   const tasks = await w.serverTasks(); assert.deepEqual(tasks.map(d => d.metadata.stableId).sort(), ['T-1', 'T-2', 'T-3']); assert.equal(tasks.find(d => d.metadata.stableId === 'T-2')!.metadata.taskStatus, 'in_progress');
   assert.ok((await w.owner.vault.listDocuments({ scopes: [{ type: 'workspace', workspaceId: 'proj' }] })).some(d => d.metadata.stableId === 'plans/x' && d.body === 'offline note'));
   recordCase({ suite: 'memory', name: 'offline-outbox-replays-and-deletes', status: 'PASS' });
+});
+
+test('an online write persists its merge base before response, so a fresh proxy can merge after an immediate stop', async t => {
+  const w = await world(t);
+  const written = await w.task('T-BASE', 'Base', 'open', { body: 'client line\nserver line\n' });
+  assert.equal(written.value.persistence, 'COMMITTED');
+  const cacheName = (await readdir(w.outbox)).find(name => /^cache-.*\.json$/.test(name));
+  assert.ok(cacheName, 'the cache exists as soon as the successful write response arrives');
+  const cache = JSON.parse(await readFile(path.join(w.outbox, cacheName!), 'utf8')) as { bases?: Record<string, string> };
+  const baseId = cache.bases?.['engram_task_upsert:T-BASE'];
+  assert.ok(baseId, 'the acknowledged record revision is already on disk');
+  assert.equal((await w.owner.vault.get((await w.serverTasks()).find(doc => doc.metadata.stableId === 'T-BASE')!.id)).revisionId, baseId);
+
+  await w.stop();
+  await upsertTask(w.owner, { scope: { type: 'workspace', workspaceId: 'proj' }, taskId: 'T-BASE', title: 'Base', status: 'in_progress', body: 'client line\nserver line\n' });
+  const input = new PassThrough(), output = new PassThrough(); const pending = new Map<number, (message: any) => void>(); let buffer = '';
+  output.setEncoding('utf8'); output.on('data', (chunk: string) => { buffer += chunk; let end; while ((end = buffer.indexOf('\n')) >= 0) { const message = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1); pending.get(message.id)?.(message); } });
+  const done = runMcpProxy({ url: w.url, token: w.token, workspaceId: 'proj', outbox: w.outbox, input, output, timeoutMs: 2500, drainIntervalMs: 60_000, autoReconnect: false });
+  const rpc = (method: string, params?: unknown): Promise<any> => new Promise(resolve => { const id = pending.size + 1; pending.set(id, resolve); input.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) })}\n`); });
+  const offline = await rpc('tools/call', { name: 'engram_task_upsert', arguments: { taskId: 'T-BASE', title: 'Base', status: 'open', body: 'client line (offline)\nserver line\n' } });
+  assert.match(offline.result.content[0].text, /QUEUED_OFFLINE/);
+  input.end(); await done;
+  const queued = JSON.parse(await readFile(path.join(w.outbox, (await w.queuedFiles())[0]!), 'utf8')) as { baseRevisionId?: string };
+  assert.equal(queued.baseRevisionId, baseId, 'the restarted proxy loaded and attached the durable base');
+  await w.start();
+  const drained = await drainOutboxNow({ url: w.url, token: w.token, workspaceId: 'proj', outbox: w.outbox, timeoutMs: 4000 });
+  assert.equal(drained?.remaining, 0);
+  const merged = (await w.serverTasks()).find(doc => doc.metadata.stableId === 'T-BASE')!;
+  assert.equal(merged.metadata.taskStatus, 'in_progress');
+  assert.match(merged.body, /client line \(offline\)/, 'the body edit merges with the server status edit after proxy restart');
+  recordCase({ suite: 'memory', name: 'offline-proxy-write-base-durable-before-response', status: 'PASS' });
+});
+
+test('an online committed write is acknowledged when the remembered-base cache cannot be saved', async t => {
+  const w = await world(t); const outbox = path.join(w.outbox, 'cache-save-failure');
+  await mkdir(outbox, { recursive: true });
+  const cachePath = path.join(outbox, `cache-${createHash('sha256').update(`${w.url}\0proj`).digest('hex').slice(0, 16)}.json`);
+  await mkdir(cachePath);
+  t.after(() => rm(cachePath, { recursive: true, force: true }));
+
+  const stderr: string[] = []; const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  const written = await proxyCall({ url: w.url, token: w.token, workspaceId: 'proj', outbox }, 'tools/call', { name: 'engram_task_upsert', arguments: { taskId: 'T-CACHE-FAIL', title: 'Committed despite cache failure', status: 'open' } });
+  assert.equal((written.value as { persistence?: string }).persistence, 'COMMITTED');
+  assert.equal((await w.serverTasks()).filter(doc => doc.metadata.stableId === 'T-CACHE-FAIL').length, 1);
+  assert.equal(stderr.filter(line => line.includes('could not persist remembered revision for engram_task_upsert: EISDIR')).length, 1);
+  recordCase({ suite: 'memory', name: 'offline-proxy-committed-write-cache-failure', status: 'PASS' });
+});
+
+test('a replay whose cache save fails stays queued and safely replays idempotently after cache recovery', async t => {
+  const w = await world(t); await w.stop(); await w.task('T-DRAIN-CACHE-FAIL', 'Replay me');
+  const queued = await w.queuedFiles(); assert.equal(queued.length, 1);
+  await w.start();
+  const cachePath = path.join(w.outbox, `cache-${createHash('sha256').update(`${w.url}\0proj`).digest('hex').slice(0, 16)}.json`);
+  await rm(cachePath, { force: true }); await mkdir(cachePath);
+  t.after(() => rm(cachePath, { recursive: true, force: true }));
+
+  const failedSave = await drainOutboxNow({ url: w.url, token: w.token, workspaceId: 'proj', outbox: w.outbox, timeoutMs: 4000 });
+  assert.equal(failedSave?.remaining, 1, 'a failed base-cache save yields retry, so the durable entry stays queued');
+  assert.equal((await w.queuedFiles()).length, 1);
+  let committed = (await w.serverTasks()).filter(doc => doc.metadata.stableId === 'T-DRAIN-CACHE-FAIL');
+  for (let i = 0; i < 30 && committed.length === 0; i++) { await new Promise(resolve => setTimeout(resolve, 50)); committed = (await w.serverTasks()).filter(doc => doc.metadata.stableId === 'T-DRAIN-CACHE-FAIL'); }
+  assert.equal(committed.length, 1, 'the server committed once even though its cache base could not be saved');
+
+  await rm(cachePath, { recursive: true, force: true });
+  const recovered = await drainOutboxNow({ url: w.url, token: w.token, workspaceId: 'proj', outbox: w.outbox, timeoutMs: 4000 });
+  assert.equal(recovered?.remaining, 0);
+  assert.equal((await w.queuedFiles()).length, 0);
+  const doc = (await w.serverTasks()).find(item => item.metadata.stableId === 'T-DRAIN-CACHE-FAIL')!;
+  assert.equal((await w.owner.vault.history(doc.id)).length, 1, 'ALREADY_APPLIED replay does not create a duplicate revision');
+  recordCase({ suite: 'memory', name: 'offline-proxy-drain-cache-failure-idempotent', status: 'PASS' });
 });
 
 test('order is preserved: two offline versions of one record arrive as two revisions, newest last; a newer online write never gets overwritten by an older queued one', async t => {
@@ -203,4 +276,27 @@ test('regression (found by the multi-day run): several writes queued offline on 
   await w.start(); const drained = await drainOutboxNow({ url: w.url, token: w.token, workspaceId: 'proj', outbox: w.outbox, timeoutMs: 5000, waitMs: 60000 });
   const doc = (await w.serverTasks()).find(d => d.metadata.stableId === 'D-1')!; assert.equal(drained?.remaining, 0); assert.equal(doc.body, 'client: 4\n\nserver: 3\n', 'both sides\' latest lines survive'); assert.equal((await w.owner.vault.history(doc.id)).length, 1 + 3 + 4, 'baseline, 3 server edits, 4 client edits, each one revision');
   recordCase({ suite: 'memory', name: 'offline-outbox-chained-writes-do-not-revert-server', status: 'PASS' });
+});
+
+test('independent processes serialize drains at the shared outbox and never deliver the same entry concurrently', async t => {
+  const w = await world(t); await w.stop();
+  await enqueueWrite(w.outbox, { url: w.url, workspaceId: 'proj', tool: 'engram_task_upsert', arguments: { taskId: 'LOCK-1', title: 'queued', status: 'open' } });
+  let calls = 0; let unblock!: () => void;
+  const gate = new Promise<void>(resolve => { unblock = resolve; });
+  const delivery = async () => { calls++; await gate; return 'delivered' as const; };
+  const first = drainOutbox({ directory: w.outbox, deliver: delivery });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const moduleUrl = pathToFileURL(resolve('dist/packages/memory/outbox.js')).href;
+  const script = `const { drainOutbox } = await import(${JSON.stringify(moduleUrl)}); const result = await drainOutbox({ directory: ${JSON.stringify(w.outbox)}, deliver: async () => { console.log('DELIVERY'); return 'delivered'; } }); console.log('DONE', result.remaining);`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script]); let output = '';
+  child.stdout!.setEncoding('utf8'); child.stdout!.on('data', (chunk: string) => { output += chunk; });
+  const childDone = new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(output, '', 'the second process waits on the filesystem lock before it can inspect or deliver entries');
+  unblock();
+  await Promise.all([first, childDone]);
+  assert.equal(calls, 1, 'the first process delivers the entry once');
+  assert.doesNotMatch(output, /DELIVERY/, 'the waiting process observes that the entry was deleted');
+  assert.match(output, /DONE 0/);
+  assert.equal((await outboxStatus(w.outbox)).queued, 0);
 });

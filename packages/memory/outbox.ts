@@ -122,8 +122,36 @@ export async function readLog(directory: string, limit = 50): Promise<Array<Reco
 }
 
 export interface DrainResult { delivered: number; conflicts: number; rejected: number; remaining: number; stopped?: 'offline' | 'auth' }
+/** Prevent independent proxies/watchers from replaying the same durable entry concurrently. */
+const drainLocks = new Map<string, Promise<void>>();
+async function acquireDrainLock(directory: string): Promise<() => Promise<void>> {
+  const lock = path.join(directory, '.outbox-drain-lock');
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  for (;;) {
+    try {
+      await fs.mkdir(lock, { mode: 0o700 });
+      await fs.writeFile(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token: randomUUID() }), { flag: 'wx', mode: 0o600 });
+      const token = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8')).token as string;
+      return async () => { const owner = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8').catch(() => 'null')) as { token?: string } | null; if (owner?.token === token) await fs.rm(lock, { recursive: true, force: true }); };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') { await fs.rmdir(lock).catch(() => undefined); throw error; }
+      const owner = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8').catch(() => 'null')) as { pid?: number } | null;
+      if (owner && Number.isInteger(owner.pid)) {
+        let alive = true; try { process.kill(owner.pid!, 0); } catch (probe) { alive = (probe as NodeJS.ErrnoException).code === 'EPERM'; }
+        if (!alive) { const before = await fs.stat(path.join(lock, 'owner.json')).catch(() => undefined); const check = JSON.parse(await fs.readFile(path.join(lock, 'owner.json'), 'utf8').catch(() => 'null')) as { pid?: number } | null; const after = await fs.stat(path.join(lock, 'owner.json')).catch(() => undefined); if (before && after && before.ino === after.ino && check?.pid === owner.pid) await fs.rm(lock, { recursive: true, force: true }).catch(() => undefined); }
+      } else if (Date.now() - ((await fs.stat(lock).catch(() => undefined))?.mtimeMs ?? Date.now()) > 10_000) await fs.rm(lock, { recursive: true, force: true }).catch(() => undefined);
+      await new Promise(resolve => setTimeout(resolve, 15 + Math.random() * 25));
+    }
+  }
+}
 /** Replays matching entries oldest first. Offline or an auth problem stops the run and keeps everything that is left, in order. */
 export async function drainOutbox(options: { directory: string; match?: (entry: OutboxEntry) => boolean; deliver: (entry: OutboxEntry) => Promise<Delivery>; /** revision the server reported for the entry just delivered */ revisionOf?: (entry: OutboxEntry) => string | undefined; limit?: number; /** count what is left by reading every entry again (default true); periodic retries skip it so an idle retry costs one file read, not thousands */ countRemaining?: boolean }): Promise<DrainResult> {
+  const key = path.resolve(options.directory); const previous = drainLocks.get(key) ?? Promise.resolve(); let releaseLocal!: () => void; const local = new Promise<void>(resolve => { releaseLocal = resolve; }); const queued = previous.then(() => local); drainLocks.set(key, queued);
+  await previous;
+  const release = await acquireDrainLock(options.directory).catch(error => { releaseLocal(); if (drainLocks.get(key) === queued) drainLocks.delete(key); throw error; });
+  try { return await drainOutboxLocked(options); } finally { await release(); releaseLocal(); if (drainLocks.get(key) === queued) drainLocks.delete(key); }
+}
+async function drainOutboxLocked(options: { directory: string; match?: (entry: OutboxEntry) => boolean; deliver: (entry: OutboxEntry) => Promise<Delivery>; revisionOf?: (entry: OutboxEntry) => string | undefined; limit?: number; countRemaining?: boolean }): Promise<DrainResult> {
   const result: DrainResult = { delivered: 0, conflicts: 0, rejected: 0, remaining: 0 }; const match = options.match ?? (() => true); let handled = 0;
   for (const name of await jsonNames(options.directory)) { // entries are read one at a time, so a retry that fails on the first one reads one file
     if (handled >= (options.limit ?? OUTBOX_CAP)) break;
