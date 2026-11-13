@@ -158,8 +158,7 @@ jobs:
           retention-days: 1
 
   release-qualification:
-    name: Qualify explicit version tag
-    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.authorize_release == true))
+    name: Release qualification
     needs: [linux-gnu, linux-reliability, macos]
     runs-on: ubuntu-24.04
     env:
@@ -172,6 +171,7 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - name: Require a semantic version tag on a commit reachable from main
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -180,6 +180,9 @@ jobs:
           [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
           git fetch --no-tags origin main:refs/remotes/origin/main
           git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+      - name: Record untagged commit qualification
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: echo "::notice::Qualification run for untagged commit ${GITHUB_SHA}; semantic version tag reachability check is not applicable."
       - run: npm run verify:all
       - run: npm run verify:release
       - name: Require the explicitly selected profile to be eligible
@@ -194,7 +197,6 @@ jobs:
 
   publish-release:
     name: Publish client and server installers as direct release assets
-    if: github.event_name == 'workflow_dispatch' && inputs.authorize_release == true && startsWith(github.ref, 'refs/tags/v')
     needs: [package-apps, release-qualification]
     runs-on: ubuntu-24.04
     environment: engram-release
@@ -227,6 +229,7 @@ jobs:
       - name: Write checksums for the individual app assets
         run: sha256sum release/assets/engram-* > release/assets/SHA256SUMS
       - name: Publish the explicitly selected version tag
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_SHA: ${{ github.sha }}

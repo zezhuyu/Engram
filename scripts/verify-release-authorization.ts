@@ -4,6 +4,8 @@ import { currentSourceEvidence } from './lib/source-evidence.js';
 import { gitCommit } from './lib/suite.js';
 
 const fail = (reason: string): never => { console.error(`Release authorization rejected: ${reason}`); process.exit(1); };
+const ref = process.env.GITHUB_REF;
+if (!ref || !/^refs\/tags\/v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(ref)) fail('a semantic version tag ref is required');
 const authorizationText = process.env.ENGRAM_RELEASE_AUTHORIZATION_JSON;
 const publicKey = process.env.ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY;
 if (!authorizationText || !publicKey) fail('owner-signed authorization and trusted public key are required');
@@ -16,8 +18,6 @@ const releaseReport = report as { releaseProfile: string; releaseLevel: string }
 if (releaseReport.releaseLevel !== 'BETA' && releaseReport.releaseLevel !== 'GA_ELIGIBLE') fail('selected profile is not eligible for publication');
 const source = await currentSourceEvidence();
 const commit = gitCommit();
-const ref = process.env.GITHUB_REF;
-if (!ref || !/^refs\/tags\/v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(ref)) fail('a semantic version tag ref is required');
 if (process.env.GITHUB_SHA && process.env.GITHUB_SHA !== commit) fail('workflow commit does not match the checked out source');
 if (!verifyReleaseAuthorization(authorization, {
   sourceFingerprint: source.fingerprint,

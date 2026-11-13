@@ -22,18 +22,26 @@ test('the package is private, has no publish configuration and no workflow publi
   const workflows = path.join(root, '.github/workflows'); for (const file of readdirSync(workflows)) { const text = readFileSync(path.join(workflows, file), 'utf8'); assert.doesNotMatch(text, /npm\s+publish|NPM_TOKEN|NODE_AUTH_TOKEN|registry-url/, `${file} must not publish to a registry`); }
 });
 
-test('public release publication requires a version tag, release environment approval, and current release qualification', () => {
+test('release qualification always follows platform verification, while publication is internally tag-authorized', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const qualification = /  release-qualification:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:|$)/.exec(workflow)?.[1];
   const publish = /  publish-release:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:|$)/.exec(workflow)?.[1];
+  assert.ok(qualification, 'release-qualification job exists');
   assert.ok(publish, 'publish-release job exists');
   assert.match(workflow, /tags:\s*\['v\*'\]/, 'only explicit version tags trigger release qualification');
   assert.match(workflow, /workflow_dispatch:[\s\S]*?authorize_release:[\s\S]*?type:\s*boolean[\s\S]*?required:\s*true[\s\S]*?default:\s*false/, 'manual publication requires a reviewable affirmative input');
-  assert.match(publish!, /if:\s*github\.event_name\s*==\s*'workflow_dispatch'\s*&&\s*inputs\.authorize_release\s*==\s*true\s*&&\s*startsWith\(github\.ref,\s*'refs\/tags\/v'\)/, 'a push or pull request can never publish, even for a version tag');
+  assert.doesNotMatch(qualification!.split('    steps:')[0]!, /^\s+if:/m, 'qualification is not gated by event or ref');
+  assert.doesNotMatch(publish!.split('    steps:')[0]!, /^\s+if:/m, 'publication job is not conditionally skipped before its in-job safety checks');
+  assert.match(qualification!, /needs:\s*\[linux-gnu,\s*linux-reliability,\s*macos\]/, 'qualification follows the required platform checks');
+  assert.match(qualification!, /name: Require a semantic version tag[\s\S]*?if:\s*startsWith\(github\.ref,\s*'refs\/tags\/v'\)/, 'semantic-version reachability check applies only to version tags');
+  assert.match(qualification!, /name: Record untagged commit qualification[\s\S]*?::notice::Qualification run for untagged commit/, 'untagged qualification is clearly reported');
   assert.match(publish!, /needs:\s*\[package-apps,\s*release-qualification\]/, 'publication depends on current-source qualification');
   assert.match(publish!, /environment:\s*engram-release/, 'publication requires the separately protected owner review environment');
   assert.match(publish!, /ENGRAM_RELEASE_AUTHORIZATION_JSON:\s*\$\{\{\s*secrets\.ENGRAM_RELEASE_AUTHORIZATION_JSON\s*\}\}/, 'publication requires an owner-signed authorization secret');
   assert.match(publish!, /ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY:\s*\$\{\{\s*secrets\.ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY\s*\}\}/, 'the verifier uses the separately configured trust key');
   assert.ok(publish!.indexOf('node dist/scripts/verify-release-authorization.js') < publish!.indexOf('gh release create'), 'authorization is verified before the publication command');
+  assert.match(publish!, /name: Publish the explicitly selected version tag\n\s+if:\s*startsWith\(github\.ref,\s*'refs\/tags\/v'\)/, 'release creation is impossible on a branch ref');
+  assert.match(publish!, /--prerelease/, 'created releases remain prereleases');
   assert.ok(workflow.includes('[[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+'), 'release qualification accepts only semantic-version-shaped tags');
   assert.match(workflow, /git merge-base --is-ancestor "\$GITHUB_SHA" refs\/remotes\/origin\/main/, 'release tags must point to a commit reachable from main');
   const releasePolicy = readFileSync(path.join(root, 'docs/release-publication.md'), 'utf8');
@@ -46,7 +54,11 @@ test('public release publication requires a version tag, release environment app
   assert.match(readFileSync(path.join(root, 'docs/release-profile-contract.md'), 'utf8'), /local editable list is not proof/);
   assert.match(publish!, /permissions:\s*\n\s+contents:\s+write/, 'write permission is scoped to the publish job');
   assert.match(workflow, /\npermissions:\s*\n\s+contents:\s+read/, 'all non-publish jobs receive only repository read access');
-  assert.doesNotMatch(publish!, /if:\s*github\.event_name\s*==\s*'push'/, 'push events never publish');
+  const authorizationVerifier = readFileSync(path.join(root, 'scripts/verify-release-authorization.ts'), 'utf8');
+  assert.match(authorizationVerifier, /const ref = process\.env\.GITHUB_REF;\nif \(!ref \|\| !\/\^refs\\\/tags\\\/v/, 'authorization rejects non-tag refs before reading release evidence');
+  const nonTag = spawnSync(process.execPath, ['dist/scripts/verify-release-authorization.js'], { cwd: root, encoding: 'utf8', env: { ...process.env, GITHUB_REF: 'refs/heads/main' } });
+  assert.equal(nonTag.status, 1, 'branch refs fail authorization');
+  assert.match(nonTag.stderr, /Release authorization rejected: a semantic version tag ref is required/, 'branch ref failure is clear and does not depend on authorization secrets or evidence');
 });
 
 test('if the package is ever made public it must have a files allowlist whose tarball excludes tests, verification and study prototypes', () => {

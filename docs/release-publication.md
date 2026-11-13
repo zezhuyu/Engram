@@ -1,6 +1,6 @@
 # Release publication authorization
 
-The CI workflow builds short-lived internal artifacts for ordinary pushes, but it does not publish a GitHub Release. Publication is restricted to a manually dispatched workflow on a semantic version tag (`vMAJOR.MINOR.PATCH`, with optional prerelease/build metadata), and the tagged commit must be reachable from `main`. Current source verification and the release policy run before the publish job.
+The CI workflow runs release qualification after the Linux GNU, Linux reliability, and macOS jobs succeed on every push or pull request. Untagged commits skip the semantic-tag reachability step and are reported as qualification runs; version tags (`vMAJOR.MINOR.PATCH`, with optional prerelease/build metadata) must point to a commit reachable from `main`. The publish job is scheduled after package creation and qualification succeed. Its first authorization check requires an owner-signed authorization bound to the exact source, commit, and version tag, and the protected `engram-release` environment requires separate owner review. The release-creation command itself is restricted to version-tag refs and creates prereleases.
 
 ## Required repository configuration
 
@@ -13,13 +13,13 @@ Before enabling publication, a repository owner must configure the `engram-relea
 - `ENGRAM_RELEASE_AUTHORIZATION_JSON` containing a short-lived owner-signed authorization and `ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY` containing the corresponding trusted public key. The private signing key must remain offline and must never be stored in GitHub.
 - Repository Actions permissions set to read-only by default; the publish job alone receives `contents: write`.
 
-The workflow's `authorize_release` checkbox is a deliberate dispatch record, not a replacement for the protected environment approval. If the environment has not been configured with the requirements above, publication is not authorized. Do not test this by publishing a release.
+The workflow's `authorize_release` checkbox controls packaging on manual dispatch; it is not a replacement for the signed authorization or protected environment approval. A version-tag push can also reach the publish job, but cannot publish without the exact signed authorization and environment approval. If the environment has not been configured with the requirements above, publication is not authorized. Do not test this by publishing a release.
 
 ## Release sequence
 
 1. Complete review and authorize a version tag through the repository's normal protected-branch process.
 2. Allow tag CI to build and qualify the source. A tag push alone cannot publish.
-3. An authorized maintainer manually dispatches the workflow against that exact version tag and checks `authorize_release`.
+3. If using manual dispatch for packaging, dispatch against that exact version tag and check `authorize_release`.
 4. A separate required reviewer approves the protected `engram-release` environment.
 5. Before publication, the workflow verifies the owner's detached signature over an authorization bound to the exact source fingerprint, commit SHA, semantic-version tag, release profile, release level, approver and fresh timestamp. The signature is checked against `ENGRAM_RELEASE_AUTHORIZATION_PUBLIC_KEY`; editable dispatch inputs do not count as authorization.
 6. The workflow publishes direct installer assets only if current full verification and the selected release profile are eligible and the exact-source owner authorization verifies.
