@@ -9,25 +9,45 @@ import { disposableVault } from './helpers.js';
 async function post(port: number, token: string, action: string) {
   return fetch(`http://127.0.0.1:${port}/api/actions/${action}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' });
 }
-test('actions are single-flight, report timeout, and require explicit model network consent', async t => {
+async function waitForAction(port: number, token: string, id: string): Promise<{ state: string; error?: string }> {
+  const deadline = Date.now() + 5_000;
+  let result: { state: string; error?: string } | undefined;
+  do {
+    const response = await fetch(`http://127.0.0.1:${port}/api/actions/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+    result = await response.json() as typeof result;
+    if (!result) throw new Error(`action ${id} returned an empty response`);
+    if (result.state !== 'running') return result;
+    await delay(10);
+  } while (Date.now() < deadline);
+  throw new Error(`action ${id} did not reach a terminal state within 5000 ms`);
+}
+
+test('actions are single-flight and report timeout', async t => {
   const v = await disposableVault();
   const original = v.engram.verify.bind(v.engram);
-  (v.engram as any).verify = async () => { await delay(80); return { ok: true, issues: [], objects: 0 }; };
+  let verifySettledResolve!: () => void;
+  const verifySettled = new Promise<void>(resolve => { verifySettledResolve = resolve; });
+  (v.engram as any).verify = async () => { try { await delay(80); return { ok: true, issues: [], objects: 0 }; } finally { verifySettledResolve(); } };
   const dashboard = await createDashboardServer({ engram: v.engram, token: 'c'.repeat(64), actionTimeoutMs: 20 });
   t.after(async () => { await dashboard.close(); await v.cleanup(); });
   const [one, two] = await Promise.all([post(dashboard.port, dashboard.token, 'verify-vault'), post(dashboard.port, dashboard.token, 'verify-vault')]);
   const first = await one.json() as { id: string; state: string }, second = await two.json() as { id: string; state: string };
   assert.equal(first.id, second.id); assert.equal(one.status, 202); assert.equal(two.status, 202);
   assert.equal((await post(dashboard.port, dashboard.token, 'verify-index')).status, 409);
-  await delay(30);
-  const timed = await fetch(`http://127.0.0.1:${dashboard.port}/api/actions/${first.id}`, { headers: { Authorization: `Bearer ${dashboard.token}` } });
-  assert.equal((await timed.json() as { state: string }).state, 'failed');
-  await delay(60);
+  const timed = await waitForAction(dashboard.port, dashboard.token, first.id);
+  assert.equal(timed.state, 'failed');
+  await verifySettled;
   (v.engram as any).verify = original;
+});
+
+test('test-model requires explicit model network consent', async t => {
+  const v = await disposableVault();
+  const dashboard = await createDashboardServer({ engram: v.engram });
+  t.after(async () => { await dashboard.close(); await v.cleanup(); });
   const model = await post(dashboard.port, dashboard.token, 'test-model'); const modelView = await model.json() as { id: string };
-  await delay(10);
-  const modelResult = await fetch(`http://127.0.0.1:${dashboard.port}/api/actions/${modelView.id}`, { headers: { Authorization: `Bearer ${dashboard.token}` } });
-  assert.equal((await modelResult.json() as { state: string; error: string }).error, 'Model test requires remote network consent');
+  const modelResult = await waitForAction(dashboard.port, dashboard.token, modelView.id);
+  assert.equal(modelResult.state, 'failed');
+  assert.equal(modelResult.error, 'Model test requires remote network consent');
 });
 
 test('test-model action permits loopback Ollama without network consent and reports no vault content', async t => {
@@ -64,9 +84,7 @@ test('test-model denies remote providers before any request when network consent
   const dashboard = await createDashboardServer({ engram: v.engram, idleMs: 60_000 });
   t.after(async () => { await dashboard.close(); await v.cleanup(); });
   const started = await post(dashboard.port, dashboard.token, 'test-model'), action = await started.json() as { id: string };
-  await delay(20);
-  const response = await fetch(`http://127.0.0.1:${dashboard.port}/api/actions/${action.id}`, { headers: { Authorization: `Bearer ${dashboard.token}` } });
-  const result = await response.json() as { state: string; error: string };
+  const result = await waitForAction(dashboard.port, dashboard.token, action.id);
   assert.equal(result.state, 'failed'); assert.equal(result.error, 'Model test requires remote network consent');
 });
 
