@@ -106,13 +106,15 @@ test('cancelling a running action reports cancellation and keeps single-flight u
   const cancelled = await fetch(`http://127.0.0.1:${dashboard.port}/api/actions/${action.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${dashboard.token}` } });
   assert.equal((await cancelled.json() as { state: string }).state, 'cancelled');
   assert.equal((await post(dashboard.port, dashboard.token, 'verify-index')).status, 409);
-  await delay(90);
-  const next = await post(dashboard.port, dashboard.token, 'verify-index');
+  const deadline = Date.now() + 5_000;
+  let next: Response;
+  do {
+    next = await post(dashboard.port, dashboard.token, 'verify-index');
+    if (next.status === 202) break;
+    assert.equal(next.status, 409);
+    await delay(10);
+  } while (Date.now() < deadline);
   assert.equal(next.status, 202);
   const nextAction = await next.json() as { id: string };
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const state = await fetch(`http://127.0.0.1:${dashboard.port}/api/actions/${nextAction.id}`, { headers: { Authorization: `Bearer ${dashboard.token}` } });
-    if ((await state.json() as { state: string }).state !== 'running') break;
-    await delay(10);
-  }
+  assert.equal((await waitForAction(dashboard.port, dashboard.token, nextAction.id)).state, 'complete');
 });

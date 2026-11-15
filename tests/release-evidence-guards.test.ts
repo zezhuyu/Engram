@@ -298,7 +298,7 @@ test('report status, skip classification, pending allowance and profile preserve
     };
     const expectedEvidenceStatus = reportStatus === 'PASS' && hasSkip ? 'SKIPPED' : reportStatus;
     const expectedConsistent = reportStatus !== 'NOT_RUN' && !(reportStatus === 'PASS' && hasSkip)
-      && (!hasSkip || classified && inScope && classificationApplies && allowPending);
+      && (!hasSkip || classified && inScope && classificationApplies);
     const label = `${status}/${skipKind}/allowPending=${allowPending}/${profile}`;
     assert.equal(suiteReportConsistent(report, requirements, allowPending, profile), expectedConsistent, `${label} consistency`);
     assert.equal(suiteEvidenceStatus(report), expectedEvidenceStatus, `${label} evidenceStatus`);

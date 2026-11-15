@@ -214,13 +214,13 @@ test('remote synthesis is blocked when network permission is off', async t => {
 test('chat is single-flight per bearer session and aborts timed out provider calls', async t => {
   const v = await disposableVault(); await v.engram.vault.setConfig(config => { config.model.provider = 'ollama'; config.model.baseUrl = 'http://127.0.0.1:11434/v1'; config.model.modelName = 'test'; });
   await v.engram.put({ scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'Slow source', body: 'The slow provider has something to say.' });
-  let signal: AbortSignal | undefined;
-  const provider = { id: 'fake-slow', locality: 'local' as const, async generate() { throw new Error('unused'); }, converse(_input: unknown, options?: { signal?: AbortSignal }) { signal = options?.signal; return new Promise<any>((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })); } };
+  let signal: AbortSignal | undefined, startedResolve!: () => void; const started = new Promise<void>(resolve => { startedResolve = resolve; });
+  const provider = { id: 'fake-slow', locality: 'local' as const, async generate() { throw new Error('unused'); }, converse(_input: unknown, options?: { signal?: AbortSignal }) { signal = options?.signal; startedResolve(); return new Promise<any>((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })); } };
   const client = new Engram(v.root, undefined, provider, { env: {} }); await client.init({ sqlite: false });
   const dashboard = await createDashboardServer({ engram: client, idleMs: 60_000, chatTimeoutMs: 500 });
   t.after(async () => { await dashboard.close(); await client.close(); await v.cleanup(); });
   const pending = fetch(`http://127.0.0.1:${dashboard.port}/api/chat`, { method: 'POST', headers: { Authorization: `Bearer ${dashboard.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'slow provider' }) });
-  await new Promise(resolve => setTimeout(resolve, 5));
+  await started;
   const duplicate = await call(dashboard.port, dashboard.token, '/api/chat', 'POST', { question: 'another request' }); assert.equal(duplicate.status, 429);
   const timed = await pending; const result = await timed.json() as any; assert.equal(timed.status, 200); assert.equal(result.mode, 'deterministic'); assert.equal(result.degradedReason.code, 'timeout'); assert.equal(signal?.aborted, true);
 });
@@ -234,7 +234,10 @@ test('disconnecting the chat client aborts synthesis', async t => {
   const dashboard = await createDashboardServer({ engram: client, idleMs: 60_000, chatTimeoutMs: 5000 });
   t.after(async () => { await dashboard.close(); await client.close(); await v.cleanup(); });
   const controller = new AbortController(); const request = fetch(`http://127.0.0.1:${dashboard.port}/api/chat`, { method: 'POST', signal: controller.signal, headers: { Authorization: `Bearer ${dashboard.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'signal disconnect' }) }).catch(() => undefined);
-  await started; controller.abort(); await request; await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(signal?.aborted, true);
+  await started; controller.abort(); await request;
+  const deadline = Date.now() + 5_000;
+  while (!signal?.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(signal?.aborted, true);
 });
 
 test('chat view renders safe citation and source controls', async () => {

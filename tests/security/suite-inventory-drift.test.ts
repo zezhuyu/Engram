@@ -54,8 +54,8 @@ test('inventory capture accepts structurally valid skipped platform reports with
     tests: [{ name: 'first test', status: 'PASS' }, { name: knownSkip.test, status: 'SKIPPED' }],
     environment: { platform: 'linux' }
   };
-  assert.equal(inventoryReportUsable(linuxReport), false, 'pending-owner-review classifications are not approved by default');
-  assert.equal(inventoryReportUsable(linuxReport, true), true, 'local inventory development can explicitly include pending records');
+  assert.equal(inventoryReportUsable(linuxReport), true, 'owner-reviewed classifications are accepted by default');
+  assert.equal(inventoryReportUsable(linuxReport, true), true, 'explicit local allowance remains compatible');
   assert.equal(linuxReport.status, 'SKIPPED');
   assert.equal(inventoryReportUsable({ ...linuxReport, exitCode: 1 }), false);
   assert.equal(inventoryReportUsable({ ...linuxReport, counts: { ...linuxReport.counts, total: 3 } }), false);
@@ -72,13 +72,15 @@ test('skipped mandatory tests require a current platform classification and rema
     tests: [{ name: 'first test', status: 'PASS' }, { name: knownSkip.test, status: 'SKIPPED' }],
     environment: { platform: 'linux' }
   };
-  assert.equal(suiteReportConsistent(skipped, inventory), false);
+  const linuxInventory = { ...inventory, allowedSkippedTests: { linux: [{ name: knownSkip.test, classificationId: knownSkipId, classificationHash: knownSkipHash }] } };
+  assert.equal(suiteReportConsistent(skipped, linuxInventory), true, 'reviewed Linux classification is accepted');
   assert.ok(inventoryDrift(skipped, { ...inventory, allowedSkippedTests: {} }).some(issue => issue.includes('unreviewed skipped mandatory test')));
   assert.ok(inventoryDrift(skipped, { ...inventory, allowedSkippedTests: { linux: [{ name: knownSkip.test, classificationId: knownSkipId, classificationHash: '0'.repeat(64) }] } }).some(issue => issue.includes('tampered')));
-  assert.ok(inventoryDrift(skipped, { ...inventory, allowedSkippedTests: { linux: [{ name: knownSkip.test, classificationId: knownSkipId, classificationHash: knownSkipHash }] } }).some(issue => issue.includes('unreviewed skip classification')));
+  assert.deepEqual(inventoryDrift(skipped, { ...inventory, allowedSkippedTests: { linux: [{ name: knownSkip.test, classificationId: knownSkipId, classificationHash: knownSkipHash }] } }), [], 'reviewed classifications match their current hash and are not unreviewed');
   assert.equal(suiteReportConsistent({ ...skipped, environment: { platform: undefined } }, inventory, true), false, 'platform metadata is mandatory for a classified skip');
   assert.equal(suiteReportConsistent({ ...skipped, environment: { platform: 'darwin' } }, inventory, true), false, 'classification must include the observed platform');
-  assert.equal(suiteReportConsistent(skipped, inventory, true), true);
+  assert.equal(suiteReportConsistent(skipped, linuxInventory), true, 'reviewed SKIPPED evidence is structurally accepted');
+  assert.equal(suiteReportConsistent(skipped, linuxInventory, true), true);
   assert.equal(skipped.tests.find(item => item.name === knownSkip.test)?.status, 'SKIPPED');
   assert.equal(skipped.counts.pass, 1, 'the skipped test is not counted as a passing test');
   const regenerated = buildSuiteInventoryForReport(skipped, inventory);

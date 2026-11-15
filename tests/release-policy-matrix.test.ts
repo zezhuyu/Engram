@@ -69,7 +69,7 @@ test('suite provenance binds fingerprint and commit; mandatory skipped tests req
   const classificationId = skipClassificationId(classification.suite, classification.test);
   const inventory = { minimumTests: 1, requiredTests: [name], requiredCases: [], casesByPlatform: { linux: [] }, allowedSkippedTests: { linux: [{ name, classificationId, classificationHash: skipClassificationHash(classification) }] } };
   const report = { suite: 'intelligence', status: 'PASS', exitCode: 0, counts: { pass: 0, fail: 0, skipped: 1, total: 1 }, tests: [{ name, status: 'SKIPPED' }], cases: 0, caseDetails: [], caseFailures: [], environment: { platform: 'linux' } };
-  assert.equal(suiteReportConsistent(report, inventory), false, 'pending-owner-review is rejected by default');
+  assert.equal(suiteReportConsistent(report, inventory), false, 'a mandatory skip cannot count as PASS even when its classification is reviewed');
   assert.equal(suiteReportConsistent(report, inventory, true), false, 'a mandatory skipped test is never PASS evidence, even with a local pending-classification allowance');
   assert.equal(suiteEvidenceStatus(report), 'SKIPPED');
   assert.equal(suiteReportConsistent(report, { ...inventory, allowedSkippedTests: {} }), false);
