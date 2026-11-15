@@ -1158,12 +1158,12 @@
           {
             "name": "real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
             "classificationId": "intelligence/real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
-            "classificationHash": "5d035d5cd29d5ed6aeac21e6d8052b222bc441464dacf37648d9478c0743f705"
+            "classificationHash": "064a90356fad30acdcbe369730fc52ad0a4a2d33c318338025a2cfebe0f59aa1"
           },
           {
             "name": "real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
             "classificationId": "intelligence/real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
-            "classificationHash": "208e687c320d3aef78452311a7f3609bab5919795b1f3a181744143015ca15b3"
+            "classificationHash": "3f9dd075981cc1b0eaa43e557315d695d72abc988ee3b92f8c3ca80cdc6205ef"
           }
         ],
         "linux": [
@@ -1267,7 +1267,7 @@
       }
     },
     "memory": {
-      "minimumTests": 174,
+      "minimumTests": 178,
       "requiredTests": [
         ".gitignore handling is idempotent, keeps other lines and CRLF endings, and never removes anything",
         "CLI switches added for project setup never capture a flag that other commands use with a value",
@@ -1307,6 +1307,7 @@
         "a ranking goes stale when the accepted set changes and injection falls back to the deterministic order",
         "a record created on the server while the client was offline (both sides added it) merges only if the content agrees; fast-forward and provenance rules still hold",
         "a remote client receives the finished projection from the server and computes nothing itself",
+        "a replay whose cache save fails stays queued and safely replays idempotently after cache recovery",
         "a revoked or rotated credential (401/403) keeps the backlog for re-authentication; only envelope-specific refusals are quarantined",
         "a separate repository or worktree nested inside a bound project does not inherit its workspace",
         "a session bound to a workspace writes there without naming it, and the stored record is in that workspace",
@@ -1326,6 +1327,8 @@
         "an empty queue costs no network at all (a directory listing only)",
         "an event stamped far in the future by a skewed client clock is kept with the receipt time and a skew flag instead of being rejected",
         "an explicit scope still goes through the ACL, even when a default is bound, and a forbidden explicit scope writes nothing",
+        "an online committed write is acknowledged when the remembered-base cache cannot be saved",
+        "an online write persists its merge base before response, so a fresh proxy can merge after an immediate stop",
         "another actor without access to the workspace cannot read its ranking",
         "authorization: readers see only granted scopes, grants and revocations apply immediately, MCP rejects asserted identities",
         "cached context is bound to the credential identity: another credential, token or user is never served what the previous one saw",
@@ -1349,6 +1352,7 @@
         "global session sections are independently ACL gated and exclude unaccepted or sensitive material",
         "hooks that no longer match their directory are reported, init warns about derived workspace ids, and the legacy adapter command warns about user-global hooks",
         "if the file was edited again before the merge came back, it is left alone and merged again next time: nothing the server added is reverted",
+        "independent processes serialize drains at the shared outbox and never deliver the same entry concurrently",
         "init --offline-buffer writes the local proxy as the engram server for Claude Code and Codex, with the token passed through by name only; the entries convert both ways and are removed cleanly",
         "init for both hosts writes one binding and equivalent managed blocks that carry only accepted, project-relevant preferences",
         "init manifest unbind restores every init target byte-for-byte and refuses drift",
@@ -1500,9 +1504,12 @@
         "memory/offline-outbox-queues-writes",
         "memory/offline-outbox-replays-and-deletes",
         "memory/offline-proxy-cache-first-start",
+        "memory/offline-proxy-committed-write-cache-failure",
         "memory/offline-proxy-declines-stateless-probe",
+        "memory/offline-proxy-drain-cache-failure-idempotent",
         "memory/offline-proxy-shared-cache",
         "memory/offline-proxy-startup-drain-race",
+        "memory/offline-proxy-write-base-durable-before-response",
         "memory/outbox-watch-delivers-without-an-agent",
         "memory/overlapping-drains",
         "memory/physical-host-acceptance-rule",
@@ -1597,9 +1604,12 @@
           "memory/offline-outbox-queues-writes",
           "memory/offline-outbox-replays-and-deletes",
           "memory/offline-proxy-cache-first-start",
+          "memory/offline-proxy-committed-write-cache-failure",
           "memory/offline-proxy-declines-stateless-probe",
+          "memory/offline-proxy-drain-cache-failure-idempotent",
           "memory/offline-proxy-shared-cache",
           "memory/offline-proxy-startup-drain-race",
+          "memory/offline-proxy-write-base-durable-before-response",
           "memory/outbox-watch-delivers-without-an-agent",
           "memory/overlapping-drains",
           "memory/physical-host-acceptance-rule",
@@ -1734,17 +1744,17 @@
           {
             "name": "real Claude Code and Codex remote capture recover after HTTP outage and server restart",
             "classificationId": "memory/real Claude Code and Codex remote capture recover after HTTP outage and server restart",
-            "classificationHash": "832649b1755980b4ca0032b71dfbfde629505b46e2b2464c8ed3feea9a12905c"
+            "classificationHash": "d18c6026684c24670e665dcfd28eaeef497f8cb2bc2b88cf906298e13a8723f0"
           },
           {
             "name": "real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
             "classificationId": "memory/real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
-            "classificationHash": "5141f5f0161c9d84688fb52d0fd1d0121399cbc398b57f9f7142e7bfcc8cfbb9"
+            "classificationHash": "db01c77d64d38760693f193099fa65ad0d7ec3a07b1e2f39a4c2f1541c908e06"
           },
           {
             "name": "real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
             "classificationId": "memory/real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
-            "classificationHash": "2095fbd540fc8c0d0ae2274c999a9582ce6086be6a400bced589382339baf6f9"
+            "classificationHash": "f2294dee67e8629c3268270e08d3a2d197868841937a3e35df2f61178f02c865"
           }
         ],
         "linux": [
@@ -2266,7 +2276,7 @@
           {
             "name": "real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
             "classificationId": "wiki/real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
-            "classificationHash": "b3b685231f1d5f6763312b7914720c0d6e8379a6bef1da6a585e501647863d4f"
+            "classificationHash": "e17328f3739e512f1ee0f7e360f59e60b54f9aa317b988f0a5c924f19b4af390"
           }
         ],
         "linux": [
@@ -3490,12 +3500,12 @@
           {
             "name": "awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files",
             "classificationId": "unix/awk: gawk --sandbox runs programs but cannot run commands, redirect, pipe, or read program files",
-            "classificationHash": "31df4c5c1db1a8b4f166aed1b9630892798b2bd512508b15c003828fe90302ce"
+            "classificationHash": "85d2138457b2e4539ba089a1900b1ea68bda5379d806327ff5252c90b5da5d4d"
           },
           {
             "name": "sed: GNU sed --sandbox runs scripts but cannot execute, read or write files",
             "classificationId": "unix/sed: GNU sed --sandbox runs scripts but cannot execute, read or write files",
-            "classificationHash": "975ef5d400d174c78d0107b61950d68b184e0d864f1131ab23796e4424fd068a"
+            "classificationHash": "8f281b101ba649380dcb36648ac5672a9109d891b2348339c986170be7be11a9"
           }
         ],
         "linux": []
