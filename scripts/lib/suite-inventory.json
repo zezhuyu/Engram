@@ -625,6 +625,7 @@
           "acid-fault-matrix/view-eacces",
           "acid/projection-external-edit-preserved",
           "acid/projection-flush-failure",
+          "acid/projection-flush-waits-for-idle",
           "acid/projection-kill-after-journal",
           "acid/projection-purge-and-non-owner",
           "acid/projection-read-your-write",
@@ -1169,11 +1170,13 @@
         "linux": [
           {
             "name": "real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "intelligence/real model evaluation: labeled preference extraction and micro/deep/strategic cross-domain hypotheses",
+            "classificationHash": "064a90356fad30acdcbe369730fc52ad0a4a2d33c318338025a2cfebe0f59aa1"
           },
           {
             "name": "real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "intelligence/real model: wiki synthesis and critic return schema-valid, evidence-bound, review-gated output",
+            "classificationHash": "3f9dd075981cc1b0eaa43e557315d695d72abc988ee3b92f8c3ca80cdc6205ef"
           }
         ]
       }
@@ -1656,6 +1659,7 @@
           "memory/capture-spool-orphan-temp-recovery",
           "memory/claude-payload-pipeline",
           "memory/cli-recall",
+          "memory/clock-skew-future-event-kept-and-flagged",
           "memory/codex-capture-hooks-exact-trust",
           "memory/codex-child-exits-before-teardown",
           "memory/cross-session-recall",
@@ -1701,9 +1705,12 @@
           "memory/offline-outbox-queues-writes",
           "memory/offline-outbox-replays-and-deletes",
           "memory/offline-proxy-cache-first-start",
+          "memory/offline-proxy-committed-write-cache-failure",
           "memory/offline-proxy-declines-stateless-probe",
+          "memory/offline-proxy-drain-cache-failure-idempotent",
           "memory/offline-proxy-shared-cache",
           "memory/offline-proxy-startup-drain-race",
+          "memory/offline-proxy-write-base-durable-before-response",
           "memory/outbox-watch-delivers-without-an-agent",
           "memory/overlapping-drains",
           "memory/physical-host-acceptance-rule",
@@ -1724,9 +1731,12 @@
           "memory/redaction-reasoning-exclusion",
           "memory/remote-spool-cap-concurrent",
           "memory/remote-spool-data-root-write-and-delivery",
+          "memory/remote-web-session-context-hook-e2e",
           "memory/sensitive-preference-pending-review",
           "memory/session-context-bounded-deterministic",
+          "memory/session-context-global-acl-and-review-boundary",
           "memory/session-context-hook-cache",
+          "memory/session-context-host-snapshot-and-credential-template",
           "memory/shutdown-coordination",
           "memory/spool-auth-failure-retains-backlog",
           "memory/spool-overflow",
@@ -1760,23 +1770,28 @@
         "linux": [
           {
             "name": "a project Codex does not trust has its hooks ignored entirely, and init says so instead of reporting success",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "memory/a project Codex does not trust has its hooks ignored entirely, and init says so instead of reporting success",
+            "classificationHash": "4322ed47e43c9eba05efddc37354e0811b5e92184ac254626f16546d3c6a2d8c"
           },
           {
             "name": "Codex itself reports the project hooks as untrusted; trust is recorded only on explicit request, only for Engram's own commands, and a changed hook loses it",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "memory/Codex itself reports the project hooks as untrusted; trust is recorded only on explicit request, only for Engram's own commands, and a changed hook loses it",
+            "classificationHash": "6e2186426ead1fdb2540ec0ad2a4ed30da9d2bb55b719e52303f6cdad7f5bb9a"
           },
           {
             "name": "real Claude Code and Codex remote capture recover after HTTP outage and server restart",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "memory/real Claude Code and Codex remote capture recover after HTTP outage and server restart",
+            "classificationHash": "d18c6026684c24670e665dcfd28eaeef497f8cb2bc2b88cf906298e13a8723f0"
           },
           {
             "name": "real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "memory/real Claude Code: hooks installed by the adapter capture a real task; another principal recalls it; the host works with MDB broken or absent",
+            "classificationHash": "db01c77d64d38760693f193099fa65ad0d7ec3a07b1e2f39a4c2f1541c908e06"
           },
           {
             "name": "real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "memory/real Codex CLI: trusted hooks pass actual lifecycle payloads, capture without memory-write instructions, and fail open",
+            "classificationHash": "f2294dee67e8629c3268270e08d3a2d197868841937a3e35df2f61178f02c865"
           }
         ]
       }
@@ -2053,7 +2068,9 @@
           "profile/heldout-correction-phrasing-30",
           "profile/idempotency-and-projection",
           "profile/interrupted-supersession-projection-recovery",
+          "profile/malformed-preference-key-is-normalized-not-dropped",
           "profile/metadata-remove-protected",
+          "profile/missing-preference-key-is-derived-not-dropped",
           "profile/model-abstentions-not-insights",
           "profile/multi-insight-acl",
           "profile/multi-insight-crash-recovery",
@@ -2282,7 +2299,8 @@
         "linux": [
           {
             "name": "real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "wiki/real model: incremental wiki compilation obeys the safety gates (and we record whether it also complied with the citation rules)",
+            "classificationHash": "e17328f3739e512f1ee0f7e360f59e60b54f9aa317b988f0a5c924f19b4af390"
           }
         ]
       }
@@ -2716,7 +2734,8 @@
         "linux": [
           {
             "name": "launchd plist is well-formed (plutil -lint on macOS), runs only the explicit worker command, and escapes special characters",
-            "reason": "Observed skipped test in current-source reviewed report."
+            "classificationId": "adaptive/launchd plist is well-formed (plutil -lint on macOS), runs only the explicit worker command, and escapes special characters",
+            "classificationHash": "270ffecb66e38bbe229b06668f8f816661f8bd3175ed80995d9b79edb63f7bc1"
           }
         ]
       }
