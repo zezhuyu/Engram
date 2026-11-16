@@ -101,202 +101,347 @@ finally {
     button.textContent = label;
 } }); return button; }
 
-async function clientsPage() { const area = node('div'); area.setAttribute('data-connector-live', 'true'); area.append(pageHeader('Clients', 'Client app heartbeat reports are informational and do not affect access. Dashboard sign-in uses a separate local password, not these HTTP credentials.')); let result; try {
-    result = await api('/api/clients?limit=100');
-}
-catch (error) {
-    area.append(node('p', 'empty', 'Client inventory unavailable: ' + error.message));
-    return area;
-} const table = node('table', 'data-table'), head = node('thead'), header = node('tr'); for (const label of ['Client / host', 'Actor / credential', 'Mode', 'Last seen', 'Last sync', 'Queues / projects', 'Version', ''])
-    header.append(node('th', '', label)); head.append(header); const body = node('tbody'); for (const entry of result.rows || []) {
-    const credential = entry.credential;
-    const clients = entry.clients || [];
-    if (!clients.length) {
-        const row = node('tr');
-        for (const value of ['No client reporting', '' + credential.actorId + ' · ' + credential.id.slice(0, 13), '—', '—', '—', '—', '—', ''])
-            row.append(node('td', '', value));
-        const action = node('button', 'secondary', 'Revoke credential');
-        action.type = 'button';
-        action.onclick = () => revoke(credential, [], entry.expectedDigest);
-        row.lastChild.append(action);
-        body.append(row);
-        continue;
+async function clientsPage() {
+    const area = node('div');
+    area.setAttribute('data-connector-live', 'true');
+    area.append(pageHeader('Clients', 'Machines that report to this server. Reports are informational and do not affect access; dashboard sign-in uses a separate local password.'));
+    let result;
+    try {
+        result = await api('/api/clients?limit=100');
     }
-    for (const client of clients) {
-        const row = node('tr');
-        row.setAttribute('data-key', 'client-' + credential.id + '-' + client.clientId);
-        const identity = node('td');
-        identity.append(node('strong', '', String(client.displayName)), node('br'), node('small', 'muted', String(client.hostLabel)));
-        row.append(identity);
-        const actorCell = node('td', '', String(credential.actorId) + ' · ' + credential.id.slice(0, 13)), modeCell = node('td');
-        modeCell.append(node('span', 'badge', String(client.mode)));
-        row.append(actorCell, modeCell, node('td', '', String(client.state) + ' · ' + new Date(client.serverReceivedAt).toLocaleString()));
-        const sync = node('td');
-        for (const key of ['serverContactAt', 'outboxDeliveredAt', 'fileSyncCommittedAt', 'contextFetchedAt'])
-            sync.append(node('div', '', key + ': ' + (client.lastSync?.[key] ? new Date(client.lastSync[key]).toLocaleString() : '—')));
+    catch (error) {
+        area.append(node('p', 'empty', 'Client inventory unavailable: ' + error.message));
+        return area;
+    }
+    const when = value => value ? new Date(value).toLocaleString() : '—';
+    const shortId = credential => credential.id.slice(0, 13);
+    const rows = result.rows || [];
+    const reporting = rows.filter(entry => (entry.clients || []).length), silent = rows.filter(entry => !(entry.clients || []).length);
+    function revokeButton(entry) {
+        const button = node('button', 'danger', 'Revoke');
+        button.type = 'button';
+        button.setAttribute('aria-label', 'Revoke credential ' + entry.credential.actorId);
+        button.onclick = () => revoke(entry.credential, entry.clients || [], entry.expectedDigest);
+        return button;
+    }
+    function detailList(entry, client) {
+        const list = node('dl', 'metric-list');
+        const add = (name, value) => list.append(node('dt', '', name), node('dd', '', value));
+        add('Server contact', when(client.lastSync?.serverContactAt));
+        add('Outbox delivered', when(client.lastSync?.outboxDeliveredAt));
+        add('File sync committed', when(client.lastSync?.fileSyncCommittedAt));
+        add('Context fetched', when(client.lastSync?.contextFetchedAt));
+        add('Queues', String(client.queues?.outbox || 0) + ' outbox · ' + String(client.queues?.fileSync || 0) + ' file · ' + String(client.queues?.capture || 0) + ' capture · ' + String(client.queues?.queuedBytes || 0) + ' bytes');
+        add('Credential', String(entry.credential.actorId) + ' · ' + entry.credential.id);
         if (client.replication) {
             const r = client.replication;
-            sync.append(node('strong', '', 'Replica · ' + String(r.state) + ' · epoch ' + String(r.epochState)));
+            add('Replica', String(r.state) + ' · epoch ' + String(r.epochState));
             for (const scope of r.enrolledWorkspaces || [])
-                sync.append(node('div', '', String(scope.workspaceId) + ' · ' + scope.pendingPush + ' pending · ' + scope.diverged + ' diverged · pulled ' + String(scope.lastPullAt || '—') + ' · pushed ' + String(scope.lastPushAt || '—')));
+                add('Workspace ' + String(scope.workspaceId), scope.pendingPush + ' pending · ' + scope.diverged + ' diverged · pulled ' + String(scope.lastPullAt || '—') + ' · pushed ' + String(scope.lastPushAt || '—'));
         }
-        row.append(sync);
-        const queue = node('td', '', String(client.queues?.outbox || 0) + ' outbox · ' + String(client.queues?.fileSync || 0) + ' file · ' + String(client.queues?.capture || 0) + ' capture · ' + String(client.queues?.queuedBytes || 0) + ' bytes · ' + String((client.projects || []).length) + ' projects');
-        row.append(queue, node('td', '', String(client.appVersion)));
-        const actionCell = node('td'), button = node('button', 'secondary', 'Revoke credential');
-        button.type = 'button';
-        button.onclick = () => revoke(credential, clients, entry.expectedDigest);
-        actionCell.append(button);
-        row.append(actionCell);
-        body.append(row);
-        if (entry.replicaDevices?.length) {
-            const deviceRow = node('tr');
-            deviceRow.setAttribute('data-key', 'replica-devices-' + credential.id + '-' + client.clientId);
-            const deviceCell = node('td');
-            deviceCell.colSpan = 8;
-            const detail = document.createElement('details');
-            detail.append(node('summary', '', 'Replica devices (' + entry.replicaDevices.length + ')'));
-            for (const device of entry.replicaDevices) {
-                const group = node('div', 'action-row');
-                group.append(node('span', '', String(device.label) + ' · ' + String(device.deviceId)));
-                for (const workspaceId of device.enrolledScopes || []) {
-                    const unenroll = node('button', 'secondary', 'Unenroll ' + workspaceId);
-                    unenroll.onclick = async () => { if (!confirm('Unenroll ' + workspaceId + ' from ' + device.label + '? The device will receive a generic forbidden response on its next fetch.'))
-                        return; const password = prompt('Re-enter the dashboard password to authorize workspace unenrollment'); if (!password)
-                        return; try {
-                        await api('/api/clients/unenroll', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Engram-Reauth-Password': password }, body: JSON.stringify({ credentialId: credential.id, deviceId: device.deviceId, workspaceId }) });
-                        notify('Workspace unenrolled from device');
-                        void render(true);
-                    }
-                    catch (error) {
-                        notify(error.message);
-                    } };
-                    group.append(unenroll);
+        for (const project of client.projects || [])
+            add('Project ' + String(project.folderName) + ' · ' + String(project.workspaceId), (project.contextStale ? 'STALE · ' : '') + String(project.fileSyncState) + ' · context ' + (project.contextFetchedAt ? Math.floor(Math.max(0, Date.now() - Date.parse(project.contextFetchedAt)) / 60000) + ' min ago' : 'not fetched') + ' · queued ' + String(project.queuedWrites) + ' · conflicts ' + String(project.conflicts));
+        return list;
+    }
+    function deviceBlock(entry) {
+        const wrap = node('div', 'device-list');
+        for (const device of entry.replicaDevices || []) {
+            const group = node('div', 'action-row');
+            group.append(node('span', '', String(device.label) + ' · ' + String(device.deviceId)));
+            for (const workspaceId of device.enrolledScopes || []) {
+                const unenroll = node('button', 'ghost', 'Unenroll ' + workspaceId);
+                unenroll.type = 'button';
+                unenroll.onclick = async () => { if (!confirm('Unenroll ' + workspaceId + ' from ' + device.label + '? The device will receive a generic forbidden response on its next fetch.'))
+                    return; const password = prompt('Re-enter the dashboard password to authorize workspace unenrollment'); if (!password)
+                    return; try {
+                    await api('/api/clients/unenroll', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Engram-Reauth-Password': password }, body: JSON.stringify({ credentialId: entry.credential.id, deviceId: device.deviceId, workspaceId }) });
+                    notify('Workspace unenrolled from device');
+                    void render(true);
                 }
-                detail.append(group);
+                catch (error) {
+                    notify(error.message);
+                } };
+                group.append(unenroll);
             }
-            deviceCell.append(detail);
-            deviceRow.append(deviceCell);
-            body.append(deviceRow);
+            wrap.append(group);
         }
-        if (client.projects?.length) {
-            const projectRow = node('tr');
-            projectRow.setAttribute('data-key', 'client-projects-' + credential.id + '-' + client.clientId);
-            const cell = node('td');
-            cell.colSpan = 8;
-            const details = document.createElement('details'), summary = node('summary', '', 'Project status (' + client.projects.length + ')'), list = node('div', 'metric-list');
-            details.append(summary);
-            for (const project of client.projects) {
-                list.append(node('dt', '', String(project.folderName) + ' · ' + String(project.workspaceId)), node('dd', '', (project.contextStale ? 'STALE · ' : '') + String(project.fileSyncState) + ' · context ' + (project.contextFetchedAt ? Math.floor(Math.max(0, Date.now() - Date.parse(project.contextFetchedAt)) / 60000) + ' min ago' : 'not fetched') + ' · queued ' + String(project.queuedWrites) + ' · conflicts ' + String(project.conflicts)));
+        return wrap;
+    }
+    if (reporting.length) {
+        const box = panel('Reporting clients'), wrap = node('div', 'table-wrap'), table = node('table', 'data-table stack'), head = node('thead'), header = node('tr'), body = node('tbody');
+        for (const label of ['Client', 'Credential', 'Status', 'Last sync', ''])
+            header.append(node('th', '', label));
+        head.append(header);
+        for (const entry of reporting) {
+            for (const client of entry.clients) {
+                const row = node('tr');
+                row.setAttribute('data-key', 'client-' + entry.credential.id + '-' + client.clientId);
+                const identity = node('td');
+                identity.append(node('strong', '', String(client.displayName)), node('small', 'help', String(client.hostLabel) + ' · ' + String(client.appVersion)));
+                const actor = node('td');
+                actor.append(node('span', '', String(entry.credential.actorId)), node('small', 'help', shortId(entry.credential)));
+                const state = node('td'), good = String(client.state).toLowerCase().startsWith('connected');
+                state.append(node('span', 'pill ' + (good ? 'state-ok' : 'state-attention'), String(client.state)), node('small', 'help', String(client.mode) + ' · seen ' + when(client.serverReceivedAt)));
+                const sync = node('td'), contact = client.lastSync?.serverContactAt;
+                const first = node('span');
+                if (contact)
+                    first.append(relativeTimeNode(contact));
+                else
+                    first.textContent = 'No contact yet';
+                const queued = Number(client.queues?.outbox || 0) + Number(client.queues?.fileSync || 0) + Number(client.queues?.capture || 0);
+                sync.append(first, node('small', 'help', (queued ? queued + ' queued' : 'Nothing queued') + (client.replication ? ' · replica ' + String(client.replication.state) : '')));
+                const action = node('td', 'row-actions');
+                action.append(revokeButton(entry));
+                row.append(identity, actor, state, sync, action);
+                body.append(row);
+                const detailRow = node('tr', 'detail-row');
+                detailRow.setAttribute('data-key', 'client-detail-' + entry.credential.id + '-' + client.clientId);
+                const cell = node('td');
+                cell.colSpan = 5;
+                const details = document.createElement('details');
+                details.append(node('summary', '', 'Details'), detailList(entry, client));
+                if ((entry.replicaDevices || []).length) {
+                    details.append(node('h3', '', 'Replica devices (' + entry.replicaDevices.length + ')'), deviceBlock(entry));
+                }
+                cell.append(details);
+                detailRow.append(cell);
+                body.append(detailRow);
             }
-            details.append(list);
-            cell.append(details);
-            projectRow.append(cell);
-            body.append(projectRow);
+        }
+        table.append(head, body);
+        wrap.append(table);
+        box.append(wrap);
+        area.append(box);
+    }
+    if (silent.length) {
+        const box = panel('Credentials without a reporting client'), wrap = node('div', 'table-wrap'), table = node('table', 'data-table stack'), head = node('thead'), header = node('tr'), body = node('tbody');
+        box.append(node('p', 'help', 'These credentials exist, but no client app has sent a report for them. They can still be used by agents.'));
+        for (const label of ['Actor', 'Credential', 'Last used', ''])
+            header.append(node('th', '', label));
+        head.append(header);
+        for (const entry of silent) {
+            const row = node('tr'), action = node('td', 'row-actions');
+            row.setAttribute('data-key', 'credential-' + entry.credential.id);
+            action.append(revokeButton(entry));
+            row.append(node('td', '', String(entry.credential.actorId)), node('td', 'mono', shortId(entry.credential)), node('td', '', entry.credential.lastUsedAt ? when(entry.credential.lastUsedAt) : 'Never'), action);
+            body.append(row);
+        }
+        table.append(head, body);
+        wrap.append(table);
+        box.append(wrap);
+        area.append(box);
+    }
+    if (!rows.length)
+        area.append(node('p', 'empty', 'No scoped credentials or client reports yet. Client app heartbeats appear here after a client installation connects.'));
+    async function revoke(credential, clients, digest) {
+        const clientNames = clients.length ? clients.map(item => String(item.displayName) + ' (' + String(item.hostLabel) + ')').join(', ') : 'No reporting clients';
+        const message = 'Actor: ' + credential.actorId + '\nCredential: ' + credential.id + '\nPermissions: ' + credential.permissions.join(', ') + '\nLast used: ' + (credential.lastUsedAt || 'Not recorded') + '\nReporting clients: ' + clientNames + '\n\nEvery holder of this token loses access immediately, including unreported agents or machines. Queued writes remain on client machines. Revoke this credential?';
+        if (!confirm(message))
+            return;
+        const password = prompt('Re-enter the dashboard password to authorize credential revocation');
+        if (!password)
+            return;
+        try {
+            await api('/api/clients/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Engram-Reauth-Password': password }, body: JSON.stringify({ credentialId: credential.id, expectedDigest: digest }) });
+            notify('Credential revoked');
+            void render(true);
+        }
+        catch (error) {
+            notify(error.message);
         }
     }
-} table.append(head, body); if (!body.childElementCount) {
-    const row = node('tr'), cell = node('td', 'empty', 'No scoped credentials or client reports yet. Client app heartbeats appear here after a client installation connects.');
-    cell.colSpan = 8;
-    row.append(cell);
-    body.append(row);
-} area.append(table); async function revoke(credential, clients, digest) { const clientNames = clients.length ? clients.map(item => String(item.displayName) + ' (' + String(item.hostLabel) + ')').join(', ') : 'No reporting clients'; const message = 'Actor: ' + credential.actorId + '\nCredential: ' + credential.id + '\nPermissions: ' + credential.permissions.join(', ') + '\nLast used: ' + (credential.lastUsedAt || 'Not recorded') + '\nReporting clients: ' + clientNames + '\n\nEvery holder of this token loses access immediately, including unreported agents or machines. Queued writes remain on client machines. Revoke this credential?'; if (!confirm(message))
-    return; const password = prompt('Re-enter the dashboard password to authorize credential revocation'); if (!password)
-    return; try {
-    await api('/api/clients/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Engram-Reauth-Password': password }, body: JSON.stringify({ credentialId: credential.id, expectedDigest: digest }) });
-    notify('Credential revoked');
-    void render(true);
+    return area;
 }
-catch (error) {
-    notify(error.message);
-} } return area; }
 
 function storagePage() { const i = status.index || {}, s = status.storage || {}; const area = node('div'); area.append(pageHeader('Storage & index', 'Storage pressure, journal position and derived index health.')); const grid = node('div', 'detail-grid'); grid.append(metricPanel('Storage', Object.entries(s.usageBytes || {}).map(([k, v]) => [k + ' bytes', fmt(v)]).concat([['Pressure', s.pressureState], ['Available bytes', fmt(s.availableBytes)], ['Deferred operations', fmt(s.deferredOperations)]])), metricPanel('Index manifest', [['Backend', i.backend], ['Available', i.available ? 'Yes' : 'No'], ['Journal sequence', fmt(i.journalSequence)], ['Manifest entries', fmt(i.manifest?.entries)], ['Manifest sequence', fmt(i.manifest?.journalSequence)], ['Persisted', i.manifest?.persisted ? 'Yes' : 'No'], ['Vector index', i.vector?.ready ? 'Ready' : 'Unavailable']])); const actions = node('div', 'action-row'); actions.append(runAction('verify-index', 'Verify index')); area.append(grid, actions, node('p', 'muted', 'To rebuild a derived index, run: mdb index rebuild')); return area; }
 
-async function profileDomainsPage() { const area = node('div'); area.append(pageHeader('Profile domains', 'Review task-specific tags for accepted preferences. Changes create a revision and preserve each claim.')); let result; try {
-    result = await api('/api/profile/domains');
-}
-catch (error) {
-    area.append(node('p', 'empty', 'Profile domains are unavailable: ' + error.message));
-    return area;
-} const intro = node('p', 'help', 'General preferences apply to every project. A separate model pass proposes domains. A domain is adopted after at least ' + (result.minEvidence || 2) + ' accepted items support it. Without a configured model, discovery is unavailable. Owner edits and lifecycle changes are revisioned.'); area.append(intro); const registry = node('section', 'panel'); registry.setAttribute('data-key', 'profile-domain-registry'); registry.append(node('h2', '', 'Domains'), node('p', 'muted', 'Minimum evidence: ' + (result.minEvidence || 2))); for (const pending of result.pendingDomainCandidates || [])
-    registry.append(node('p', 'help', 'Pending: ' + pending.proposal.label + ' (' + pending.proposal.slug + ') · ' + pending.count + ' / ' + (result.minEvidence || 2) + ' accepted items · evidence: ' + (pending.evidence || []).join(', ') + ' · ' + (pending.reason || 'waiting for evidence'))); const auto = document.createElement('input'); auto.type = 'checkbox'; auto.checked = result.autoApply !== false; auto.setAttribute('data-key', 'profile-domains-auto-apply'); auto.onchange = async () => { try {
-    await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'autoApply', enabled: auto.checked, expectedRegistryRevisionId: result.registryRevisionId }) });
-    notify('Dream tag auto-apply setting saved');
-    void render(true);
-}
-catch (error) {
-    auto.checked = !auto.checked;
-    notify(error.message);
-} }; registry.append(switchLabel(auto, 'Auto-apply Dream tags', 'Dream may apply classifier or discovered-domain tags unless you set an item explicitly.')); for (const domain of result.domains || []) {
-    const row = node('article', 'insight-row');
-    row.setAttribute('data-key', 'domain-registry-' + domain.slug);
-    row.append(node('strong', '', '' + domain.label), node('span', 'badge', domain.origin), node('p', 'muted', domain.slug + ' · ' + domain.itemCount + ' items · ' + (domain.evidence || []).length + ' evidence'));
-    if (domain.slug !== 'general') {
-        const actions = node('div', 'action-row'), rename = node('button', 'secondary', 'Rename'), merge = node('button', 'secondary', 'Merge into'), retire = node('button', 'secondary', 'Retire');
-        for (const button of [rename, merge, retire])
-            button.type = 'button';
-        rename.onclick = async () => { const label = prompt('New domain label', domain.label); if (!label)
-            return; await saveDomainAction({ operation: 'rename', slug: domain.slug, label }); };
-        merge.onclick = async () => { const into = prompt('Merge into active domain slug'); if (!into)
-            return; await saveDomainAction({ operation: 'merge', slug: domain.slug, into, retag: true }); };
-        retire.onclick = async () => { if (!confirm('Retire ' + domain.label + ' and re-tag affected automatic items as general?'))
-            return; await saveDomainAction({ operation: 'retire', slug: domain.slug, retag: true }); };
-        actions.append(rename, merge, retire);
-        row.append(actions);
+async function profileDomainsPage() {
+    const area = node('div');
+    area.append(pageHeader('Profile domains', 'Task-specific tags that decide which accepted preferences apply to a project. Changes create a revision and keep each claim.'));
+    let result;
+    try {
+        result = await api('/api/profile/domains');
     }
-    registry.append(row);
-} const add = node('button', 'secondary', 'Add domain'); add.type = 'button'; add.onclick = async () => { const slug = prompt('Domain slug (lowercase, 2–24 characters)'); if (!slug)
-    return; const label = prompt('Domain label'); if (!label)
-    return; const description = prompt('One-line description'); if (!description)
-    return; const keywords = prompt('Keywords, comma separated'); if (!keywords)
-    return; const evidence = (result.items || []).find(item => (item.domains || []).includes('general')); if (!evidence) {
-    notify('An accepted preference is required as evidence');
-    return;
-} await saveDomainAction({ operation: 'add', slug, label, description, keywords: keywords.split(',').map(x => x.trim()), evidence: [evidence.id] }); }; registry.append(add); area.append(registry); async function saveDomainAction(payload) { try {
-    await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, expectedRegistryRevisionId: result.registryRevisionId }) });
-    notify('Domain registry updated');
-    void render(true);
-}
-catch (error) {
-    notify(error.message);
-} } const list = node('section', 'panel'); list.setAttribute('data-key', 'profile-domain-list'); for (const item of result.items || []) {
-    const row = node('article', 'insight-row');
-    row.setAttribute('data-key', 'profile-domain-' + item.id);
-    row.append(node('p', '', item.claim));
-    if (item.rejectedReason)
-        row.append(node('p', 'help', 'Domain classification pending retry: ' + item.rejectedReason));
-    const controls = node('div', 'action-row');
-    const selected = new Set(item.domains || ['general']);
-    for (const domain of result.domains) {
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.checked = selected.has(domain.slug);
-        input.setAttribute('data-key', 'domain-' + item.id + '-' + domain.slug);
-        input.setAttribute('aria-label', domain.slug);
-        const label = node('label', 'field', domain.label);
-        label.append(input);
-        controls.append(label);
+    catch (error) {
+        area.append(node('p', 'empty', 'Profile domains are unavailable: ' + error.message));
+        return area;
     }
-    const save = node('button', 'secondary', 'Save domains');
-    save.type = 'button';
-    save.setAttribute('data-key', 'save-domains-' + item.id);
-    save.onclick = async () => { try {
-        const domains = [...controls.querySelectorAll('input:checked')].map(input => input.getAttribute('aria-label'));
-        if (!domains.length)
-            throw new Error('Choose at least one domain');
-        await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, expectedRevisionId: item.revisionId, domains }) });
-        notify('Preference domains saved');
+    const minEvidence = result.minEvidence || 2;
+    async function saveDomainAction(payload) {
+        try {
+            await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, expectedRegistryRevisionId: result.registryRevisionId }) });
+            notify('Domain registry updated');
+            void render(true);
+        }
+        catch (error) {
+            notify(error.message);
+        }
+    }
+    const registry = panel('Domains');
+    registry.setAttribute('data-key', 'profile-domain-registry');
+    registry.append(node('p', 'help', 'Preferences marked General apply to every project. A separate model pass proposes new domains, and a domain is adopted after ' + minEvidence + ' accepted items support it. Without a configured model, discovery is unavailable.'));
+    const auto = document.createElement('input');
+    auto.type = 'checkbox';
+    auto.checked = result.autoApply !== false;
+    auto.setAttribute('data-key', 'profile-domains-auto-apply');
+    auto.onchange = async () => { try {
+        await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'autoApply', enabled: auto.checked, expectedRegistryRevisionId: result.registryRevisionId }) });
+        notify('Dream tag auto-apply setting saved');
         void render(true);
     }
     catch (error) {
+        auto.checked = !auto.checked;
         notify(error.message);
     } };
-    controls.append(save);
-    row.append(controls);
-    list.append(row);
-} if (!(result.items || []).length)
-    list.append(node('p', 'empty', 'No accepted preferences to tag yet.')); area.append(list); return area; }
+    registry.append(switchLabel(auto, 'Auto-discover and apply domains', 'Dream looks for new topics in your accepted preferences each night and applies tags it is confident about, unless you set an item yourself. Turn this off to review every suggestion.'));
+    const pendingList = result.pendingDomainCandidates || [];
+    const wrap = node('div', 'table-wrap'), table = node('table', 'data-table stack'), head = node('thead'), header = node('tr'), body = node('tbody');
+    for (const label of ['Domain', 'Items', 'Evidence', ''])
+        header.append(node('th', '', label));
+    head.append(header);
+    for (const domain of result.domains || []) {
+        const row = node('tr');
+        row.setAttribute('data-key', 'domain-registry-' + domain.slug);
+        const name = node('td');
+        const title = node('div', 'action-row');
+        title.append(node('strong', '', '' + domain.label), node('span', 'pill state-unknown', String(domain.origin)));
+        name.append(title, node('small', 'help mono', domain.slug));
+        const actions = node('td', 'row-actions');
+        if (domain.slug !== 'general') {
+            const rename = node('button', 'ghost', 'Rename'), merge = node('button', 'ghost', 'Merge into'), retire = node('button', 'ghost danger-text', 'Retire');
+            for (const button of [rename, merge, retire])
+                button.type = 'button';
+            rename.onclick = async () => { const label = prompt('New domain label', domain.label); if (!label)
+                return; await saveDomainAction({ operation: 'rename', slug: domain.slug, label }); };
+            merge.onclick = async () => { const into = prompt('Merge into active domain slug'); if (!into)
+                return; await saveDomainAction({ operation: 'merge', slug: domain.slug, into, retag: true }); };
+            retire.onclick = async () => { if (!confirm('Retire ' + domain.label + ' and re-tag affected automatic items as general?'))
+                return; await saveDomainAction({ operation: 'retire', slug: domain.slug, retag: true }); };
+            actions.append(rename, merge, retire);
+        }
+        row.append(name, node('td', '', String(domain.itemCount)), node('td', '', String((domain.evidence || []).length)), actions);
+        body.append(row);
+    }
+    table.append(head, body);
+    wrap.append(table);
+    registry.append(wrap);
+    const add = node('button', 'primary', 'Add domain');
+    add.type = 'button';
+    add.onclick = async () => { const slug = prompt('Domain slug (lowercase, 2–24 characters)'); if (!slug)
+        return; const label = prompt('Domain label'); if (!label)
+        return; const description = prompt('One-line description'); if (!description)
+        return; const keywords = prompt('Keywords, comma separated'); if (!keywords)
+        return; const evidence = (result.items || []).find(item => (item.domains || []).includes('general')); if (!evidence) {
+        notify('An accepted preference is required as evidence');
+        return;
+    } await saveDomainAction({ operation: 'add', slug, label, description, keywords: keywords.split(',').map(x => x.trim()), evidence: [evidence.id] }); };
+    const discover = node('button', 'secondary', 'Discover now');
+    discover.type = 'button';
+    discover.onclick = async () => {
+        discover.disabled = true;
+        discover.textContent = 'Discovering…';
+        try {
+            const reply = await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'discover' }) });
+            const found = reply.discovery || {};
+            if (found.status === 'unavailable')
+                notify('Discovery unavailable: ' + found.reason);
+            else
+                notify('Discovery finished: ' + found.classified + ' preferences checked, ' + (found.promoted || []).length + ' new topics' + ((found.rejections || []).length ? ', ' + found.rejections.length + ' need another try' : ''));
+            void render(true);
+        }
+        catch (error) {
+            notify(error.message);
+            discover.disabled = false;
+            discover.textContent = 'Discover now';
+        }
+    };
+    const addRow = node('div', 'action-row');
+    addRow.append(add, discover);
+    registry.append(addRow);
+    area.append(registry);
+    const found = panel('Discovered topics');
+    found.setAttribute('data-key', 'profile-discovered-topics');
+    found.append(node('p', 'help', 'Every topic found by discovery, including ones that are waiting for evidence or were retired or merged.'));
+    const discovered = (result.registry || []).filter(domain => domain.origin === 'discovered');
+    if (discovered.length || pendingList.length) {
+        const foundWrap = node('div', 'table-wrap'), foundTable = node('table', 'data-table stack'), foundHead = node('thead'), foundHeader = node('tr'), foundBody = node('tbody');
+        for (const label of ['Topic', 'State', 'Evidence', 'First seen'])
+            foundHeader.append(node('th', '', label));
+        foundHead.append(foundHeader);
+        for (const domain of discovered) {
+            const row = node('tr'), name = node('td'), stateCell = node('td');
+            row.setAttribute('data-key', 'discovered-' + domain.slug);
+            name.append(node('strong', '', String(domain.label)), node('small', 'help mono', domain.slug + (domain.description ? ' · ' + domain.description : '')));
+            stateCell.append(node('span', 'pill ' + (domain.status === 'active' ? 'state-ok' : 'state-unknown'), domain.status === 'merged' && domain.mergedInto ? 'merged into ' + domain.mergedInto : String(domain.status)));
+            row.append(name, stateCell, node('td', '', String((domain.evidence || []).length) + ' items'), node('td', '', domain.firstSeen ? new Date(domain.firstSeen).toLocaleDateString() : '—'));
+            foundBody.append(row);
+        }
+        for (const candidate of pendingList) {
+            const row = node('tr'), name = node('td'), stateCell = node('td');
+            row.setAttribute('data-key', 'pending-' + candidate.proposal.slug);
+            name.append(node('strong', '', String(candidate.proposal.label)), node('small', 'help mono', candidate.proposal.slug + (candidate.reason ? ' · ' + candidate.reason : '')));
+            stateCell.append(node('span', 'pill state-attention', 'waiting ' + candidate.count + ' / ' + minEvidence));
+            row.append(name, stateCell, node('td', '', String((candidate.evidence || []).length) + ' items'), node('td', '', candidate.firstSeen ? new Date(candidate.firstSeen).toLocaleDateString() : '—'));
+            foundBody.append(row);
+        }
+        foundTable.append(foundHead, foundBody);
+        foundWrap.append(foundTable);
+        found.append(foundWrap);
+    }
+    else {
+        const empty = node('div', 'empty-state');
+        empty.append(node('strong', '', 'No discovered topics yet'), node('p', '', 'Dream checks for new topics every night once a model is configured. You can also run Discover now.'));
+        found.append(empty);
+    }
+    area.append(found);
+    const list = panel('Accepted preferences');
+    list.setAttribute('data-key', 'profile-domain-list');
+    list.append(node('p', 'help', 'Choose which domains each preference belongs to, then save that preference.'));
+    for (const item of result.items || []) {
+        const row = node('article', 'insight-row');
+        row.setAttribute('data-key', 'profile-domain-' + item.id);
+        row.append(node('p', 'claim', item.claim));
+        if (item.rejectedReason)
+            row.append(node('p', 'help', 'Domain classification pending retry: ' + item.rejectedReason));
+        const controls = node('div', 'domain-chips');
+        const selected = new Set(item.domains || ['general']);
+        for (const domain of result.domains) {
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = selected.has(domain.slug);
+            input.setAttribute('data-key', 'domain-' + item.id + '-' + domain.slug);
+            input.setAttribute('aria-label', domain.slug);
+            const label = node('label', 'chip');
+            label.append(input, node('span', '', domain.label));
+            controls.append(label);
+        }
+        const save = node('button', 'secondary', 'Save domains');
+        save.type = 'button';
+        save.setAttribute('data-key', 'save-domains-' + item.id);
+        save.onclick = async () => { try {
+            const domains = [...controls.querySelectorAll('input:checked')].map(input => input.getAttribute('aria-label'));
+            if (!domains.length)
+                throw new Error('Choose at least one domain');
+            await api('/api/profile/domains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, expectedRevisionId: item.revisionId, domains }) });
+            notify('Preference domains saved');
+            void render(true);
+        }
+        catch (error) {
+            notify(error.message);
+        } };
+        const foot = node('div', 'chip-row');
+        foot.append(controls, save);
+        row.append(foot);
+        list.append(row);
+    }
+    if (!(result.items || []).length) {
+        const empty = node('div', 'empty-state');
+        empty.append(node('strong', '', 'No accepted preferences to tag yet'), node('p', '', 'Preferences appear here after you accept them from Dream or the wiki review.'));
+        list.append(empty);
+    }
+    area.append(list);
+    return area;
+}
 
 function jobsPage() { const area = node('div'); area.append(pageHeader('Jobs & scheduler', 'Queue state and adaptive schedule activity.')); const s = status.scheduler || {}, grid = node('div', 'detail-grid'); grid.append(metricPanel('Queue', [['Queued', fmt(status.jobs?.pending)], ['Running', fmt(status.jobs?.running)], ['Failed', fmt(status.jobs?.failed)], ['Dead letter', fmt(status.jobs?.dead_letter)], ['Completed', fmt(status.jobs?.complete)]]), metricPanel('Scheduler', [['Enabled', s.enabled ? 'Yes' : 'No'], ['Paused', s.paused ? 'Yes' : 'No'], ['Mode', s.mode], ['Recent events', fmt(s.events)], ['Cycles', fmt(s.cycles)]])); const section = (title, table) => { const block = node('section', 'jobs-section'); block.append(node('h2', '', title), table); return block; }; const jobs = dataTable('Recent jobs', ['Job', 'Kind', 'State', 'Attempts', 'Next run'], (status.jobItems || []).slice().reverse().map(item => [item.id, item.kind, item.status, item.attempts, item.nextAt ? new Date(item.nextAt).toLocaleString() : '—'])); const events = dataTable('Recent schedule events', ['Time', 'Event', 'Trigger'], (s.recentEvents || []).slice().reverse().map(item => [new Date(item.at).toLocaleString(), item.type, item.trigger || '—'])); const cycles = dataTable('Recent cycles', ['Cycle', 'State', 'Started', 'Completed', 'Workspaces', 'Global', 'Dream'], (s.recentCycles || []).slice().reverse().map(item => [item.id, item.state, new Date(item.createdAt).toLocaleString(), item.completedAt ? new Date(item.completedAt).toLocaleString() : '—', item.workspaceCount, item.globalStatus, item.dreamStatus])); area.append(grid, section('Job queue', jobs), section('Schedule activity', events), section('Scheduler cycles', cycles)); return area; }
 

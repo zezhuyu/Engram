@@ -6,7 +6,7 @@
 export const designCss = String.raw`
 :root{
   color-scheme:light dark;
-  --ground:#f9fbfc;--surface:#ffffff;--raised:#f4f6f8;--active:#ebedee;--border:#e8eaec;--rule:#f0f1f2;--control:#cdced1;
+  --ground:#e4e7ea;--surface:#f6f7f8;--raised:#eceef0;--active:#d9dce0;--border:#d6d9dd;--rule:#e2e4e7;--control:#b4b8be;
   --text:#131416;--muted:#5d5f60;--accent:#1b6c80;--accent-ink:#ffffff;--positive:#1e7b4f;--negative:#c4242a;--warning:#92400e;--info:#2f70bb;
   --primary-bg:#131416;--primary-ink:#ffffff;--primary-hover:#2a2c2f;
   --pill-positive-bg:#dcfae5;--pill-positive-ink:#04250e;--pill-negative-bg:#ffedea;--pill-negative-ink:#831c1e;
@@ -44,10 +44,10 @@ small,.muted,.help{color:var(--muted)}small,.help{font-size:12px}
 /* ---- frame: sidebar + top bar on the tinted ground, the page is a white sheet ---- */
 .app{display:grid;grid-template-columns:var(--sidebar-width) minmax(0,1fr);min-height:100vh;background:var(--ground)}
 .rail{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:14px 12px 12px;min-height:0}
-.brand{display:flex;align-items:center;gap:10px;padding:2px 8px;color:var(--text);font-weight:600;font-size:15px}
+.brand{display:flex;align-items:center;gap:12px;padding:2px 8px;color:var(--text);font-weight:600;font-size:17px}
 .brand:hover{text-decoration:none}
-.brand img{width:26px;height:26px;border-radius:6px}
-.scope{display:block;margin:2px 8px 14px 44px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brand img{width:40px;height:40px;border-radius:9px}
+.scope-unused{display:block;margin:0 8px 14px 60px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #nav{flex:1;min-height:0;display:flex;flex-direction:column}
 .nav-scroll{flex:1;min-height:0;overflow:auto}
 .nav-label{margin:18px 10px 4px;color:var(--muted);font-size:12px}
@@ -97,6 +97,35 @@ a.card:hover{background:var(--raised);text-decoration:none}
 .metric-list dt:nth-last-of-type(1),.metric-list dd:nth-last-of-type(1){border-bottom:0}
 .table-wrap{overflow-x:auto;max-width:100%}
 .panel,#content>*{min-width:0}
+.panel{display:grid;gap:12px;align-content:start}
+.panel>h2,.panel>h3{margin:0}
+.panel>button,.panel>.quiet-button{justify-self:start}
+.panel>progress{width:100%}
+.panel>small.help,.panel>.help{margin:0}
+.panel>input+small.help,.panel>select+small.help,.panel>textarea+small.help{margin-top:-6px}
+.row-actions{white-space:nowrap;text-align:right}
+.row-actions>button{padding:0 10px}
+.row-actions>button.danger{color:var(--negative);border-color:transparent;background:transparent}
+.row-actions>button.danger:hover{background:var(--pill-negative-bg)}
+.row-actions>button+button{margin-left:4px}
+.row-actions button.ghost.danger-text,button.ghost.danger-text{color:var(--negative)}
+.data-table.data-table td{vertical-align:middle}
+.brand{margin-bottom:10px}
+button.danger-text{color:var(--negative)}
+button.danger-text:hover{background:var(--pill-negative-bg)}
+.data-table td small.help{display:block;margin-top:2px}
+.data-table td .pill{margin-bottom:2px}
+.detail-row>td{padding-top:0;border-top:0}
+.detail-row details>summary{cursor:pointer;color:var(--muted);font-size:13px;padding:2px 0}
+.detail-row .metric-list,.detail-row .device-list{margin-top:8px}
+.device-list{display:grid;gap:6px}
+.insight-row{display:grid;gap:10px;padding:14px 0;border-top:1px solid var(--rule)}
+.insight-row:first-of-type{border-top:0}
+.insight-row .claim{margin:0;font-weight:500}
+.chip-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
+.domain-chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--control);border-radius:999px;background:var(--surface);font-size:13px;cursor:pointer}
+.chip input{margin:0}
 .help,small{overflow-wrap:anywhere}
 small.help{display:block;margin-top:2px}
 .panel .connector-card{padding:0;margin:12px 0 0;border:0;background:transparent;display:grid;gap:14px}
@@ -169,7 +198,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 /* ---- settings: label column + control, one view per area, quiet save bar ---- */
 .setting-groups{display:grid;gap:16px}
 .setting-group>p{color:var(--muted)}
-.setting-row{display:grid;grid-template-columns:minmax(180px,1fr) minmax(220px,1.3fr) auto;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid var(--rule)}
+.setting-row{display:grid;grid-template-columns:minmax(180px,1fr) minmax(220px,1.3fr) auto;align-items:center;gap:16px;padding:10px 0;border-bottom:1px solid var(--rule)}
 .setting-row:last-child{border-bottom:0}
 .setting-name strong{display:block;font-weight:500}.setting-name small{display:block;margin-top:2px}
 .setting-control{display:grid;gap:6px;min-width:0}
@@ -204,7 +233,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .login-page{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--ground)}
 .login-card{width:min(420px,100%);display:grid;gap:14px;padding:28px;background:var(--surface);border:1px solid var(--border);border-radius:12px}
 .login-card h1{font-size:22px;font-weight:600}.login-card p{color:var(--muted)}
-.auth-logo{width:36px;height:36px;border-radius:8px}
+.auth-logo{width:56px;height:56px;border-radius:12px}
 .auth-form{display:grid;gap:12px}
 .password-field{position:relative;display:block}.password-field input{padding-right:40px}
 .password-reveal{position:absolute;right:4px;top:3px;height:28px;width:30px;padding:0;border:0;background:transparent;color:var(--muted)}
@@ -230,4 +259,14 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 @media (max-width:1180px) and (min-width:901px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:900px){.card{padding:12px 14px}.card-value{font-size:20px}.card-value.long{font-size:16px}.crumb-group{display:none}#pause{display:none}.top-actions{gap:8px}.page-head>button{align-self:flex-start}}
 @media (max-width:340px){.cards{grid-template-columns:1fr}}
+
+@media (max-width:900px){
+.data-table.stack thead{display:none}
+.data-table.stack,.data-table.stack tbody{display:block;overflow:visible;width:100%}
+.data-table.stack tr{display:grid;gap:6px;padding:14px 0;border-bottom:1px solid var(--rule)}
+.data-table.stack td{display:block;padding:0;border:0;overflow-wrap:anywhere}
+.data-table.stack td.row-actions{text-align:left;margin-top:2px}
+.data-table.stack tr.detail-row{padding:0 0 8px}
+.row-actions>button.danger,.row-actions>button.ghost{padding:0 10px;margin-left:-10px}
+}
 `;

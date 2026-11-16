@@ -46,8 +46,8 @@ async function refresh() {
     try {
         const result = await api('/api/client/status');
         status = { doctor: { state: result.state } };
+        linkDown = false;
         health.title = (result.checks || []).map(check => check.text).join(' · ');
-        document.querySelector('#vault-path').textContent = 'This device' + (result.captureHost ? ' · ' + result.captureHost : '');
         setHealth();
         updated.textContent = 'Updated ' + new Date(result.generatedAt || Date.now()).toLocaleTimeString();
         disconnect.hidden = true;
@@ -56,8 +56,9 @@ async function refresh() {
     }
     catch (error) {
         status = { doctor: { state: 'problem' } };
-        health.title = error.message || 'Client status unavailable';
+        linkDown = true;
         setHealth();
+        health.title = error.message || 'Client status unavailable';
         disconnect.hidden = false;
         backoff = Math.min(Math.max(backoff * 2, 10000), 300000);
         notify('Client status unavailable: ' + error.message);

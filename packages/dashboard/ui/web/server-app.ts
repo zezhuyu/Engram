@@ -94,17 +94,17 @@ async function refresh() {
         return;
     try {
         status = await api('/api/status');
-        const scope = document.querySelector('#vault-path'), fullPath = status.vaultPath || '';
-        scope.textContent = (fullPath ? fullPath.split('/').filter(Boolean).pop() : status.vaultLabel) || 'Local vault';
-        scope.title = fullPath;
         disconnect.hidden = true;
         backoff = 10000;
+        linkDown = false;
+        health.title = '';
         setHealth();
         updated.textContent = 'Updated ' + new Date(status.generatedAt || Date.now()).toLocaleTimeString();
         await render(false, true);
     }
     catch (error) {
         disconnect.hidden = false;
+        linkDown = true;
         setHealth();
         backoff = Math.min(Math.max(backoff * 2, 10000), 300000);
         notify('Dashboard disconnected: ' + error.message);

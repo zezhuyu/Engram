@@ -203,7 +203,16 @@ function statusTone(data) { if (data?.doctor?.state === 'problem' || data?.index
     return 'problem'; if (data?.doctor?.state === 'attention' || data?.provider?.configured && !data?.provider?.ready)
     return 'attention'; return 'ok'; }
 
-function setHealth() { const state = status ? statusTone(status) : 'unknown'; health.className = 'pill state-' + state; health.replaceChildren(node('span', '', icons[state]), node('span', '', state === 'ok' ? 'OK' : state === 'problem' ? 'Problem' : state === 'attention' ? 'Attention' : 'Connecting')); }
+/** True while the last refresh could not reach the backend; the pill must not keep showing the previous good result. */
+let linkDown = false;
+function setHealth() {
+    if (linkDown) {
+        health.className = 'pill state-problem';
+        health.replaceChildren(node('span', '', icons.problem), node('span', '', 'Disconnected'));
+        health.title = 'Cannot reach the dashboard backend. Retrying automatically.';
+        return;
+    }
+    const state = status ? statusTone(status) : 'unknown'; health.className = 'pill state-' + state; health.replaceChildren(node('span', '', icons[state]), node('span', '', state === 'ok' ? 'OK' : state === 'problem' ? 'Problem' : state === 'attention' ? 'Attention' : 'Connecting')); }
 
 function dataTable(title, columns, rows) { const box = panel(title), wrap = node('div', 'table-wrap'), table = node('table', 'data-table'), head = node('thead'), heading = node('tr'); for (const column of columns)
     heading.append(node('th', '', column)); head.append(heading); table.append(head); const body = node('tbody'); if (!rows.length) {

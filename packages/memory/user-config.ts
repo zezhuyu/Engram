@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { MDBError } from '../core/types.js';
-import { ensureStorageDirectory, hasExplicitDataDir, resolveStoragePath } from '../core/root.js';
+import { DATA_DIR_ENV, DEFAULT_DATA_DIR_NAME, ensureStorageDirectory, hasExplicitDataDir, resolveStoragePath } from '../core/root.js';
 import { remoteUrlAllowed } from '../core/private-network.js';
 import { BINDING_HOSTS, type BindingHost } from '../core/project-binding.js';
 import { assertDurableWriteCapacity } from '../core/storage-lifecycle.js';
@@ -40,4 +41,17 @@ export async function writeUserConfig(config: UserConfig, env: NodeJS.ProcessEnv
   await assertDurableWriteCapacity(path.dirname(file), Buffer.byteLength(serialized) + 4096, env);
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try { await fs.writeFile(temp, serialized, { mode: 0o600, flag: 'wx' }); await fs.rename(temp, file); } finally { await fs.rm(temp, { force: true }); }
+}
+
+/**
+ * The environment under which the user's shell and agent hooks resolve capture storage. Hooks usually run with ENGRAM_DATA_DIR exported by the shell, but a
+ * launchd or systemd service (the client dashboard) starts without it and would look in the plain default location and report capture as off. When no explicit
+ * setting is present and the capture config exists only under the default data directory, resolve storage as the hooks do. Read-only: nothing is created.
+ */
+export async function hookStorageEnv(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): Promise<NodeJS.ProcessEnv> {
+  if (hasExplicitDataDir(env) || env.ENGRAM_USER_CONFIG?.trim()) return env;
+  const exists = async (file: string): Promise<boolean> => fs.lstat(file).then(() => true, () => false);
+  if (await exists(resolveStoragePath('config', env, home))) return env;
+  const withDataDir = { ...env, [DATA_DIR_ENV]: path.join(home, DEFAULT_DATA_DIR_NAME) };
+  return await exists(resolveStoragePath('config', withDataDir, home)) ? withDataDir : env;
 }

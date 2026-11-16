@@ -466,7 +466,7 @@ test('served dashboard script completes its first refresh and renders every scre
     const rendered = document.querySelector('#content').innerText;
     assert.notEqual(rendered, 'Waiting for first refresh', `${screen} should refresh`);
     assert.doesNotMatch(rendered, /Loading effective settings…/, `${screen} should not remain in a loading state`);
-    if (screen === 'clients') { assert.match(rendered, /Studio Air/); assert.match(rendered, /Revoke credential/); }
+    if (screen === 'clients') { assert.match(rendered, /Studio Air/); assert.match(rendered, /Revoke/); }
     if (screen === 'settings-error') assert.match(rendered, /Effective settings could not be loaded/);
     assert.equal(document.querySelector('#updated').textContent.startsWith('Updated '), true, `${screen} should show refresh completion`);
   }
@@ -474,9 +474,9 @@ test('served dashboard script completes its first refresh and renders every scre
 
 test('Domains panel shows its evidence threshold, pending candidates, and no-model behavior', async () => {
   const source = compactScript(assets['/assets/app.js']!.body);
-  assert.match(source, /Minimum evidence:/);
+  assert.match(source, /accepted items support it/);
   assert.match(source, /pendingDomainCandidates/);
-  assert.match(source, /pending\.evidence\|\|\[\]\)\.join/);
+  assert.match(source, /Discovered topics/); assert.match(source, /operation:'discover'/); assert.match(source, /Auto-discover and apply domains/);
   assert.match(source, /discovery is unavailable/);
 });
 
@@ -488,8 +488,7 @@ test('client refresh uses client status and leaves Connecting on success or fail
   const clientScreens = script.match(/^const screens=.*;$/m)?.[0] ?? '';
   assert.doesNotMatch(clientScreens, /['"]clients['"]/);
   assert.match(script, /api\('\/api\/client\/status'\)/);
-  assert.match(script, /This device'\+\(result\.captureHost/);
-  const start = script.indexOf('async function refresh(){'), end = script.indexOf('\nstartApp();', start);
+    const start = script.indexOf('async function refresh(){'), end = script.indexOf('\nstartApp();', start);
   assert.ok(start >= 0 && end > start, 'client script contains the rewritten refresh implementation');
   const fields = new Map<string, any>();
   const document = { hidden: false, querySelector(selector: string) { if (!fields.has(selector)) fields.set(selector, { hidden: false, textContent: '', title: '', className: '', replaceChildren() {} }); return fields.get(selector); } };
@@ -506,7 +505,7 @@ test('client refresh uses client status and leaves Connecting on success or fail
   assert.deepEqual(requested, ['/api/client/status']); assert.equal(context.health.textContent, 'ok');
   assert.equal(context.updated.textContent.startsWith('Updated '), true); assert.equal(rendered, 1);
   assert.match(context.health.title, /Syncing to studio.example/);
-  assert.equal(document.querySelector('#vault-path').textContent, 'This device · studio.example');
+  assert.doesNotMatch(script, /vault-path/, 'the sidebar shows only the logo and title');
   response = { state: 'attention', generatedAt: '2026-01-01T00:00:01Z', checks: [{ id: 'server', state: 'attention', text: 'Cannot reach the server: events are queued on this Mac' }], captureHost: 'studio.example' };
   await refresh(); assert.equal(context.health.textContent, 'attention'); assert.equal(rendered, 2);
   response = new Error('client status route failed'); await refresh();

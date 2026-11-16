@@ -43,8 +43,8 @@ import { defaultOutboxDirectory, outboxStatus, readLog } from '../memory/outbox.
 import { drainOutboxNow } from '../memory/mcp-proxy.js';
 import { promises as fsPromises } from 'node:fs';
 import { parseStrictJson } from '../../scripts/lib/strict-json.js';
-import { readUserConfig } from '../memory/user-config.js';
-import { remoteCaptureSpoolStatus } from '../memory/remote-spool.js';
+import { hookStorageEnv, readUserConfig } from '../memory/user-config.js';
+import { defaultRemoteSpoolDirectory, remoteCaptureSpoolStatus } from '../memory/remote-spool.js';
 import { trustFilePath, bindingFingerprint } from '../core/project-trust.js';
 import { readBinding } from '../core/project-binding.js';
 import { cacheDir } from '../memory/context-hook.js';
@@ -56,7 +56,9 @@ import { anthropicTunnelStatus, saveAnthropicTunnel, generateAnthropicCertificat
 import { readDreamRunStatus } from '../adaptive/dream-status.js';
 import { PROFILE_DOMAINS, validateDomains } from '../profile/domains.js';
 import { activeDomains, sanitizeDomainProposal } from '../profile/domains.js';
-import { readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDomainRegistry } from '../profile/domain-registry.js';
+import { readDomainRegistry, setDomainAutoApply, verifyDomainEvidence, writeDomainRegistry, discoverPreferenceDomains, type DomainClassifier } from '../profile/domain-registry.js';
+import { DOMAIN_CLASSIFICATION_PROMPT } from '../models/prompts.js';
+import { redactText, redactRemotePii } from '../memory/redact.js';
 
 const BODY_LIMIT = 64 * 1024, DOCUMENT_BODY_LIMIT = 256 * 1024, ACTION_TIMEOUT_MS = 120_000;
 const captureReachabilityCache = new Map<string, { checkedAt: number; reachable: boolean }>();
@@ -500,7 +502,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
         if (path.startsWith('/api/client/replica/') || path === '/api/client/replica') return fail(res,405,'METHOD_NOT_ALLOWED','Method not allowed');
       }
       if (options.clientMode && req.method === 'GET' && path === '/api/client/status') {
-        const [user, outbox, service, clientConfig] = await Promise.all([readUserConfig().catch(() => undefined), outboxStatus(defaultOutboxDirectory()).catch(() => undefined), manageClientService({ action: 'status' }).catch(() => undefined), localClientConfig().catch(() => ({} as { ENGRAM_MCP_URL?: string; ENGRAM_TOKEN_FILE?: string }))]);
+        const hookEnv = await hookStorageEnv(); const [user, outbox, service, clientConfig] = await Promise.all([readUserConfig(hookEnv).catch(() => undefined), outboxStatus(defaultOutboxDirectory()).catch(() => undefined), manageClientService({ action: 'status' }).catch(() => undefined), localClientConfig().catch(() => ({} as { ENGRAM_MCP_URL?: string; ENGRAM_TOKEN_FILE?: string }))]);
         const captureUrl = user?.serverUrl ?? process.env.ENGRAM_MCP_URL ?? clientConfig.ENGRAM_MCP_URL;
         let captureHost: string | null = null, reachable: boolean | undefined;
         if (captureUrl) {
@@ -570,12 +572,12 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
         return send(res, 200, { service, outbox, workspacePaths: [process.env.ENGRAM_PROJECT_DIR, process.env.ENGRAM_OUTBOX].filter(Boolean), consent: process.env.ENGRAM_CAPTURE_CONSENT === 'true', paused: process.env.ENGRAM_PAUSED === 'true', dashboard: { host, port: addressPort(server), tls: !!tls, passwordSet } });
       }
       if (req.method === 'GET' && path === '/api/client/device') {
-        const [user, outbox, spool, service, clientConfig] = await Promise.all([readUserConfig().catch(() => undefined), outboxStatus(defaultOutboxDirectory()).catch(() => undefined), remoteCaptureSpoolStatus().catch(() => undefined), manageClientService({ action: 'status' }).catch(error => ({ unavailable: (error as Error).message })), localClientConfig().catch(() => ({} as { ENGRAM_MCP_URL?: string; ENGRAM_TOKEN_FILE?: string }))]);
+        const hookEnv = await hookStorageEnv(); const [user, outbox, spool, service, clientConfig] = await Promise.all([readUserConfig(hookEnv).catch(() => undefined), outboxStatus(defaultOutboxDirectory()).catch(() => undefined), remoteCaptureSpoolStatus(defaultRemoteSpoolDirectory(hookEnv)).catch(() => undefined), manageClientService({ action: 'status' }).catch(error => ({ unavailable: (error as Error).message })), localClientConfig().catch(() => ({} as { ENGRAM_MCP_URL?: string; ENGRAM_TOKEN_FILE?: string }))]);
         let serverHost: string | undefined; try { const captureUrl = user?.serverUrl ?? process.env.ENGRAM_MCP_URL ?? clientConfig.ENGRAM_MCP_URL; if (captureUrl) serverHost = new URL(captureUrl).host; } catch { serverHost = undefined; }
         const tokenPath = process.env.ENGRAM_TOKEN_FILE ?? clientConfig.ENGRAM_TOKEN_FILE;
         const tokenFile = tokenPath ? pathUtil.resolve(tokenPath.startsWith('~/') ? pathUtil.join(process.env.HOME ?? '', tokenPath.slice(2)) : tokenPath) : undefined;
         const tokenInfo = tokenFile ? await fsPromises.lstat(tokenFile).then(stat => ({ present: stat.isFile() && !stat.isSymbolicLink(), modeOk: stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o600 && (typeof process.getuid !== 'function' || stat.uid === process.getuid()) })).catch(() => ({ present: false, modeOk: false })) : { present: false, modeOk: false };
-        const trusted = await fsPromises.readFile(trustFilePath(), 'utf8').then(text => { const parsed = JSON.parse(text) as { entries?: Array<{ root?: unknown }> }; return Array.isArray(parsed.entries) ? parsed.entries.flatMap(entry => typeof entry?.root === 'string' ? [entry.root] : []).slice(0, 20) : []; }).catch(() => [] as string[]);
+        const trusted = await fsPromises.readFile(trustFilePath(hookEnv), 'utf8').then(text => { const parsed = JSON.parse(text) as { entries?: Array<{ root?: unknown }> }; return Array.isArray(parsed.entries) ? parsed.entries.flatMap(entry => typeof entry?.root === 'string' ? [entry.root] : []).slice(0, 20) : []; }).catch(() => [] as string[]);
         const bound = process.env.ENGRAM_PROJECT_DIR ? [pathUtil.resolve(process.env.ENGRAM_PROJECT_DIR)] : [];
         const outboxLog = outbox?.log ? await readLog(pathUtil.dirname(outbox.log), 100).catch(() => []) : [];
         const lastDrain = [...outboxLog].reverse().find(entry => ['delivered', 'conflict-note', 'rejected'].includes(String(entry.event)));
@@ -969,6 +971,18 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
       const body = parsedBodies.get(req) as any;
       return auditWrite('profile-domain-update', body, async () => {
         if (!(await options.engram.vault.canAccess({ type: 'global', area: 'profile' }, 'write'))) throw Object.assign(new Error('Profile access is owner-only'), { code: 'NOT_FOUND_OR_FORBIDDEN' });
+        if (body?.operation === 'discover') {
+          // Owner-clicked discovery: the same consent-gated, redacted classification pass Dream runs. Nothing is sent without model consent.
+          const config = await options.engram.config();
+          let provider: ReturnType<typeof createProviderFromConfig> | undefined; try { provider = createProviderFromConfig(config.model, options.engram.modelEnv); } catch { provider = undefined; }
+          if (!provider) return { discovery: { status: 'unavailable', reason: 'No model is configured. Choose one in Settings, then run discovery again.' } };
+          const consent = modelConsent(config.model, true, provider.locality ?? config.model.locality);
+          if (!consent.consentGiven) return { discovery: { status: 'unavailable', reason: 'Model consent is required before preference text is sent to the model. Grant it in Settings.' } };
+          const activeProvider = provider;
+          const classify: DomainClassifier = async ({ registry, items }) => (await activeProvider.generate({ job: 'profile-domain-classification', documents: [], goals: '', instruction: `${DOMAIN_CLASSIFICATION_PROMPT}\nActive registry (slug, label, description, keywords): ${JSON.stringify(registry.domains.filter(domain => domain.status === 'active').map(({ slug, label, description, keywords }) => ({ slug, label, description, keywords })))}\nItems: ${JSON.stringify(items.map(item => ({ ...item, text: (consent.remote ? redactRemotePii(redactText(item.text)) : redactText(item.text)).slice(0, 1000) })))}` })).body;
+          const result = await discoverPreferenceDomains(options.engram.vault, classify);
+          return { discovery: { status: result.status, classified: result.classified, promoted: result.promoted, calls: result.calls, rejections: result.rejections ?? [] } };
+        }
         if (typeof body?.operation === 'string') {
           const { registry, revisionId } = await readDomainRegistry(options.engram.vault);
           if (body.expectedRegistryRevisionId !== revisionId) throw Object.assign(new Error('Domain registry changed; reload before saving'), { code: 'CONFLICT' });
