@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import { Engram } from '../../packages/sdk/index.js';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 import { assets } from '../../packages/dashboard/ui/view-model.js';
-import { disposableVault } from './helpers.js';
+import { disposableVault, compactScript } from './helpers.js';
 
 async function call(port: number, token: string, path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -91,8 +91,8 @@ test('dashboard knowledge writes require same-origin session requests and keep m
   const created = await call(dashboard.port, dashboard.token, '/api/documents', 'POST', malicious);
   const loaded = await call(dashboard.port, dashboard.token, `/api/documents/${created.body.document.id}`);
   assert.equal(loaded.body.document.title, malicious.title); assert.equal(loaded.body.document.body, malicious.body);
-  assert.match(assets['/assets/app.js']!.body, /node\('pre','panel',d\.body\)/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /\.innerHTML\b|\.outerHTML\b/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /node\('pre','panel',d\.body\)/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /\.innerHTML\b|\.outerHTML\b/);
 });
 
 test('dashboard knowledge list cursor and metadata filters continue without snippets', async t => {

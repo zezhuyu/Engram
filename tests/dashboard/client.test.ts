@@ -16,7 +16,7 @@ import { createDashboardCredential, listDashboardCredentials, resolveDashboardCr
 import { dashboardAuthFile } from '../../packages/dashboard/password.js';
 import { remoteHookCommand } from '../../packages/memory/adapters.js';
 import { previewClientServer, applyClientServer } from '../../packages/dashboard/client-server.js';
-import { disposableVault } from './helpers.js';
+import { compactScript, disposableVault } from './helpers.js';
 
 const location = (root: string) => ({ env: {}, homeDir: root, platform: 'linux' as NodeJS.Platform });
 const api = (origin: string, route: string, cookie: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', headers: Record<string,string> = {}) => fetch(origin + route, { method, headers: { Cookie: cookie, Origin: origin, 'X-Engram-Dashboard': '1', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -68,48 +68,6 @@ test('dashboard credentials are hashed, expire, enforce view-only, and audit rem
   assert.equal(await resolveDashboardCredential(v.root, restricted.token, '203.0.113.10'), undefined, 'revoked credentials stop resolving');
 });
 
-test('client proxy keeps remote credentials server side and forwards dashboard reads and writes', async t => {
-  const serverVault = await disposableVault(), clientVault = await disposableVault();
-  const oldAdmin = process.env.MDB_DASHBOARD_REMOTE_ADMIN; process.env.MDB_DASHBOARD_REMOTE_ADMIN = 'true';
-  const serverAuth = location(serverVault.root), clientAuth = location(clientVault.root);
-  const remote = await createDashboardServer({ engram: serverVault.engram, host: '127.0.0.1', idleMs: 60_000, authLocation: serverAuth });
-  const client = await createDashboardServer({ engram: clientVault.engram, host: '127.0.0.1', idleMs: 60_000, clientMode: true, authLocation: clientAuth });
-  const secret = await createDashboardCredential(serverVault.root, { label: 'client', mode: 'admin' });
-  const tokenFile = path.join(clientVault.root, 'server.token'); await fs.writeFile(tokenFile, secret.token, { mode: 0o600 });
-  t.after(async () => { await client.close(); await remote.close(); await clientVault.cleanup(); await serverVault.cleanup(); if (oldAdmin === undefined) delete process.env.MDB_DASHBOARD_REMOTE_ADMIN; else process.env.MDB_DASHBOARD_REMOTE_ADMIN = oldAdmin; });
-
-  const local = `http://127.0.0.1:${client.port}`, remoteOrigin = `http://127.0.0.1:${remote.port}`;
-  const setup = await fetch(local + '/api/auth/setup', { method: 'POST', headers: { Origin: local, 'Content-Type': 'application/json' }, body: JSON.stringify({ token: client.token, password: 'local-dashboard-phrase-93', confirm: 'local-dashboard-phrase-93' }) });
-  assert.equal(setup.status, 200);
-  const cookie = setup.headers.get('set-cookie')?.split(';')[0] ?? '';
-  const login = await fetch(local + '/api/auth/login', { method: 'POST', headers: { Origin: local, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'local-dashboard-phrase-93' }) });
-  const sessionCookie = login.headers.get('set-cookie')?.split(';')[0] ?? cookie;
-  assert.equal(login.status, 200);
-  const add = await api(local, '/api/client/connections', sessionCookie, { name: 'Test server', url: remoteOrigin, credentialFile: tokenFile, mode: 'admin' });
-  assert.equal(add.status, 201); const item = await add.json() as { id: string; credentialFile?: string };
-  assert.equal(item.credentialFile, undefined, 'the credential path is not returned to the browser');
-  const proxied = await fetch(local + '/api/status', { headers: { Cookie: sessionCookie, Origin: local, 'X-Engram-Dashboard': '1', 'X-Engram-Connection': item.id } });
-  assert.equal(proxied.status, 200); assert.match(proxied.headers.get('set-cookie') ?? '', /engram_dash_session=/, 'only the local session cookie is returned');
-  assert.doesNotMatch(await proxied.text(), new RegExp(secret.token));
-  const forward = (route: string, method = 'GET', body?: unknown) => fetch(local + route, { method, headers: { Cookie: sessionCookie, Origin: local, 'X-Engram-Dashboard': '1', 'X-Engram-Connection': item.id, ...(['DELETE'].includes(method) || route === '/api/settings/apply' ? { 'X-Engram-Reauth-Password': 'local-dashboard-phrase-93' } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const settings = await (await forward('/api/settings')).json() as any;
-  const preview = await (await forward('/api/settings/preview', 'POST', { key: 'scheduler.enabled', value: !settings.settings['scheduler.enabled'], etag: settings.etag })).json() as any;
-  assert.equal(preview.conflict, undefined);
-  const noReauth = await fetch(local + '/api/settings/apply', { method: 'POST', headers: { Cookie: sessionCookie, Origin: local, 'X-Engram-Dashboard': '1', 'X-Engram-Connection': item.id, 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'scheduler.enabled', value: !settings.settings['scheduler.enabled'], etag: settings.etag }) });
-  assert.equal(noReauth.status, 401, 'server settings changes require fresh local password re-entry');
-  const applied = await forward('/api/settings/apply', 'POST', { key: 'scheduler.enabled', value: !settings.settings['scheduler.enabled'], etag: settings.etag });
-  assert.equal(applied.status, 200, await applied.clone().text());
-  const created = await forward('/api/documents', 'POST', { scope: { type: 'global', area: 'wiki' }, kind: 'wiki_page', title: 'proxied dashboard write', body: 'remote canonical document' });
-  assert.equal(created.status, 201); const document = (await created.json() as any).document;
-  const removed = await forward('/api/documents/' + document.id, 'DELETE', { expectedRevisionId: document.revisionId });
-  assert.equal(removed.status, 200);
-  const tombstone = (await removed.json() as any).document;
-  const restored = await forward('/api/documents/' + document.id + '/restore', 'POST', { revisionId: document.revisionId, expectedRevisionId: tombstone.revisionId });
-  assert.equal(restored.status, 200);
-  const jobs = await forward('/api/status/jobs'); assert.equal(jobs.status, 200);
-  const clientData = await fs.readFile(path.join(clientVault.root, 'server.token'), 'utf8'); assert.equal(clientData, secret.token);
-});
-
 test('remote admin stays off by default and non-private plain HTTP is refused', async t => {
   const v = await disposableVault(), previous = process.env.MDB_DASHBOARD_REMOTE_ADMIN;
   t.after(async () => { await v.cleanup(); if (previous === undefined) delete process.env.MDB_DASHBOARD_REMOTE_ADMIN; else process.env.MDB_DASHBOARD_REMOTE_ADMIN = previous; });
@@ -119,41 +77,6 @@ test('remote admin stays off by default and non-private plain HTTP is refused', 
   const denied = await fetch(`http://127.0.0.1:${local.port}/api/status`, { headers: { Authorization: `Bearer ${made.token}` } }); assert.equal(denied.status, 401);
   process.env.MDB_DASHBOARD_REMOTE_ADMIN = 'true';
   await assert.rejects(() => createDashboardServer({ engram: v.engram, host: '0.0.0.0' }), /requires HTTPS or a private interface/);
-});
-
-test('two-process client dashboard proxies status, settings, document lifecycle, and jobs', async t => {
-  const serverRoot = await mkdtemp('/tmp/mdb-step-o-server-'), clientRoot = await mkdtemp('/tmp/mdb-step-o-client-');
-  const serverVault = new Engram(serverRoot), localVault = new Engram(clientRoot);
-  await serverVault.init({ sqlite: false }); await localVault.init({ sqlite: false });
-  const credential = await createDashboardCredential(serverRoot, { label: 'two-process', mode: 'admin' });
-  await serverVault.close(); await localVault.close();
-  const credentialFile = path.join(clientRoot, 'server.token'); await fs.writeFile(credentialFile, credential.token, { mode: 0o600 });
-  const children: ChildProcess[] = [];
-  const start = async (root: string, clientMode = false) => {
-    const child = spawn(process.execPath, [path.resolve('bin/mdb.js'), 'dashboard', '--root', root, '--host', '127.0.0.1', '--port', '0', ...(clientMode ? ['--client'] : [])], { cwd: process.cwd(), env: { ...process.env, MDB_DASHBOARD_ALERT: 'false', NODE_ENV: 'test', MDB_DASHBOARD_REMOTE_ADMIN: 'true', MDB_DASHBOARD_AUTH_FILE: path.join(root, '.local-auth', 'auth.json') }, stdio: ['ignore', 'pipe', 'pipe'] });
-    children.push(child); let stdout = '', stderr = '';
-    child.stdout!.on('data', chunk => { stdout += String(chunk); }); child.stderr!.on('data', chunk => { stderr += String(chunk); });
-    const began = Date.now(); let match: RegExpMatchArray | null = null;
-    while (Date.now() - began < 15_000) { match = stdout.match(/https?:\/\/127\.0\.0\.1:\d+\/#t=[a-f0-9]{64}/); if (match) break; if (child.exitCode !== null) throw new Error(`Dashboard exited: ${stdout}\n${stderr}`); await new Promise(resolve => setTimeout(resolve, 30)); }
-    if (!match) throw new Error(`Dashboard startup timed out: ${stdout}\n${stderr}`);
-    return { child, url: match[0] };
-  };
-  const stop = async (child: ChildProcess) => { if (child.exitCode !== null) return; child.kill('SIGINT'); await Promise.race([once(child, 'exit'), new Promise(resolve => setTimeout(resolve, 5000))]); if (child.exitCode === null) child.kill('SIGKILL'); };
-  t.after(async () => { await Promise.all(children.map(stop)); await rm(serverRoot,{recursive:true,force:true}); await rm(clientRoot,{recursive:true,force:true}); });
-  const server = await start(serverRoot), client = await start(clientRoot, true), local = new URL(client.url).origin, bootstrap = new URL(client.url).hash.slice(3), password = 'two-process-local-password-82';
-  const setup = await fetch(local+'/api/auth/setup',{method:'POST',headers:{Origin:local,'Content-Type':'application/json'},body:JSON.stringify({token:bootstrap,password,confirm:password})}); assert.equal(setup.status,200);
-  const login = await fetch(local+'/api/auth/login',{method:'POST',headers:{Origin:local,'Content-Type':'application/json'},body:JSON.stringify({password})}); assert.equal(login.status,200); const cookie=login.headers.get('set-cookie')!.split(';')[0]!;
-  const add = await fetch(local+'/api/client/connections',{method:'POST',headers:{Cookie:cookie,Origin:local,'X-Engram-Dashboard':'1','Content-Type':'application/json'},body:JSON.stringify({name:'Loopback server',url:new URL(server.url).origin,credentialFile,mode:'admin'})}); assert.equal(add.status,201); const connection=(await add.json() as {id:string}).id;
-  const headers={Cookie:cookie,Origin:local,'X-Engram-Dashboard':'1','X-Engram-Connection':connection};
-  assert.equal((await fetch(new URL(server.url).origin+'/api/client/status',{headers:{Authorization:`Bearer ${credential.token}`} })).status,404,'client status is unavailable in server mode');
-  const status=await fetch(local+'/api/status',{headers}); assert.equal(status.status,200,await status.clone().text());
-  const settings=await (await fetch(local+'/api/settings',{headers})).json() as any;
-  const apply=await fetch(local+'/api/settings/apply',{method:'POST',headers:{...headers,'X-Engram-Reauth-Password':password,'Content-Type':'application/json'},body:JSON.stringify({key:'scheduler.enabled',value:!settings.settings['scheduler.enabled'],etag:settings.etag})}); assert.equal(apply.status,200);
-  const created=await fetch(local+'/api/documents',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({scope:{type:'global',area:'wiki'},kind:'wiki_page',title:'two process proxy',body:'server side content'})}); assert.equal(created.status,201); const doc=(await created.json() as any).document;
-  const deleted=await fetch(local+`/api/documents/${doc.id}`,{method:'DELETE',headers:{...headers,'X-Engram-Reauth-Password':password,'Content-Type':'application/json'},body:JSON.stringify({expectedRevisionId:doc.revisionId})}); assert.equal(deleted.status,200); const tombstone=(await deleted.json() as any).document;
-  const restored=await fetch(local+`/api/documents/${doc.id}/restore`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({revisionId:doc.revisionId,expectedRevisionId:tombstone.revisionId})}); assert.equal(restored.status,200);
-  assert.equal((await fetch(local+'/api/status/jobs',{headers})).status,200);
-  const browserText=await fetch(local+'/api/status',{headers}).then(response=>response.text()); assert.doesNotMatch(browserText,new RegExp(credential.token));
 });
 
 test('client dashboard can start without a vault and isolates its auth state', async t => {
@@ -226,10 +149,9 @@ test('client dashboard can start without a vault and isolates its auth state', a
   await assert.rejects(fs.access(path.join(home, '.Engram')));
   const page = await fetch(origin + '/'); const html = await page.text(); assert.match(html, /Engram Client/);
   const script = await fetch(origin + '/assets/app.js').then(response => response.text());
-  assert.match(script, /const screens=clientScreens;/);
-  const screens = script.match(/const clientScreens=\[(.*?)\];/)?.[1] ?? '';
-  assert.deepEqual([...screens.matchAll(/\['([^']+)'/g)].map(match => match[1]), ['this-device','server','workspaces','cached-projects','connections','client-settings']);
-  assert.match(script, /Local state of this device/); assert.match(script, /This is not a copy of the server/); assert.match(script, /Refresh/);
+  const screens = compactScript(script).match(/^const screens=\[(.*)\];$/m)?.[1] ?? '';
+  assert.deepEqual([...screens.matchAll(/\['([^']+)'/g)].map(match => match[1]), ['this-device','workspaces','cached-projects','server','settings']);
+  assert.match(script, /What this machine captures and has queued for the server/); assert.doesNotMatch(script, /X-Engram-Connection|api\/client\/connections/);
   assert.doesNotMatch(script, /innerHTML|outerHTML|\beval\s*\(|localStorage/);
 });
 
@@ -266,7 +188,7 @@ test('client Server preview validates and digest-bound apply updates configured 
   const getHeaders = { Cookie: cookie, Origin: origin, 'X-Engram-Dashboard': '1' };
   const noCsrf = await fetch(origin+'/api/client/server/apply', { method: 'POST', headers: { Cookie: cookie, 'X-Engram-Dashboard': '1', 'X-Engram-Reauth-Password': password, 'Content-Type': 'application/json' }, body: '{}' }); assert.equal(noCsrf.status, 401);
   const get = await fetch(origin+'/api/client/server', { headers: getHeaders }); assert.equal(get.status, 200, await get.clone().text()); const current = await get.json() as any; assert.equal(current.workspace, 'personal'); assert.equal(current.targets.length, 6); assert.doesNotMatch(JSON.stringify(current), /server-secret-never-return-this/);
-  const servedScript = await fetch(origin+'/assets/app.js').then(response => response.text()); new vm.Script(servedScript); assert.match(servedScript, /Preview changes/); assert.match(servedScript, /APPLY SERVER CHANGE/); assert.match(servedScript, /Server dashboard URL and dashboard credential/); assert.match(servedScript, /api\('\/api\/client\/status'\)/); assert.doesNotMatch(servedScript, /innerHTML|outerHTML|localStorage|\beval\s*\(/);
+  const servedScript = await fetch(origin+'/assets/app.js').then(response => response.text()); new vm.Script(servedScript); assert.match(servedScript, /Review changes/); assert.match(servedScript, /Apply changes/); assert.match(servedScript, /Targets that are not configured on this machine are skipped/); assert.match(servedScript, /api\('\/api\/client\/status'\)/); assert.doesNotMatch(servedScript, /innerHTML|outerHTML|localStorage|\beval\s*\(/);
   const preview = (body: unknown) => fetch(origin+'/api/client/server/preview', { method: 'POST', headers, body: JSON.stringify(body) });
   assert.equal((await preview({ url: 'http://capture.example/mcp', tokenFile: token })).status, 400);
   assert.equal((await preview({ url: 'https://name:pass@capture.example/mcp', tokenFile: token })).status, 400);

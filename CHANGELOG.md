@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased - dashboard interface refactor
+
+### Changed
+- Rebuilt both dashboards on one design system (framed sheet, IBM Plex fonts served from the dashboard's own origin, flat fills, grouped navigation, phone layout) and simplified actions to one primary action per screen.
+- The server dashboard no longer carries any client settings, cached projects, or saved connections; the client dashboard no longer carries any server settings. Each dashboard now builds and serves only its own script, page shell, and routes.
+- The client navigation is This device, Workspaces, Cached projects, Server, and Settings. The Server form now uses Review changes and Apply changes with a password re-check.
+- The content security policy gained `font-src 'self'`.
+
+### Removed
+- Remote administration from the client dashboard: saved dashboard connections, the `X-Engram-Connection` proxy, and the `/api/client/connections` routes.
+
 ## Unreleased - client dashboard and remote admin
 
 ### Added

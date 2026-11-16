@@ -337,5 +337,5 @@ test('dashboard serves only fixed logo bytes with image types and immutable cach
   }
   assert.equal((await fetch(`http://127.0.0.1:${dashboard.port}/assets/not-real.png`)).status, 404);
   assert.equal((await fetch(`http://127.0.0.1:${dashboard.port}/assets/logo-64.png?x=1`)).status, 200);
-  assert.equal(assets['/']!.body!.includes('apple-touch-icon'), true); assert.equal(assets['/']!.body!.includes('alt="Engram"'), true);
+  assert.equal(assets['/']!.body!.includes('apple-touch-icon'), true); assert.equal(assets['/']!.body!.includes('aria-label="Engram home"'), true);
 });

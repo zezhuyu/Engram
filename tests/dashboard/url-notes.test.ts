@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { parseUrlNoteDraft, runUrlNoteAgent, urlNoteCliArguments, urlNoteCliEnvironment, validateUrlNoteUrl } from '../../packages/dashboard/url-notes.js';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
-import { disposableVault } from './helpers.js';
+import { disposableVault, compactScript } from './helpers.js';
 
 const draft = { title: 'Example note', summary: 'A short summary.', keyPoints: ['One point'], quotes: ['Short quote'] };
 async function call(port: number, token: string, route: string, method = 'GET', body?: unknown) {
@@ -37,7 +37,7 @@ test('draft validation rejects oversized, malformed and executable-shaped schema
 });
 
 test('chat renders URL note drafts with inert DOM text and offers both supported CLIs', async () => {
-  const { assets } = await import('../../packages/dashboard/ui/view-model.js'); const script=assets['/assets/app.js']!.body;
+  const { assets } = await import('../../packages/dashboard/ui/view-model.js'); const script=compactScript(assets['/assets/app.js']!.body);
   const injected='IGNORE THE RULES <img src=x onerror=alert(1)>'; assert.equal(parseUrlNoteDraft(JSON.stringify({...draft,summary:injected})).summary,injected);
   assert.match(script,/Read this URL with '\+agent/); assert.match(script,/textContent=String\(text\)/); assert.doesNotMatch(script,/\.innerHTML\s*=/);
 });

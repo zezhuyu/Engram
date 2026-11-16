@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { disposableVault } from './helpers.js';
+import { compactScript, disposableVault } from './helpers.js';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 
-const expected = ['This device', 'Server', 'Workspaces', 'Cached projects', 'Connections', 'Client settings'];
+const expected = ['This device', 'Workspaces', 'Cached projects', 'Server', 'Settings'];
 class Element {
   children: Element[] = []; listeners = new Map<string, () => void>(); attrs = new Map<string, string>(); textContent = '';
   href = ''; scrollLeft = 0; clientWidth = 1000; offsetLeft = 0; offsetWidth = 100; className = '';
@@ -14,59 +14,59 @@ class Element {
   setAttribute(name: string, value: string) { this.attrs.set(name, value); }
   getAttribute(name: string) { return this.attrs.get(name) ?? null; }
   addEventListener(name: string, callback: () => void) { this.listeners.set(name, callback); }
-  querySelector(selector: string) { return selector === '.nav-list' ? this.children[0] : null; }
+  querySelector(_selector: string) { return null; }
+  classList = { add() {}, remove() {} };
   get offsetHeight() { return 20; }
 }
 const flatten = (el: Element): Element[] => [el, ...el.children.flatMap(flatten)];
 
-test('served client rewrite keeps one six-tab nav and routes Workspaces and Cached projects', async t => {
+test('served client dashboard has one five-screen nav with no server administration, and routes Workspaces and Cached projects', async t => {
   const vault = await disposableVault();
   const server = await createDashboardServer({ engram: vault.engram, clientMode: true, host: '127.0.0.1', port: 0, idleMs: 60_000 });
   t.after(async () => { await server.close(); await vault.cleanup(); });
   const origin = `http://127.0.0.1:${server.port}`;
   const html = await fetch(origin + '/').then(r => r.text());
-  const source = await fetch(origin + '/assets/app.js').then(r => r.text());
+  const source = compactScript(await fetch(origin + '/assets/app.js').then(r => r.text()));
   assert.match(html, /Engram Client/);
-  assert.doesNotMatch(html, /#overview|#knowledge|#settings/);
-  assert.match(source, /const screens=clientScreens;/);
-  assert.match(source, /clientScreens=\[\['this-device','This device','⌂'\],\['server','Server','⇄'\],\['workspaces','Workspaces','▦'\],\['cached-projects','Cached projects','▤'\],\['connections','Connections','⇄'\],\['client-settings','Client settings','⚙'\]\]/);
-  assert.doesNotMatch(source.match(/^const screens=.*;$/m)?.[0] ?? '', /overview|knowledge|settings|clients/);
-  assert.match(source, /page=clientScreens\.some\(\(\[id\]\)=>id===location\.hash\.slice\(1\)\)\?location\.hash\.slice\(1\):'this-device'/);
+  assert.doesNotMatch(html, /#overview|#knowledge|#settings|id="review"|id="credential-modal"/);
+  assert.match(source, /^const screens=\[\['this-device','This device','',''\],\['workspaces','Workspaces','',''\],\['cached-projects','Cached projects','',''\],\['server','Server','',''\],\['settings','Settings','','',true\]\];$/m);
+  assert.doesNotMatch(source.match(/^const screens=.*;$/m)?.[0] ?? '', /overview|knowledge|clients|connections|client-settings/);
 
-  // Run the actual served navRender implementation against the minimal fake DOM used by the UI tests.
+  // Run the actual served navRender and screenFromHash against the minimal fake DOM used by the UI tests.
   const nav = new Element('nav');
   const node = (tag: string, className = '', text = '') => { const el = new Element(tag); el.className = className; el.textContent = text; return el; };
-  const start = source.indexOf('function navRender(){'), end = source.indexOf('\nasync function refresh()', start);
-  assert.ok(start >= 0 && end > start, 'served nav renderer is available');
-  const declaration = source.match(/const clientScreens=\[[\s\S]*?\];/)?.[0];
-  assert.ok(declaration, 'served client screen definition is available');
-  const harness = vm.runInNewContext(`${declaration};const screens=clientScreens;let page='this-device';let clientMode=true;${source.slice(start, source.indexOf('\nfunction go(', start))};function go(id){page=id;navRender()}navRender();({go})`, {
-    nav, navIcons: {}, node, svgIcon: () => new Element('svg')
-  }) as { go: (id: string) => void };
+  const navStart = source.indexOf('function navRender(){'), navEnd = source.indexOf('\nfunction go(', navStart);
+  const hashStart = source.indexOf('function screenFromHash(){'), hashEnd = source.indexOf('\n', hashStart);
+  const screensDeclaration = source.match(/^const screens=.*;$/m)?.[0];
+  assert.ok(navStart >= 0 && navEnd > navStart && hashStart >= 0 && screensDeclaration, 'served nav code is available');
+  const closed: string[] = [];
+  const harness = vm.runInNewContext(`${screensDeclaration};let page='this-device';${source.slice(navStart, navEnd)};${source.slice(hashStart, hashEnd)};function go(id){page=id;navRender()}navRender();({go,screenFromHash})`, {
+    nav, navIcons: {}, node, svgIcon: () => new Element('svg'), closeMenu: () => closed.push('closed'), document: { querySelector: () => null }, location: { hash: '' }
+  }) as { go: (id: string) => void; screenFromHash: () => string };
   const navLabels = () => flatten(nav).filter(el => el.tagName === 'span' && !el.className).map(el => el.textContent);
   assert.deepEqual(navLabels(), expected, 'initial client nav');
-  for (const [index, id] of ['this-device','server','workspaces','cached-projects','connections','client-settings'].entries()) {
+  for (const [index, id] of ['this-device','workspaces','cached-projects','server','settings'].entries()) {
     if (index > 0) flatten(nav).find(el => el.tagName === 'a' && el.href === `#${id}`)!.listeners.get('click')!();
     assert.deepEqual(navLabels(), expected, `nav labels after navigating to ${id}`);
+    const current = flatten(nav).filter(el => el.tagName === 'a' && el.getAttribute('aria-current') === 'page');
+    assert.deepEqual(current.map(el => el.href), [`#${id}`], `only ${id} is the current page`);
   }
-  harness.go('cached-projects');
-  assert.deepEqual(navLabels(), expected, 'nav labels after refresh render');
+  assert.ok(closed.length >= 4, 'choosing a screen closes the phone menu');
+  const withHash = (hash: string) => vm.runInNewContext(`${screensDeclaration};${source.slice(hashStart, hashEnd)};screenFromHash()`, { location: { hash } }) as string;
+  assert.equal(withHash('#cached-projects'), 'cached-projects');
+  assert.equal(withHash('#cached-projects/extra'), 'cached-projects');
+  assert.equal(withHash('#overview'), 'this-device', 'server screens are not reachable from the client dashboard');
+  assert.equal(withHash('#connections'), 'this-device', 'removed screens fall back to the first screen');
+  assert.equal(withHash(''), 'this-device');
 
-  const renderStart = source.indexOf('async function render(){'), renderEnd = source.indexOf('\nasync function serverPage()', renderStart);
-  assert.ok(renderStart >= 0 && renderEnd > renderStart);
-  const override = source.slice(renderStart, renderEnd);
-  assert.match(override, /page==='cached-projects'\)view=await cachedProjectsPage\(\)/);
-  assert.match(override, /else view=await thisDevicePage\(\)/);
-  assert.match(override, /patchContent\(view\)/);
-
-  const foldersStart = source.indexOf('async function cachedProjectsPage(){'), foldersEnd = source.indexOf('\nasync function ', foldersStart + 1);
+  const foldersStart = source.indexOf('let clientFoldersSnapshot=null'), foldersEnd = source.indexOf('\nasync function clientSettingsPage(', foldersStart);
   assert.ok(foldersStart >= 0 && foldersEnd > foldersStart, 'served Cached projects page is available');
   const pageCode = source.slice(foldersStart, foldersEnd);
   const makePage = async (rows: unknown[]) => {
     const node = (tag: string, _className = '', text = '') => ({ tag, text, children: [] as any[], attrs: {} as Record<string,string>, append(...items: any[]) { this.children.push(...items); }, setAttribute(name: string, value: string) { this.attrs[name] = value; } });
     const api = async (route: string) => route === '/api/client/folders' ? { rows, approximate: false } : { enabled: false, state: 'disabled', replicas: [] };
     const pageHeader = (_title: string, text: string) => node('header', '', text), panel = (text: string) => node('section', 'panel', text);
-    const page = vm.runInNewContext(`let clientFoldersSnapshot=null,clientFoldersFetchedAt=0; ${pageCode}; cachedProjectsPage`, { node, api, pageHeader, panel, notify() {}, render() {}, Date }) as () => Promise<any>;
+    const page = vm.runInNewContext(`${pageCode}; cachedProjectsPage`, { node, api, pageHeader, panel, notify() {}, render() {}, Date }) as () => Promise<any>;
     return page();
   };
   const collect = (item: any): string => [item.text, ...(item.children ?? []).map(collect)].join(' ');
@@ -79,7 +79,7 @@ test('served client rewrite keeps one six-tab nav and routes Workspaces and Cach
   const empty = collect(await makePage([]));
   assert.match(empty, /No project folders are bound on this machine/);
 
-  const workspaceStart = source.indexOf('async function clientWorkspacesPage(){'), workspaceEnd = source.indexOf('return area}', source.indexOf('return area}', workspaceStart) + 1) + 'return area}'.length;
+  const workspaceStart = source.indexOf('async function clientWorkspacesPage(){'), workspaceEnd = source.indexOf('\n', workspaceStart);
   assert.ok(workspaceStart >= 0 && workspaceEnd > workspaceStart, 'served Workspaces page is available');
   const workspaceCode = source.slice(workspaceStart, workspaceEnd);
   const makeWorkspacePage = async (data: unknown) => {

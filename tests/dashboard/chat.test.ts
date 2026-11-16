@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
 import { Engram } from '../../packages/sdk/index.js';
 import { generationMessages } from '../../packages/models/prompts.js';
-import { disposableVault } from './helpers.js';
+import { disposableVault, compactScript } from './helpers.js';
 import { assertOversizedBodyRejected } from '../helpers/oversized-body.js';
 import { assets, deriveChatMessages, newestChatScrollTop } from '../../packages/dashboard/ui/view-model.js';
 import { CHAT_ASSISTANT_SYSTEM, chatTerms, isSmallTalk, normalizeChatCitations, retrievalAnswer, smallTalkAnswer, synthesisFailureReason, validateChatModelOutput } from '../../packages/dashboard/chat.js';
@@ -54,7 +54,7 @@ test('chat view model preserves message roles, text, order, citations, and empty
   assert.equal(newestChatScrollTop(100, 400, 140, 85), 85, 'a long newest answer starts at the top of the scrollport');
   assert.equal(newestChatScrollTop(180, 400, 120, 85), 400, 'short newest messages remain bottom aligned');
 
-  const script = assets['/assets/app.js']!.body;
+  const script = compactScript(assets['/assets/app.js']!.body);
   assert.match(script, /textContent=String\(text\)/, 'message text is inserted through textContent');
   assert.match(script, /node\('p','chat-text',turn\.text\)/);
   assert.match(script, /item\.append\(chip\)/, 'citations are nested under the assistant message');
@@ -242,15 +242,15 @@ test('disconnecting the chat client aborts synthesis', async t => {
 
 test('chat view renders safe citation and source controls', async () => {
   const { assets } = await import('../../packages/dashboard/ui/view-model.js');
-  assert.match(assets['/assets/app.js']!.body, /Propose wiki update from this source/);
-  assert.match(assets['/assets/app.js']!.body, /Clear chat/);
-  assert.match(assets['/assets/app.js']!.body, /Wiki chat/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Propose wiki update from this source/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Clear chat/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Wiki chat/);
   assert.match(assets['/assets/app.css']!.body, /chat-feed/);
-  assert.match(assets['/assets/app.js']!.body, /input.hidden=true/);
-  assert.match(assets['/assets/app.js']!.body, /chat-toolbar/);
-  assert.match(assets['/assets/app.js']!.body, /file-chip/);
-  assert.match(assets['/assets/app.js']!.body, /Add as source/);
-  assert.match(assets['/assets/app.js']!.body, /Drop a file here or attach one/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /input.hidden=true/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /chat-toolbar/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /file-chip/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Add as source/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Drop a file here or attach one/);
   assert.match(assets['/assets/app.css']!.body, /chat-composer input\[type=file\]\[hidden\]\{display:none!important\}/);
   assert.match(assets['/assets/app.css']!.body, /\.chat-page\{height:calc\(100vh - 210px\)/);
 });

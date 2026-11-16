@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { createDashboardServer } from '../../packages/dashboard/server.js';
-import { disposableVault } from './helpers.js';
-import { assets, deriveAttention, deriveCards, extractHttpUrl, formatKeyPointLines, parseKeyPointLines } from '../../packages/dashboard/ui/view-model.js';
+import { disposableVault, compactScript } from './helpers.js';
+import { assets, assetsFor, deriveAttention, deriveCards, extractHttpUrl, formatKeyPointLines, parseKeyPointLines } from '../../packages/dashboard/ui/view-model.js';
 
 test('dashboard view models summarize health and name actionable attention items', () => {
   const data = {
@@ -30,86 +30,86 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(assets['/']!.body, /<main/);
   assert.match(assets['/']!.body, /<script type="module" src="\/assets\/app\.js"><\/script>/);
   assert.doesNotMatch(assets['/']!.body, /<script(?! type="module" src=)|<style\b|\son[a-z]+=/i);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /\beval\s*\(|\.innerHTML\b|\.outerHTML\b/);
-  assert.match(assets['/assets/app.js']!.body, /Retrieved context \(not individually cited\)/);
-  assert.match(assets['/assets/app.js']!.body, /chat-context-source/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /\beval\s*\(|\.innerHTML\b|\.outerHTML\b/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Retrieved context \(not individually cited\)/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /chat-context-source/);
   assert.match(assets['/assets/app.css']!.body, /\.chat-context-heading/);
-  assert.match(assets['/assets/app.js']!.body, /location\.hash/);
-  assert.match(assets['/assets/app.js']!.body, /Profile domains/);
-  assert.match(assets['/assets/app.js']!.body, /expectedRevisionId:item\.revisionId/);
-  assert.match(assets['/assets/app.js']!.body, /history\.replaceState/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /engram-chat-use-model|useModel/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /localStorage/);
-  assert.match(assets['/assets/app.js']!.body, /Welcome back/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /Sign-in link needed/);
-  assert.match(assets['/assets/app.js']!.body, /Sign-in temporarily locked/);
-  assert.match(assets['/assets/app.js']!.body, /token changes on every restart/i);
-  assert.match(assets['/assets/app.js']!.body, /Open the Engram Client menu and choose Open dashboard, or Copy first-time sign-in link/);
-  assert.match(assets['/assets/app.js']!.body, /Your session ended. Enter your dashboard password to continue/);
-  assert.match(assets['/assets/app.js']!.body, /password-strength/);
-  assert.match(assets['/assets/app.js']!.body, /password-reveal/);
-  assert.match(assets['/assets/app.js']!.body, /file-chip/);
-  assert.match(assets['/assets/app.js']!.body, /Add as source/);
-  assert.match(assets['/assets/app.js']!.body, /knowledge-filters/);
-  assert.match(assets['/assets/app.js']!.body, /workspace-create-row/);
-  assert.match(assets['/assets/app.js']!.body, /Scheduler cycles/);
-  assert.match(assets['/assets/app.js']!.body, /Set/);
-  assert.match(assets['/assets/app.js']!.body, /X-Engram-Dashboard/);
-  assert.match(assets['/assets/app.js']!.body, /autocomplete='current-password'/);
-  assert.match(assets['/assets/app.js']!.body, /autocomplete='new-password'/);
-  assert.match(assets['/assets/app.js']!.body, /OpenAI \/ ChatGPT/);
-  assert.match(assets['/assets/app.js']!.body, /Workspace access/);
-  assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/status/);
-  assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/workspaces/);
-  assert.match(assets['/assets/app.js']!.body, /data-key','client-/);
-  assert.match(assets['/assets/app.js']!.body, /Every holder of this token loses access immediately/);
-  assert.match(assets['/assets/app.js']!.body, /Queued writes remain on client machines/);
-  assert.match(assets['/assets/app.js']!.body, /'Connected'/);
-  assert.match(assets['/assets/app.js']!.body, /Running, not ready/);
-  assert.match(assets['/assets/app.js']!.body, /Status unavailable, retrying/);
-  assert.match(assets['/assets/app.js']!.body, /status\.gateway\?\.state==='unknown'/);
-  const pillLabel = new vm.Script(`${assets['/assets/app.js']!.body.match(/function tunnelStatusLabel\([^}]+}/)?.[0]}; tunnelStatusLabel`).runInNewContext() as (state: string, reason?: string) => string;
+  assert.match(compactScript(assets['/assets/app.js']!.body), /location\.hash/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Profile domains/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /expectedRevisionId:item\.revisionId/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /history\.replaceState/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /engram-chat-use-model|useModel/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /localStorage/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Welcome back/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /Sign-in link needed/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Sign-in temporarily locked/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /token changes on every restart/i);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Open the Engram Client menu and choose Open dashboard, or Copy first-time sign-in link/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Your session ended. Enter your dashboard password to continue/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /password-strength/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /password-reveal/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /file-chip/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Add as source/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /knowledge-filters/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /workspace-create-row/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Scheduler cycles/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Set/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /X-Engram-Dashboard/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /autocomplete='current-password'/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /autocomplete='new-password'/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /OpenAI \/ ChatGPT/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Workspace access/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /api\/connectors\/openai\/status/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /api\/connectors\/openai\/workspaces/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /data-key','client-/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Every holder of this token loses access immediately/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Queued writes remain on client machines/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /'Connected'/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Running, not ready/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Status unavailable, retrying/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /status\.gateway\?\.state==='unknown'/);
+  const pillLabel = new vm.Script(`${compactScript(assets['/assets/app.js']!.body).match(/function tunnelStatusLabel\([^}]+}/)?.[0]}; tunnelStatusLabel`).runInNewContext() as (state: string, reason?: string) => string;
   assert.equal(pillLabel('unknown'), 'Status unavailable, retrying');
-  const actionDisabled = new vm.Script(`${assets['/assets/app.js']!.body.match(/function tunnelActionDisabled\([^}]+}/)?.[0]}; tunnelActionDisabled`).runInNewContext() as (action: string, state: string, statusUnknown: boolean) => boolean;
+  const actionDisabled = new vm.Script(`${compactScript(assets['/assets/app.js']!.body).match(/function tunnelActionDisabled\([^}]+}/)?.[0]}; tunnelActionDisabled`).runInNewContext() as (action: string, state: string, statusUnknown: boolean) => boolean;
   assert.equal(actionDisabled('start', 'connected', true), false);
   assert.equal(actionDisabled('stop', 'stopped', true), false);
   assert.equal(actionDisabled('start', 'connected', false), true);
   assert.equal(actionDisabled('stop', 'stopped', false), true);
-  assert.match(assets['/assets/app.js']!.body, /connector-tunnel-details/);
-  assert.match(assets['/assets/app.js']!.body, /Tunnel connected/);
-  assert.match(assets['/assets/app.js']!.body, /Starting…/);
-  assert.match(assets['/assets/app.js']!.body, /api\/connectors\/openai\/writes/);
-  assert.match(assets['/assets/app.js']!.body, /name-only access means anyone who can reach the tunnel/);
-  assert.match(assets['/assets/app.js']!.body, /Recent ChatGPT writes/);
-  assert.match(assets['/assets/app.js']!.body, /personal\/chat/);
-  assert.match(assets['/assets/app.js']!.body, /Personal is shared memory for all chat AIs/);
-  assert.match(assets['/assets/app.js']!.body, /personal\/preferences/);
-  assert.match(assets['/assets/app.js']!.body, /New chats start in personal\/chat/);
-  assert.match(assets['/assets/app.js']!.body, /conversationId only when the user explicitly asks to continue/);
-  assert.match(assets['/assets/app.js']!.body, /profile, user-insight and wiki/);
-  assert.match(assets['/assets/app.js']!.body, /Global accepted wiki/);
-  assert.match(assets['/assets/app.js']!.body, /no deletion tool/);
-  assert.match(assets['/assets/app.js']!.body, /apiKeySet/);
-  assert.match(assets['/assets/app.js']!.body, /connector-start-reason/);
-  assert.match(assets['/assets/app.js']!.body, /for\(const action of \['start','stop','restart'\]\)/);
-  assert.match(assets['/assets/app.js']!.body, /Remove saved API key/);
-  assert.match(assets['/assets/app.js']!.body, /cfg\.tunnelId\|\|''/);
-  assert.match(assets['/assets/app.js']!.body, /cfg\.organizationId\|\|''/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /authentication:'OAuth'|memory\.example\.com\/mcp/);
-  assert.match(assets['/assets/app.js']!.body, /Claude Code \/ Claude Desktop/);
-  assert.match(assets['/assets/app.js']!.body, /Add to Claude Code/);
-  assert.match(assets['/assets/app.js']!.body, /claude.ai custom connector/);
-  assert.match(assets['/assets/app.js']!.body, /public HTTPS MCP URL that you operate/);
-  assert.match(assets['/assets/app.js']!.body, /Check configured URL reachability/);
-  assert.match(assets['/assets/app.js']!.body, /Anthropic MCP Tunnels/);
-  assert.match(assets['/assets/app.js']!.body, /NOT available as a claude.ai custom connector/);
-  assert.match(assets['/assets/app.js']!.body, /not verified live/i);
-  assert.match(assets['/assets/app.js']!.body, /PULL AND START/);
-  assert.match(assets['/assets/app.js']!.body, /GATEWAY_BIND/);
-  assert.match(assets['/assets/app.js']!.body, /Copy reachability test command/);
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /claude.ai requires OAuth|Save Claude connector|Test Claude endpoint/);
-  assert.match(assets['/assets/app.js']!.body, /Remote dashboard credentials/);
-  const appScript = assets['/assets/app.js']!.body;
+  assert.match(compactScript(assets['/assets/app.js']!.body), /connector-tunnel-details/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Tunnel connected/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Starting…/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /api\/connectors\/openai\/writes/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /name-only access means anyone who can reach the tunnel/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Recent ChatGPT writes/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /personal\/chat/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Personal is shared memory for all chat AIs/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /personal\/preferences/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /New chats start in personal\/chat/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /conversationId only when the user explicitly asks to continue/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /profile, user-insight and wiki/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Global accepted wiki/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /no deletion tool/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /apiKeySet/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /connector-start-reason/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /for\(const action of \['start','stop','restart'\]\)/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Remove saved API key/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /cfg\.tunnelId\|\|''/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /cfg\.organizationId\|\|''/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /authentication:'OAuth'|memory\.example\.com\/mcp/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Claude Code \/ Claude Desktop/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Add to Claude Code/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /claude.ai custom connector/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /public HTTPS MCP URL that you operate/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Check configured URL reachability/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Anthropic MCP Tunnels/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /NOT available as a claude.ai custom connector/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /not verified live/i);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /PULL AND START/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /GATEWAY_BIND/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Copy reachability test command/);
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /claude.ai requires OAuth|Save Claude connector|Test Claude endpoint/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Remote dashboard credentials/);
+  const appScript = compactScript(assets['/assets/app.js']!.body);
   assert.match(appScript, /modelSettingsPanel/);
   assert.match(appScript, /Model name/);
   assert.match(appScript, /model-name-select/);
@@ -129,62 +129,69 @@ test('dashboard embeds a CSP-compatible UI without inline code or unsafe DOM sin
   assert.match(appScript, /Your questions, retrieved wiki excerpts and Dream\/profile content go to this vendor or host/);
   assert.match(appScript, /model-secret/);
   assert.doesNotMatch(appScript, /keyInput\.value\s*=\s*(?:settings|value)/);
-  const source = readFileSync(new URL('../../../packages/dashboard/ui/view-model.ts', import.meta.url), 'utf8');
-  const templateStart = source.indexOf('export const js = String.raw`${browserModels}');
-  const templateBodyStart = templateStart + 'export const js = String.raw`${browserModels}'.length;
-  const templateEnd = source.indexOf('`;', templateBodyStart);
-  assert.ok(templateStart >= 0 && templateEnd > templateBodyStart, 'dashboard served script remains one String.raw template');
-  assert.doesNotMatch(source.slice(templateBodyStart, templateEnd), /`|\$\{/);
-  assert.match(assets['/assets/app.js']!.body, /No credentials yet/);
-  assert.match(assets['/assets/app.js']!.body, /Access level/);
-  assert.ok(assets['/assets/app.js']!.body.includes('Remote administration: '));
-  assert.ok(assets['/assets/app.js']!.body.includes('aria-haspopup'));
-  assert.doesNotMatch(assets['/assets/app.js']!.body, /const composer=panel\('Message'\)/);
+  for (const file of ['core', 'server-pages', 'server-app', 'client-pages', 'client-app']) {
+    const source = readFileSync(new URL(`../../../packages/dashboard/ui/web/${file}.ts`, import.meta.url), 'utf8');
+    const templateStart = source.indexOf('String.raw`'), templateEnd = source.lastIndexOf('`;');
+    assert.ok(templateStart >= 0 && templateEnd > templateStart, `${file} remains one String.raw template`);
+    assert.doesNotMatch(source.slice(templateStart + 'String.raw`'.length, templateEnd), /`|\$\{/, `${file} has no interpolation or nested template literal`);
+  }
+  assert.match(compactScript(assets['/assets/app.js']!.body), /No credentials yet/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Access level/);
+  assert.ok(compactScript(assets['/assets/app.js']!.body).includes('Remote administration: '));
+  assert.ok(compactScript(assets['/assets/app.js']!.body).includes('aria-haspopup'));
+  assert.doesNotMatch(compactScript(assets['/assets/app.js']!.body), /const composer=panel\('Message'\)/);
   assert.ok(assets['/assets/app.css']!.body.includes('.file-chip[hidden]{display:none!important}'));
   assert.ok(assets['/assets/app.css']!.body.includes('.chat-composer.is-dragging .chat-drop-hint{display:block}'));
-  assert.ok(assets['/assets/app.css']!.body.includes('input[type=date],select{appearance:none'));
+  assert.ok(assets['/assets/app.css']!.body.includes('select{appearance:none'));
   assert.ok(assets['/assets/app.css']!.body.includes('.credentials-form,.proposal-fields{display:grid;grid-template-columns:repeat(2'));
-  assert.ok(assets['/assets/app.css']!.body.includes('.switch input:checked+.track'));
-  assert.ok(assets['/assets/app.css']!.body.includes('.switch:hover .track'));
-  assert.ok(assets['/assets/app.css']!.body.includes('prefers-reduced-motion:reduce){.switch'));
-  assert.match(assets['/assets/app.js']!.body, /Client settings/);
-  assert.match(assets['/assets/app.js']!.body, /X-Engram-Reauth-Password/);
-  assert.match(assets['/']!.body!, /ONE-TIME CREDENTIAL/);
+  assert.ok(assets['/assets/app.css']!.body.includes('.switch>input:checked~.track'));
+  assert.ok(assets['/assets/app.css']!.body.includes('.switch>input:disabled~.track'));
+  assert.ok(assets['/assets/app.css']!.body.includes('prefers-reduced-motion:reduce){*'));
+  // Strict separation: the server script has no client page, label or handler; the client script has no server administration.
+  const serverScript = compactScript(assets['/assets/app.js']!.body), clientScript = compactScript(assetsFor('client')['/assets/app.js']!.body as string);
+  assert.doesNotMatch(serverScript, /Client settings|Cached projects|Saved servers|clientSettingsPage|cachedProjectsPage|thisDevicePage|clientWorkspacesPage|connectionsPage|api\/client\/|X-Engram-Connection|selectedConnection/);
+  for (const forbidden of ['modelSettingsPanel', 'connectorsPanel', 'dreamPage', 'settingsPage(', 'dashboardCredentialPanel', 'knowledgePage', 'chatPage', 'wikiReviewPage', 'profileDomainsPage', 'clientsPage', 'storagePage', 'jobsPage', 'capturePage', 'auditPage', 'api/connectors', 'api/settings', 'api/dream', 'api/documents', 'api/chat'])
+    assert.ok(!clientScript.includes(forbidden), `the client script must not contain ${forbidden}`);
+  for (const required of ['thisDevicePage', 'clientWorkspacesPage', 'cachedProjectsPage', 'serverPage', 'clientSettingsPage', 'api/client/'])
+    assert.ok(clientScript.includes(required), `the client script contains ${required}`);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /X-Engram-Reauth-Password/);
+  assert.match(assets['/']!.body!, /Copy this credential now/);
   assert.match(assets['/']!.body!, /\/assets\/logo-64\.png/);
   assert.match(assets['/']!.body!, /theme-color/);
-  assert.match(assets['/assets/app.js']!.body, /Retry in '\+error.retryAfter\+' seconds/);
-  assert.match(assets['/assets/app.js']!.body, /\['Security','Password access/);
-  assert.match(assets['/assets/app.js']!.body, /document\.hidden/);
-  assert.match(assets['/assets/app.js']!.body, /\['Server','Effective listener address/);
-  assert.match(assets['/assets/app.js']!.body, /Restart with --host and --port flags/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Retry in '\+error.retryAfter\+' seconds/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /\['Security','Password access/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /document\.hidden/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /\['Server','Effective listener address/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Restart with --host and --port flags/);
   assert.match(assets['/assets/app.css']!.body, /prefers-color-scheme/);
   assert.match(assets['/assets/app.css']!.body, /prefers-reduced-motion/);
-  assert.match(assets['/assets/app.css']!.body, /overflow-x:auto;overscroll-behavior-x:contain/);
-  assert.match(assets['/assets/app.css']!.body, /\.nav-link\{flex:0 0 92px;min-width:92px;white-space:nowrap/);
-  assert.match(assets['/assets/app.css']!.body, /\.data-table td\{overflow-wrap:anywhere\}/);
-  assert.match(assets['/assets/app.css']!.body, /textarea\{font:inherit/);
-  assert.match(assets['/assets/app.css']!.body, /#content:focus-visible\{outline:none\}/);
-  assert.match(assets['/assets/app.js']!.body, /previousScroll=nav\.querySelector\?\.\('\.nav-list'\)\?\.scrollLeft\?\?0/);
-  assert.match(assets['/assets/app.js']!.body, /list\.scrollLeft=previousScroll/);
-  assert.match(assets['/assets/app.js']!.body, /url-note-controls/);
-  assert.match(assets['/assets/app.js']!.body, /node\('div','editor-page'\)/);
+  const designCss = assets['/assets/app.css']!.body;
+  // phone: the frame disappears and the navigation becomes an off-canvas sheet
+  assert.match(designCss, /@media \(max-width:900px\)\{[^]*\.rail\{position:fixed;[^}]*transform:translateX\(-102%\)/);
+  assert.match(designCss, /body\.nav-open \.rail\{transform:none\}/);
+  // content stays readable and reachable: table cells wrap, text areas grow, focus is always visible
+  assert.match(designCss, /\.data-table td\{[^}]*overflow-wrap:anywhere/);
+  assert.match(designCss, /textarea\{height:auto;min-height:88px/);
+  assert.match(designCss, /:focus-visible\{outline:2px solid var\(--accent\)/);
+  assert.match(designCss, /\.page-head\{display:flex;/);
+  // the design rules: flat fills, no zebra rows, no glass, no resource outside the dashboard's own origin
+  assert.doesNotMatch(designCss, /gradient\(|backdrop-filter|nth-child\((?:even|odd)\)/);
+  assert.doesNotMatch(designCss.replace(/url\((?:'\/assets\/fonts\/[a-z0-9-]+\.woff2'|"data:image\/svg\+xml[^"]*")\)/g, ''), /url\(/);
+  assert.doesNotMatch(designCss.replace(/url\("data:[^"]*"\)/g, ''), /@import|https?:\/\//);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /previousScroll=nav\.querySelector\?\.\('\.nav-scroll'\)\?\.scrollTop\?\?0/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /scroll\.scrollTop=previousScroll/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /url-note-controls/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /node\('div','editor-page'\)/);
   assert.match(assets['/assets/app.css']!.body, /\.url-note-controls\{display:grid/);
   assert.match(assets['/assets/app.css']!.body, /\.url-note-controls\{grid-template-columns:minmax\(0,1fr\)\}/);
-  assert.match(assets['/assets/app.css']!.body, /\.page-head\{display:block\}/);
-  assert.match(assets['/assets/app.css']!.body, /#content input:not\(\[type=checkbox\]\):not\(\[type=file\]\)/);
   assert.match(assets['/assets/app.css']!.body, /--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px/);
-  assert.match(assets['/assets/app.css']!.body, /--accent-grad:linear-gradient/);
-  assert.match(assets['/assets/app.css']!.body, /\.data-table tbody tr:nth-child\(even\)/);
-  assert.match(assets['/assets/app.css']!.body, /input\[type=file\]::file-selector-button/);
-  assert.match(assets['/assets/app.js']!.body, /function svgIcon\(pathData\)/);
-  assert.match(assets['/assets/app.js']!.body, /Live preview/);
-  assert.match(assets['/assets/app.js']!.body, /No '\+title\.toLowerCase\(\)\+' yet/);
-  assert.match(assets['/assets/app.css']!.body, /\.nav-link\{flex:0 0 calc\(\(100vw - 40px\)\/5\);min-width:0;white-space:normal\}/);
-  assert.match(assets['/assets/app.css']!.body, /\.nav-list::after\{content:"";position:sticky/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /function svgIcon\(pathData\)/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /Live preview/);
+  assert.match(compactScript(assets['/assets/app.js']!.body), /No '\+title\.toLowerCase\(\)\+' yet/);
 });
 
 test('Dream Schedule UI has run states, keyed status patching, relative ticks, history, and read-only polling', () => {
-  const app = assets['/assets/app.js']!.body;
+  const app = compactScript(assets['/assets/app.js']!.body);
   assert.match(app, /api\('\/api\/dream\/run-status'\)/);
   assert.match(app, /No Dream run yet/);
   assert.match(app, /No run predicted/);
@@ -213,7 +220,7 @@ test('connector polling patches only changed keyed status nodes and preserves ty
     replaceWith(node: TrackedNode) { if (!this.parentNode) return; const list = this.parentNode.childNodes, index = list.indexOf(this); list[index] = node; node.parentNode = this.parentNode; this.parentNode.writes++; }
     remove() { if (!this.parentNode) return; this.parentNode.childNodes = this.parentNode.childNodes.filter(node => node !== this); this.parentNode.writes++; }
   }
-  const app = assets['/assets/app.js']!.body, start = app.indexOf('function hasConnector('), end = app.indexOf('\nfunction patchContent', start);
+  const app = compactScript(assets['/assets/app.js']!.body), start = app.indexOf('function hasConnector('), end = app.indexOf('\nfunction patchContent', start);
   assert.ok(start >= 0 && end > start, 'connector patch helpers are available in the served dashboard script');
   const nodeSig = (node: TrackedNode): string => node.nodeType === 3 ? 't:' + node.data : node.tagName + JSON.stringify(node.attributes) + (node.tagName === 'INPUT' ? node.value : '') + '(' + node.childNodes.map(nodeSig).join('|') + ')';
   const controlDirty = (node: TrackedNode): boolean => node.tagName === 'INPUT' && node.value !== node.getAttribute('value');
@@ -265,7 +272,7 @@ function editorHarness(apiHandler: (path: string, init?: any) => Promise<any>) {
     notify: (message: string) => notices.push(message), go: (route: string) => routes.push(route), showDocument: () => {}, content,
     encodeURIComponent, JSON,
   };
-  const app = assets['/assets/app.js']!.body;
+  const app = compactScript(assets['/assets/app.js']!.body);
   const start = app.indexOf('function editDocument(current){'), end = app.indexOf('\nasync function workspacesPage()', start);
   assert.ok(start >= 0 && end > start, 'editor function is available in served app');
   const editDocument = vm.runInNewContext(`${app.slice(start, end)}; editDocument`, context) as (current?: any) => void;
@@ -319,7 +326,7 @@ function button(root: MockElement, text: string): MockElement {
   const createCall = createHarness.calls[0]!;
   assert.equal(createCall.init?.method, 'POST'); assert.equal('expectedRevisionId' in JSON.parse(createCall.init!.body), false);
 
-  const app = assets['/assets/app.js']!.body;
+  const app = compactScript(assets['/assets/app.js']!.body);
   const calls: Array<{ path: string; init?: any }> = [];
   const viewerContext = {
     document: { createElement: () => new MockElement() }, crypto: { randomUUID: () => 'viewer-key' },
@@ -341,19 +348,22 @@ function button(root: MockElement, text: string): MockElement {
   assert.equal(JSON.parse(restoration!.init!.body).revisionId, 'rev-old-revision');
 });
 
-test('dashboard semantic status colors keep readable contrast in light and dark themes', () => {
-  const ratio = (foreground: string, background: string) => {
-    const luminance = (hex: string) => {
-      const channels = hex.slice(1).match(/.{2}/g)!.map(channel => parseInt(channel, 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
-      return .2126 * channels[0]! + .7152 * channels[1]! + .0722 * channels[2]!;
-    };
-    const a = luminance(foreground), b = luminance(background);
-    return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+test('dashboard design tokens keep readable contrast in light and dark themes', () => {
+  const luminance = (hex: string) => {
+    const channels = hex.slice(1).match(/.{2}/g)!.map(channel => parseInt(channel, 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+    return .2126 * channels[0]! + .7152 * channels[1]! + .0722 * channels[2]!;
   };
-  const pairs: Array<[string, string]> = [['#17633c','#eaf7ef'],['#754500','#fff5e3'],['#8c2525','#ffeded'],['#244e86','#eaf2ff'],['#b6f0c8','#183629'],['#ffdfa0','#3b2d15'],['#ffc4bd','#422323'],['#c6dcff','#1d3049']];
-  for (const [foreground, background] of pairs) assert.ok(ratio(foreground, background) >= 4.5, `${foreground} on ${background} must meet WCAG AA text contrast`);
+  const ratio = (foreground: string, background: string) => { const a = luminance(foreground), b = luminance(background); return (Math.max(a, b) + .05) / (Math.min(a, b) + .05); };
   const css = assets['/assets/app.css']!.body;
-  for (const [foreground, background] of pairs) { assert.ok(css.includes(foreground)); assert.ok(css.includes(background)); }
+  const darkAt = css.indexOf('@media (prefers-color-scheme:dark)'), lightAt = css.indexOf(':root{');
+  assert.ok(lightAt >= 0 && darkAt > lightAt, 'light and dark token blocks exist');
+  const tokens = (block: string): Record<string, string> => Object.fromEntries([...block.matchAll(/(--[a-z-]+):(#[0-9a-fA-F]{6})/g)].map(match => [match[1]!, match[2]!]));
+  const light = tokens(css.slice(lightAt, darkAt)), dark = { ...light, ...tokens(css.slice(darkAt, css.indexOf('*,*::before', darkAt))) };
+  const pairs: Array<[string, string]> = [['--text', '--surface'], ['--text', '--ground'], ['--muted', '--surface'], ['--muted', '--ground'], ['--primary-ink', '--primary-bg'], ['--accent', '--surface'], ['--negative', '--surface'], ['--pill-positive-ink', '--pill-positive-bg'], ['--pill-negative-ink', '--pill-negative-bg'], ['--pill-warning-ink', '--pill-warning-bg'], ['--pill-neutral-ink', '--pill-neutral-bg'], ['--pill-info-ink', '--pill-info-bg']];
+  for (const [theme, set] of [['light', light], ['dark', dark]] as const) for (const [foreground, background] of pairs) {
+    assert.ok(set[foreground] && set[background], `${theme}: ${foreground} and ${background} are defined`);
+    assert.ok(ratio(set[foreground]!, set[background]!) >= 4.5, `${theme}: ${foreground} on ${background} must meet WCAG AA text contrast`);
+  }
 });
 
 
@@ -379,7 +389,7 @@ test('served dashboard assets parse and browser helpers preserve URL and line be
 });
 
 test('settings navigation loads effective settings and has an actionable failure state', () => {
-  const script = assets['/assets/app.js']!.body;
+  const script = compactScript(assets['/assets/app.js']!.body);
   assert.match(script, /case'settings':if\(!settings\)\{try\{await loadSettings\(\)\}catch\(error\)\{view=settingsError\(error\);break\}\}view=await settingsPage\(\);break;/);
   assert.match(script, /Effective settings could not be loaded:/);
   assert.match(script, /node\('button','primary','Retry'\)/);
@@ -446,7 +456,7 @@ test('served dashboard script completes its first refresh and renders every scre
       return response({});
     };
     const sandbox: any = { document, fetch, location:{hash:'#'+(screen==='settings-error'?'settings':screen),pathname:'/',search:''}, history:{replaceState(){}}, URLSearchParams, URL, Intl, Date, Map, Set, Event: class {}, console, setTimeout: () => 1, clearTimeout() {}, window:{addEventListener(){},confirm:()=>true}, confirm:()=>true, prompt:()=>null, crypto:{randomUUID:()=> 'test-id'} };
-    new vm.Script(assets['/assets/app.js']!.body).runInNewContext(sandbox);
+    new vm.Script(compactScript(assetsFor(screen === 'client-first-setup' ? 'client' : 'server')['/assets/app.js']!.body as string)).runInNewContext(sandbox);
     await new Promise(resolve => setImmediate(resolve));
     await new Promise(resolve => setImmediate(resolve));
     if (screen === 'client-first-setup') {
@@ -463,7 +473,7 @@ test('served dashboard script completes its first refresh and renders every scre
 });
 
 test('Domains panel shows its evidence threshold, pending candidates, and no-model behavior', async () => {
-  const source = assets['/assets/app.js']!.body;
+  const source = compactScript(assets['/assets/app.js']!.body);
   assert.match(source, /Minimum evidence:/);
   assert.match(source, /pendingDomainCandidates/);
   assert.match(source, /pending\.evidence\|\|\[\]\)\.join/);
@@ -474,13 +484,12 @@ test('client refresh uses client status and leaves Connecting on success or fail
   const vault = await disposableVault();
   const client = await createDashboardServer({ engram: vault.engram, clientMode: true, host: '127.0.0.1', port: 0, authLocation: { env: {}, homeDir: vault.root, platform: 'linux' } });
   t.after(async () => { await client.close(); await vault.cleanup(); });
-  const script = await fetch(`http://127.0.0.1:${client.port}/assets/app.js`).then(response => response.text());
+  const script = compactScript(await fetch(`http://127.0.0.1:${client.port}/assets/app.js`).then(response => response.text()));
   const clientScreens = script.match(/^const screens=.*;$/m)?.[0] ?? '';
   assert.doesNotMatch(clientScreens, /['"]clients['"]/);
   assert.match(script, /api\('\/api\/client\/status'\)/);
-  assert.match(script, /textContent='DEVICE'/);
   assert.match(script, /This device'\+\(result\.captureHost/);
-  const start = script.indexOf('async function refresh(){'), end = script.indexOf('\npause.addEventListener', start);
+  const start = script.indexOf('async function refresh(){'), end = script.indexOf('\nstartApp();', start);
   assert.ok(start >= 0 && end > start, 'client script contains the rewritten refresh implementation');
   const fields = new Map<string, any>();
   const document = { hidden: false, querySelector(selector: string) { if (!fields.has(selector)) fields.set(selector, { hidden: false, textContent: '', title: '', className: '', replaceChildren() {} }); return fields.get(selector); } };
@@ -496,7 +505,7 @@ test('client refresh uses client status and leaves Connecting on success or fail
   await refresh();
   assert.deepEqual(requested, ['/api/client/status']); assert.equal(context.health.textContent, 'ok');
   assert.equal(context.updated.textContent.startsWith('Updated '), true); assert.equal(rendered, 1);
-  assert.match(context.health.title, /Syncing to studio.example/); assert.equal(document.querySelector('.eyebrow').textContent, 'DEVICE');
+  assert.match(context.health.title, /Syncing to studio.example/);
   assert.equal(document.querySelector('#vault-path').textContent, 'This device · studio.example');
   response = { state: 'attention', generatedAt: '2026-01-01T00:00:01Z', checks: [{ id: 'server', state: 'attention', text: 'Cannot reach the server: events are queued on this Mac' }], captureHost: 'studio.example' };
   await refresh(); assert.equal(context.health.textContent, 'attention'); assert.equal(rendered, 2);
@@ -506,16 +515,16 @@ test('client refresh uses client status and leaves Connecting on success or fail
 });
 
 test('dashboard boolean settings use accessible switch markup and persistent hover fill rules', () => {
-  const js = assets['/assets/app.js']!.body, css = assets['/assets/app.css']!.body;
+  const js = compactScript(assets['/assets/app.js']!.body), css = assets['/assets/app.css']!.body;
   assert.match(js, /function switchLabel\(input,label,description='',className=''\)/);
   assert.match(js, /input\.setAttribute\('role','switch'\)/);
   assert.doesNotMatch(assets['/']!.body, /Allow the model to read your wiki excerpts/);
   assert.match(js, /model\.allowNetwork/);
   assert.match(js, /Local model: your question, recent chat, and retrieved excerpts stay on this machine/); assert.match(js, /Vendor-hosted CLI\/API: your question, recent chat, and retrieved excerpts are sent to that vendor/);
   assert.match(js, /Answered by/); assert.match(js, /The model was not used:/); assert.match(js, /Open Settings/);
-  assert.match(css, /\.switch input:checked\+\.track\{[^}]*background-image:var\(--accent-grad\)/);
-  assert.match(css, /\.switch:hover \.track\{filter:brightness\(1\.08\)/);
-  assert.match(css, /\.switch input:focus-visible\+\.track/);
+  assert.match(css, /\.switch>input:checked~\.track\{background:var\(--positive\)\}/);
+  assert.match(css, /\.switch>input:disabled~\.track\{opacity:\.5\}/);
+  assert.match(css, /\.switch>input:focus-visible~\.track/);
 });
 
 // Poll-driven refresh must update only what changed and never discard what the user is typing.
@@ -539,8 +548,8 @@ class FakeEl {
 const h = (tag: string, attrs: Record<string, string>, ...kids: Array<FakeEl | string>) => { const el = new FakeEl(tag.toUpperCase()); for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v); el.append(...kids.map(kid => typeof kid === 'string' ? new FakeText(kid) : kid)); return el; };
 function patchHarness() {
   const content = new FakeEl('MAIN'), document = { activeElement: null as FakeEl | null };
-  const app = assets['/assets/app.js']!.body;
-  const start = app.indexOf('function isFormControl(el){'), end = app.indexOf('\nasync function render(force=false,poll=false)', start);
+  const app = compactScript(assets['/assets/app.js']!.body);
+  const start = app.indexOf('function isFormControl(el){'), end = app.indexOf('\nfunction startApp(', start);
   assert.ok(start >= 0 && end > start, 'patch helpers are available in served app');
   const code = app.slice(start, end).replace(/content\.addEventListener\([^;]*;/g, '');
   const api = vm.runInNewContext(`${code}; ({ patchContent, markTouched })`, { document, content }) as { patchContent: (view: FakeEl) => void; markTouched: (event: { target: FakeEl }) => void };
@@ -613,7 +622,7 @@ test('replica poll leaves unchanged area untouched, patches only changed keyed r
 });
 
 test('Cached projects renders folders while replica sync is disabled and patches folder rows by key', async () => {
-  const js = assets['/assets/app.js']!.body, start = js.indexOf('let clientFoldersSnapshot=null'), end = js.indexOf("setInterval(()=>{for(const age", start);
+  const js = compactScript(assetsFor('client')['/assets/app.js']!.body as string), start = js.indexOf('let clientFoldersSnapshot=null'), end = js.indexOf('\nasync function clientSettingsPage(', start);
   assert.ok(start >= 0 && end > start);
   const makePage = async (folders: unknown[]) => {
     const makeNode = (tag: string, className = '', text = '') => ({ tag, className, text, children: [] as any[], attrs: {} as Record<string,string>, append(...nodes: any[]) { this.children.push(...nodes); }, setAttribute(name: string, value: string) { this.attrs[name] = value; } });
@@ -638,23 +647,8 @@ test('Cached projects renders folders while replica sync is disabled and patches
   assert.match(js, /Date\.now\(\)-clientFoldersFetchedAt>=10000/); assert.match(js, /folder-context-age.*1000/s);
 });
 
-test('replica UI exposes every state, capped size, and plain-text conflict rendering', () => {
-  const js = assets['/assets/app.js']!.body;
-  const start = js.indexOf('function updateReplicaHeader(data){'), end = js.indexOf('\nasync function refresh()', start); assert.ok(start >= 0 && end > start);
-  const pill: { className?: string; label?: { textContent?: string; }; querySelector: () => { textContent?: string } } = { querySelector: () => pill.label! };
-  const updated = { textContent: '' }, labels: string[] = [], clock = { value: 1_000_000 }; let tick: () => void = () => {};
-  class FakeDate extends Date { static now() { return clock.value; } }
-  const update = vm.runInNewContext(`let replicaTick=0; ${js.slice(start, end)}; updateReplicaHeader`, { document: { querySelector: () => pill }, updated, Date: FakeDate, setInterval: (fn: () => void) => { tick = fn; return 1; }, clearInterval: () => undefined }) as (data: { enabled: boolean; state: string; lastSyncAt: string | null }) => void;
-  for (const state of ['Sync mode','Syncing','Cache mode (offline)','Conflict','Access refused','Paused','Epoch changed','Daemon stopped']) { pill.label = { textContent: '' }; update({ enabled: true, state, lastSyncAt: null }); labels.push(pill.label.textContent!); }
-  assert.deepEqual(labels, ['Sync mode','Syncing','Cache mode (offline)','Conflict','Access refused','Paused','Epoch changed','Daemon stopped']);
-  update({ enabled: true, state: 'Sync mode', lastSyncAt: new Date(clock.value - 1000).toISOString() }); assert.match(updated.textContent, /just now/); clock.value += 120_000; tick(); assert.match(updated.textContent, /2 min ago/);
-  assert.match(js, /diskSizeBytes/); assert.match(js, /item\.diskSizeApproximate/);
-  assert.match(js, /node\('pre','',String\(item\.server\.text\)\)/); assert.match(js, /node\('pre','',String\(item\.local\.text\)\)/);
-  assert.match(js, /setInterval\(paint,60000\)/); assert.match(js, /Replica · /); assert.match(js, /enrolledScopes/); assert.doesNotMatch(js, /\.innerHTML\b/);
-});
-
 test('served dashboard formats durations and renders Dream previous run and history precisely', async () => {
-  const app = assets['/assets/app.js']!.body;
+  const app = compactScript(assets['/assets/app.js']!.body);
   const formatterStart = app.indexOf('function formatDuration('), formatterEnd = app.indexOf('\n', formatterStart);
   assert.ok(formatterStart >= 0 && formatterEnd > formatterStart, 'duration formatter is in served app.js');
   assert.match(app, /formatDuration\(Date\.now\(\)-chatPending\.startedAt\)/, 'chat action elapsed time uses the shared duration formatter');

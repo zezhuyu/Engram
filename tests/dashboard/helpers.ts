@@ -17,3 +17,27 @@ export async function disposableVault() {
   return { root, engram, cleanup: async () => { await engram.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); if (priorAuthFile === undefined) delete process.env.MDB_DASHBOARD_AUTH_FILE; else process.env.MDB_DASHBOARD_AUTH_FILE = priorAuthFile; } };
 }
 export const tempPath = (root: string, ...parts: string[]) => path.join(root, ...parts);
+
+/**
+ * The served script is readable, formatted source. Several tests assert on exact statement text written for the old minified output,
+ * so they compare against this normalised form: one top-level statement per line, whitespace removed around punctuation and string
+ * literals inside a statement (never inside a string), and the last semicolon before a closing brace dropped.
+ */
+export function compactScript(source: string): string {
+  const statements: string[] = [];
+  for (const line of source.split('\n')) {
+    if ((/^\S/.test(line) && !/^(\}|\)|\]|else\b|catch\b|finally\b|,)/.test(line)) || statements.length === 0) statements.push(line);
+    else statements[statements.length - 1] += ' ' + line;
+  }
+  const squeeze = (text: string): string => {
+    const parts = text.split(/('(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*")/);
+    return parts.map((part, index) => {
+      if (index % 2 === 1) return part;
+      let out = part.replace(/\s+/g, ' ').replace(/\s*([,;(){}:?=+\-*<>!&|])\s*/g, '$1').replace(/\s*\]\s*/g, ']').replace(/(?<!\b(?:of|in|return|typeof|await|case|new|void|delete|yield))\s+\[/g, '[');
+      if (index > 0) out = out.replace(/^\s+/, '');
+      if (index < parts.length - 1) out = out.replace(/\s+$/, '');
+      return out;
+    }).join('').replace(/;\}/g, '}').trim();
+  };
+  return statements.map(squeeze).filter(Boolean).join('\n');
+}

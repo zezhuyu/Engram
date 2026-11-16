@@ -8,7 +8,6 @@ import { makeDisposableVault, requestDashboard as rawRequestDashboard, stopDashb
 import { dashboardSessionFile, dashboardSessionKey, passwordFilePath, validatePassword } from '../../packages/dashboard/password.js';
 import { validateUpload, safeSourceName } from '../../packages/dashboard/chat.js';
 import { validateUrlNoteUrl } from '../../packages/dashboard/url-notes.js';
-import { saveConnection, connectionSecret } from '../../packages/dashboard/connections.js';
 import { createDashboardCredential, listDashboardCredentials, resolveDashboardCredential, revokeDashboardCredential } from '../../packages/dashboard/credentials.js';
 
 type Status = 'PASS' | 'FAIL' | 'NOT_RUN' | 'OPEN_POLICY';
@@ -29,9 +28,7 @@ const routes: Route[] = [
   { path: '/api/client/mode', methods: ['GET'] }, { path: '/api/client/device', methods: ['GET'] }, { path: '/api/client/status', methods: ['GET'] }, { path: '/api/client/settings', methods: ['GET'] },
   { path: '/api/client/folders', methods: ['GET'] }, { path: '/api/client/workspaces', methods: ['GET'] }, { path: '/api/client/replica', methods: ['GET'] }, { path: '/api/client/replica/projects', methods: ['GET'] }, { path: '/api/client/replica/conflicts', methods: ['GET'] }, { path: '/api/client/replica/enable', methods: ['POST'] }, { path: '/api/client/replica/add', methods: ['POST'] }, { path: '/api/client/replica/remove', methods: ['POST'] }, { path: '/api/client/replica/sync', methods: ['POST'] }, { path: '/api/client/replica/conflicts/resolve', methods: ['POST'] }, { path: '/api/client/replica/conflicts/discard', methods: ['POST'] }, { path: '/api/client/server', methods: ['GET'] }, { path: '/api/client/server/preview', methods: ['POST'] }, { path: '/api/client/server/apply', methods: ['POST'] },
   { path: '/api/client/service/logs', methods: ['GET'] }, { path: '/api/client/service', methods: ['POST'] },
-  { path: '/api/client/outbox/drain', methods: ['POST'] }, { path: '/api/client/connections', methods: ['GET', 'POST'] },
-  { path: '/api/client/connections/:id', methods: ['DELETE'], kind: 'pattern' },
-  { path: '/api/client/connections/:id/test', methods: ['POST'], kind: 'pattern' },
+  { path: '/api/client/outbox/drain', methods: ['POST'] },
   { path: '/api/dashboard/credentials', methods: ['GET', 'POST'] },
   { path: '/api/dashboard/credentials/:id', methods: ['DELETE'], kind: 'pattern' },
   { path: '/api/clients', methods: ['GET'] }, { path: '/api/clients/revoke', methods: ['POST'] }, { path: '/api/clients/unenroll', methods: ['POST'] },
@@ -260,7 +257,7 @@ test('dashboard route security matrix: every current route/method rejects anonym
     const html = await requestDashboard(dashboard.port, '/');
     const css = await requestDashboard(dashboard.port, '/assets/app.css');
     const js = await requestDashboard(dashboard.port, '/assets/app.js');
-    const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+    const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
     for (const [route, reply] of [['/', html], ['/assets/app.css', css], ['/assets/app.js', js]] as const) {
       const matches = reply.headers['content-security-policy'] === csp;
       record(route, 'GET', 'exact-csp-header', csp, String(reply.headers['content-security-policy']), matches ? 'PASS' : 'FAIL');
@@ -397,27 +394,6 @@ test('dashboard route security matrix: every current route/method rejects anonym
     record('/api/dashboard/credentials', 'POST', 'credential-source-ip-cap', 'source IP list above 64 rejected', String(allowlistRejected), allowlistRejected ? 'PASS' : 'FAIL'); assert.equal(allowlistRejected, true);
     void token;
 
-    const secretFile = path.join(vault.root, 'client-token.txt'); const linkFile = path.join(vault.root, 'client-token-link.txt');
-    await writeFile(secretFile, 'client-secret-canary\n', { mode: 0o600 }); await symlink(secretFile, linkFile);
-    const connection = await saveConnection(vault.root, { name: 'fixture', url: 'https://example.com', credentialFile: linkFile, mode: 'view' });
-    let symlinkAccepted = false; try { await connectionSecret(vault.root, connection.id); symlinkAccepted = true; } catch { /* expected rejection */ }
-    const connectionLine = (await readFile(path.join(process.cwd(), 'packages/dashboard/connections.ts'), 'utf8')).split('\n').findIndex(line => line.includes('export async function connectionSecret')) + 1;
-    record('/api/client/connections', 'POST', 'client-credential-symlink', 'symlink credential path rejected', String(symlinkAccepted), symlinkAccepted ? 'FAIL' : 'PASS', symlinkAccepted ? `Repro: save a connection using a symlink to a private token file, then connectionSecret(root, id). Cause: packages/dashboard/connections.ts:${connectionLine} uses stat/readFile, which follow symlinks. Severity proposal: moderate; a symlink swap can redirect the secret read.` : undefined);
-    if (symlinkAccepted) await requireSecure(t, false, 'client connection credential path follows symlink', () => assert.equal(symlinkAccepted, false));
-    const raceFile = path.join(vault.root, 'client-token-race.txt'); const raceTarget = path.join(vault.root, 'race-target.txt');
-    await writeFile(raceFile, 'validated-secret\n', { mode: 0o600 }); await writeFile(raceTarget, 'target-secret-canary\n', { mode: 0o600 });
-    const raceConnection = await saveConnection(vault.root, { name: 'race', url: 'https://example.com', credentialFile: raceFile, mode: 'view' });
-    let raceRejected = false; let raceReturnedTarget = false;
-    try {
-      const result = await connectionSecret(vault.root, raceConnection.id, async () => { await unlink(raceFile); await symlink(raceTarget, raceFile); });
-      raceReturnedTarget = result.token.includes('target-secret-canary');
-    } catch { raceRejected = true; }
-    record('/api/client/connections', 'POST', 'credential-validation-open-symlink-race', 'validation/open swap is refused and target content never returned', `rejected=${raceRejected}; leaked=${raceReturnedTarget}`, raceRejected && !raceReturnedTarget ? 'PASS' : 'FAIL');
-    assert.equal(raceRejected, true); assert.equal(raceReturnedTarget, false);
-    const readableFile = path.join(vault.root, 'client-token-readable.txt'); await writeFile(readableFile, 'client-secret\n', { mode: 0o600 }); await chmod(readableFile, 0o644);
-    const readableConnection = await saveConnection(vault.root, { name: 'readable', url: 'https://example.com', credentialFile: readableFile, mode: 'view' });
-    let readableAccepted = true; try { await connectionSecret(vault.root, readableConnection.id); } catch { readableAccepted = false; }
-    record('/api/client/connections', 'POST', 'client-credential-group-world-readable', 'group/world-readable credential file refused', String(readableAccepted), readableAccepted ? 'FAIL' : 'PASS'); assert.equal(readableAccepted, false);
 
     // Existing dedicated dashboard integration fixtures are part of the required
     // regression run; bind their assertions into this route-specific matrix.
@@ -428,15 +404,12 @@ test('dashboard route security matrix: every current route/method rejects anonym
       ['/api/documents/:id', 'PATCH', 'stale-revisions-history-diff-hidden-id-uniform-404', 'tests/dashboard/knowledge.test.ts: dashboard knowledge CRUD preserves revisions, conflicts, tombstones, restore and idempotency; dashboard knowledge hides unauthorized documents'],
       ['/api/workspaces', 'POST', 'workspace-validation-and-proposal-gated-lifecycle', 'tests/dashboard/knowledge.test.ts and dashboard chat/source integration cover scoped workspace authorization and same-origin writes'],
       ['/api/connectors/test', 'POST', 'private-target-redirect-url-credentials-scheme-validation', 'tests/dashboard/connectors.test.ts: connection URL policy rejects HTTP/private and cross-host redirects'],
-      ['/api/client/connections', 'POST', 'credential-file-path-symlink-mode-and-proxy-secrecy', 'tests/dashboard/client.test.ts: client proxy keeps remote credentials server side; this matrix additionally checks symlink and file mode'],
       ['/api/sources', 'POST', 'upload-mime-extension-magic-size-retry-scope', 'tests/dashboard/chat.test.ts: source uploads enforce allowlist, size, sniffing, sanitization, URL inertness and retry idempotency'],
       ['/api/documents/:id', 'GET', 'stored-xss-html-markdown-inert-rendering', 'tests/dashboard/knowledge.test.ts: dashboard knowledge writes require same-origin session requests and keep markdown inert under CSP; dashboard/ui.test.ts checks DOM sinks'],
       ['/api/audit', 'GET', 'planted-secret-redaction', 'tests/dashboard/settings.test.ts redacts audit values; tests/dashboard/connectors.test.ts keeps connector secrets write-only and audits only field names'],
       ['/assets/*', 'GET', 'encoded-traversal-and-hostile-identifiers', 'tests/dashboard/security.test.ts route gates plus repository security tests reject traversal, encoded separators and NUL identifiers'],
-      ['/api/client/connections/:id/test', 'POST', 'client-connection-private-target-and-redirect', 'tests/dashboard/connectors.test.ts: connection URL policy rejects HTTP/private and cross-host redirects'],
     ] as const;
     for (const [route, method, name, evidence] of regressionEvidence) record(route, method, name, 'asserted secure behavior in dedicated dashboard regression fixture', 'PASS', 'PASS', `Regression evidence: ${evidence}. The required dashboard regression command ran all tests/dashboard/*.test.js.`);
-    record('/api/client/connections/:id/test', 'POST', 'dns-rebinding-resolver-override', 'simulated DNS answers cannot change the pinned connection target', 'socket lookup uses the address selected by injectable resolver', 'PASS');
     assert.equal(dashboardReplies.some(reply => canaryLeak(reply, canary)), false, 'MDB_CANARY_SECRET must not appear in any captured response body or header');
     record('/api/status', 'GET', 'MDB_CANARY_SECRET-server-log', 'canary absent from server logs', serverLogs.join('\n').includes(canary) ? 'leaked' : 'absent', serverLogs.join('\n').includes(canary) ? 'FAIL' : 'PASS');
     assert.equal(serverLogs.join('\n').includes(canary), false);

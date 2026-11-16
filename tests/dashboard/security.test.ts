@@ -74,7 +74,7 @@ test('dashboard security gates API requests and serves only fixed assets', async
   assert.equal((await call(dashboard.port, '/%2e%2e/package.json')).status, 404);
   const page = await call(dashboard.port, '/', { host: `127.0.0.1:${dashboard.port}` });
   assert.equal(page.status, 200);
-  assert.equal(page.headers['content-security-policy'], "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  assert.equal(page.headers['content-security-policy'], "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
   assert.equal(page.headers['cache-control'], 'no-store'); assert.equal(page.headers['x-content-type-options'], 'nosniff'); assert.equal(page.headers['referrer-policy'], 'no-referrer');
   const good = await call(dashboard.port, '/api/status', { token: dashboard.token });
   assert.equal(good.status, 200); assert.equal(good.body.includes(dashboard.token), false);
@@ -122,6 +122,6 @@ test('remote dashboard binds all interfaces and enforces remote host, origin, to
   for (let i = 1; i < 10; i++) assert.equal((await call(dashboard.port, '/api/status', { host: `${ipv4}:${dashboard.port}`, token: 'wrong' })).status, 401);
   assert.equal((await call(dashboard.port, '/api/status', { host: `${ipv4}:${dashboard.port}`, token: dashboard.token })).status, 429);
   const response = await call(dashboard.port, '/', { host: `${ipv4}:${dashboard.port}` });
-  assert.equal(response.headers['content-security-policy'], "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  assert.equal(response.headers['content-security-policy'], "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
   assert.equal(response.headers['cache-control'], 'no-store'); assert.equal(response.headers['x-content-type-options'], 'nosniff'); assert.equal(response.headers['referrer-policy'], 'no-referrer');
 });
