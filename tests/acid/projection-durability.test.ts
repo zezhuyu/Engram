@@ -93,10 +93,32 @@ test('purging an object with pending projections never makes a later flush fail;
 });
 
 test('the flush waits for a quiet moment: it does not run while commits keep arriving, and runs once they stop', async t => {
-  const { vault } = await disposableVault(t); const pending = () => (vault as unknown as { pendingProjections: Map<string, number> }).pendingProjections.size;
-  let flushes = 0; const original = vault.flushProjections.bind(vault); vault.flushProjections = () => { flushes++; return original(); };
-  for (let i = 0; i < 10; i++) { await put(vault, `burst ${i}`, 'body'); await sleep(120); }
-  assert.equal(flushes, 0, 'no flush competed with the burst of commits'); assert.ok(pending() >= 10, `all ${pending()} view writes were still pending after a 1.2 s burst`);
-  for (let i = 0; i < 60 && pending(); i++) await sleep(50); assert.equal(pending(), 0, 'flushed after the writes stopped'); assert.ok(flushes >= 1);
+  const attempts = 5; const maxInterWriteGapMs = 250; const maxBurstAgeMs = 2500;
+  let qualifiedAttempt: { vault: Vault; flushes: () => number; pending: () => number } | undefined;
+  let slowAttempt = '';
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const { vault } = await disposableVault(t);
+    const pending = () => (vault as unknown as { pendingProjections: Map<string, number> }).pendingProjections.size;
+    let flushes = 0; const original = vault.flushProjections.bind(vault); vault.flushProjections = () => { flushes++; return original(); };
+    const burstStartedAt = Date.now(); const completedAt: number[] = [];
+    for (let i = 0; i < 10; i++) { await put(vault, `burst ${attempt}-${i}`, 'body'); completedAt.push(Date.now()); await sleep(20); }
+
+    const gaps = completedAt.slice(1).map((time, index) => time - completedAt[index]!);
+    const burstAge = completedAt[completedAt.length - 1]! - burstStartedAt;
+    const largestGap = Math.max(...gaps);
+    if (largestGap < maxInterWriteGapMs && burstAge < maxBurstAgeMs) {
+      qualifiedAttempt = { vault, flushes: () => flushes, pending };
+      break;
+    }
+    slowAttempt = `attempt ${attempt}: largest inter-write gap ${largestGap}ms, burst age ${burstAge}ms`;
+  }
+
+  assert.ok(qualifiedAttempt, `runner was too slow to exercise projection debounce after ${attempts} fresh-vault attempts (${slowAttempt}); required every inter-write gap < ${maxInterWriteGapMs}ms and total burst age < ${maxBurstAgeMs}ms`);
+  const { vault, flushes, pending } = qualifiedAttempt!;
+  assert.equal(flushes(), 0, 'no flush competed with the burst of commits');
+  assert.ok(pending() >= 10, `all 10 view writes were still pending after the burst; found ${pending()}`);
+  for (let i = 0; i < 200 && pending(); i++) await sleep(50);
+  assert.equal(pending(), 0, 'flushed after the writes stopped'); assert.ok(flushes() >= 1);
   recordCase({ suite: 'acid', name: 'projection-flush-waits-for-idle', status: 'PASS' });
 });
