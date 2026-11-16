@@ -33,6 +33,7 @@ export class AdaptiveIntelligence {
     for (const key of ['targetLocalTime', 'quietStart', 'quietEnd'] as const) if (patch[key] !== undefined) parseHHMM(patch[key]!);
     if (patch.mode !== undefined && !['adaptive', 'fixed'].includes(patch.mode)) throw new Error('mode must be adaptive or fixed');
     if (patch.autoAccept !== undefined && !['none', 'low-risk'].includes(patch.autoAccept)) throw new Error('autoAccept must be none or low-risk');
+    if (patch.lowLoadStart) { const g = { ...(await this.store.config()).lowLoadStart, ...patch.lowLoadStart }; if (typeof g.enabled !== 'boolean' || !Number.isFinite(g.afterMinutesInWindow) || g.afterMinutesInWindow < 0 || !Number.isFinite(g.relaxedInactivityMinutes) || g.relaxedInactivityMinutes < 0 || !Number.isFinite(g.maxLoadPerCore) || g.maxLoadPerCore < 0) throw new Error('lowLoadStart requires a boolean enabled and non-negative numeric thresholds'); }
     return this.store.setConfig(patch);
   }
   pause(): Promise<AdaptiveConfig> { return this.store.setConfig({ paused: true }); }

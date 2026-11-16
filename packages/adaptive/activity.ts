@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { ensureStorageDirectory, resolveStoragePath } from '../core/root.js';
 import type { CommitEvent } from '../core/types.js';
 import type { Vault } from '../core/vault.js';
@@ -43,9 +44,9 @@ export async function lastForegroundAt(vault: Vault, ownRanges: Array<[number, n
 }
 export const idleMinutes = (lastForeground: number, now: Date): number => lastForeground ? Math.max(0, (now.getTime() - lastForeground) / 60000) : Number.POSITIVE_INFINITY;
 
-const emptyDay = (): DayTelemetry => ({ events: Array<number>(24).fill(0), covered: Array<boolean>(24).fill(false) });
+const emptyDay = (): DayTelemetry => ({ events: Array<number>(24).fill(0), covered: Array<boolean>(24).fill(false), load: Array.from({ length: 24 }, () => ({ samples: 0, meanPerCore: 0 })) });
 /**
- * Records activity metadata only (counts of journal commits per local hour, plus which hours the scheduler was actually running). No content is read.
+ * Records activity metadata only (commit counts, covered hours and mean normalized load samples per local hour). No content is read.
  * An hour with zero commits is only evidence of inactivity if it is marked covered: hours when the scheduler was not running are unknown, not quiet.
  */
 export async function observe(vault: Vault, store: AdaptiveStore, config: AdaptiveConfig, now: Date): Promise<Telemetry> {
@@ -60,6 +61,10 @@ export async function observe(vault: Vault, store: AdaptiveStore, config: Adapti
     for (let at = previous.getTime(); at <= now.getTime(); at += 30 * 60000) { const p = localParts(new Date(at), config.timezone); (t.days[p.date] ??= emptyDay()).covered[p.hour] = true; }
   }
   today.covered[lp.hour] = true; t.lastTickAt = now.toISOString();
+  // Old records gain an empty load series as they are observed again.
+  for (const day of Object.values(t.days)) day.load ??= Array.from({ length: 24 }, () => ({ samples: 0, meanPerCore: 0 }));
+  const load = today.load![lp.hour]!; const perCore = (os.loadavg()[0] ?? 0) / Math.max(1, os.cpus().length);
+  load.meanPerCore = (load.meanPerCore * load.samples + perCore) / (load.samples + 1); load.samples++;
   const cutoff = addDays(lp.date, -config.telemetryRetentionDays); for (const d of Object.keys(t.days)) if (d < cutoff) delete t.days[d];
   await store.saveTelemetry(t); return t;
 }
@@ -74,19 +79,25 @@ export function estimateWindow(t: Telemetry, config: AdaptiveConfig, now: Date):
   const reliable = dates.filter(d => (t.days[d]?.covered.filter(Boolean).length ?? 0) >= RELIABLE_HOURS);
   const confidence = Math.min(1, reliable.length / config.historyWindowDays);
   if (reliable.length < config.minHistoryDays) return { startLocal: target, mode: 'DEFAULT', confidence, reliableDays: reliable.length, reason: `INSUFFICIENT_TELEMETRY: ${reliable.length}/${config.minHistoryDays} reliable days` };
-  const mean = Array<number>(24).fill(0), samples = Array<number>(24).fill(0);
-  for (const d of reliable) for (let h = 0; h < 24; h++) if (t.days[d]!.covered[h]) { mean[h]! += t.days[d]!.events[h]!; samples[h]! += 1; }
+  const mean = Array<number>(24).fill(0), samples = Array<number>(24).fill(0), loadMean = Array<number>(24).fill(0), loadSamples = Array<number>(24).fill(0);
+  for (const d of reliable) for (let h = 0; h < 24; h++) if (t.days[d]!.covered[h]) { mean[h]! += t.days[d]!.events[h]!; samples[h]! += 1; const l = t.days[d]!.load?.[h]; if (l && l.samples > 0) { loadMean[h]! += l.meanPerCore * l.samples; loadSamples[h]! += l.samples; } }
   const hourly = mean.map((v, h) => samples[h]! ? v / samples[h]! : Number.POSITIVE_INFINITY);
+  const hourlyLoad = loadMean.map((v, h) => loadSamples[h]! ? v / loadSamples[h]! : 0);
   const qs = Math.floor(parseHHMM(config.quietStart) / 60), qe = parseHHMM(config.quietEnd) / 60; const span = Math.max(1, Math.round(config.expectedDurationHours));
   const hours: number[] = []; for (let h = qs; (h % 24) !== qe % 24 || hours.length === 0; h++) { hours.push(h % 24); if (hours.length >= 24) break; }
-  const score = (start: number) => { let s = 0; for (let i = 0; i < span; i++) { const h = (start + i) % 24; if (!hours.includes(h)) return Number.POSITIVE_INFINITY; s += hourly[h]!; } return s / span; };
-  const candidates = hours.map(h => ({ h, s: score(h) })).filter(c => Number.isFinite(c.s)).sort((a, b) => a.s - b.s || a.h - b.h);
-  if (!candidates.length) return { startLocal: target, mode: 'DEFAULT', confidence, reliableDays: reliable.length, reason: 'no eligible quiet window with sufficient samples' };
-  const current = t.learned ? Math.floor(parseHHMM(t.learned.startLocal) / 60) : Math.floor(parseHHMM(target) / 60); const currentScore = score(current); const best = candidates[0]!;
+  const activityScore = (start: number) => { let s = 0; for (let i = 0; i < span; i++) { const h = (start + i) % 24; if (!hours.includes(h)) return Number.POSITIVE_INFINITY; s += hourly[h]!; } return s / span; };
+  // Relative score weights foreground activity above normalized load: 75% commit rate + 25% load per CPU.
+  const score = (start: number) => { let activity = 0, load = 0; for (let i = 0; i < span; i++) { const h = (start + i) % 24; if (!hours.includes(h)) return Number.POSITIVE_INFINITY; activity += hourly[h]!; load += hourlyLoad[h]!; } return 0.75 * activity / span + 0.25 * load / span; };
+  const all = hours.map(h => ({ h, s: score(h), activity: activityScore(h) })).filter(c => Number.isFinite(c.s));
+  const strict = all.some(c => c.activity === 0); const candidates = (strict ? all.filter(c => c.activity === 0) : all).sort((a, b) => a.s - b.s || Math.abs(a.h - Math.floor(parseHHMM(target) / 60)) - Math.abs(b.h - Math.floor(parseHHMM(target) / 60)) || a.h - b.h);
+  const eligible = strict ? candidates : candidates.filter(c => Array.from({ length: span }, (_, i) => (c.h + i) % 24).every(h => loadSamples[h]! > 0));
+  if (!eligible.length) return { startLocal: target, mode: 'DEFAULT', confidence, reliableDays: reliable.length, reason: strict ? 'no eligible quiet window with sufficient samples' : 'INSUFFICIENT_LOAD_TELEMETRY: no candidate window has load samples' };
+  const current = t.learned ? Math.floor(parseHHMM(t.learned.startLocal) / 60) : Math.floor(parseHHMM(target) / 60); const currentScore = score(current); const best = eligible[0]!;
   const daysSinceChange = t.learned ? (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${t.learned.changedOn}T00:00:00Z`)) / 86400000 : Number.POSITIVE_INFINITY;
   let start = current, learned = t.learned;
-  if (best.h !== current && (!Number.isFinite(currentScore) || best.s < currentScore * 0.75) && daysSinceChange >= 7) { start = (current + (((best.h - current + 24) % 24) <= 12 ? 1 : 23)) % 24; learned = { startLocal: formatHHMM(start * 60), changedOn: today, score: best.s }; }
+  const currentActivityScore = activityScore(current);
+  if (best.h !== current && ((!strict && (!Number.isFinite(currentScore) || best.s < currentScore * 0.75)) || (strict && (!Number.isFinite(currentActivityScore) || best.activity < currentActivityScore * 0.75))) && daysSinceChange >= 7) { start = (current + (((best.h - current + 24) % 24) <= 12 ? 1 : 23)) % 24; learned = { startLocal: formatHHMM(start * 60), changedOn: today, score: best.s }; }
   else if (!t.learned) learned = { startLocal: formatHHMM(current * 60), changedOn: today, score: Number.isFinite(currentScore) ? currentScore : best.s };
-  return { startLocal: formatHHMM(start * 60), mode: 'ADAPTIVE', confidence, reliableDays: reliable.length, reason: start === current ? 'kept current window (hysteresis)' : 'moved one hour toward a quieter window', ...(learned ? { learned } : {}) };
+  return { startLocal: formatHHMM(start * 60), mode: 'ADAPTIVE', confidence, reliableDays: reliable.length, reason: strict ? 'STRICT: absolutely quiet window preferred' : `RELATIVE_LOW_LOAD: no absolutely quiet hour; lowest activity+load window${start === current ? ' (hysteresis)' : ''}`, ...(learned ? { learned } : {}) };
 }
 export { inWindow };

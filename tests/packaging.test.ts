@@ -61,6 +61,16 @@ test('release qualification always follows platform verification, while publicat
   assert.match(nonTag.stderr, /Release authorization rejected: a semantic version tag ref is required/, 'branch ref failure is clear and does not depend on authorization secrets or evidence');
 });
 
+test('macOS suite reports are uploaded and imported as optional release qualification evidence', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const macos = /  macos:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:|$)/.exec(workflow)?.[1] ?? '';
+  const qualification = /  release-qualification:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:|$)/.exec(workflow)?.[1] ?? '';
+  assert.match(macos, /name: suite-reports-darwin[\s\S]*?path: \|[\s\S]*?verification\/\*\/report\.json[\s\S]*?if-no-files-found: error/);
+  assert.match(qualification, /continue-on-error: true[\s\S]*?name: suite-reports-darwin[\s\S]*?path: verification\/platform-reports\/darwin/);
+  assert.match(qualification, /name: Qualify release gates[\s\S]*?MDB_PLATFORM_REPORTS_DIR: verification\/platform-reports/);
+  for (const suite of ['acid', 'security', 'search', 'intelligence', 'recovery', 'platform', 'memory', 'profile', 'wiki', 'dream', 'adaptive', 'query', 'unix']) assert.ok(macos.includes(`npm run verify:${suite}`), `macOS runs verify:${suite}`);
+});
+
 test('if the package is ever made public it must have a files allowlist whose tarball excludes tests, verification and study prototypes', () => {
   if (pkg.private === true) return; // guarded by the first test; this branch only matters if someone removes the flag
   assert.ok(Array.isArray(pkg.files) && pkg.files.length > 0, 'a public package needs an explicit "files" allowlist');

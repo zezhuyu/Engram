@@ -4,6 +4,8 @@ The CI workflow runs release qualification after the Linux GNU, Linux reliabilit
 
 Release qualification accepts a suite's `SKIPPED` report only when every skip has a reviewed platform-specific or GNU-tool classification matching the runner and the inventory's classification hash. Reviewed real-model and real-host skips remain blocking because they indicate missing required evidence; see the [release profile contract](release-profile-contract.md).
 
+The S8 / PLATFORM gate requires all 13 mandatory suites to be effective PASS on every platform listed in `fixtures/inputs/release-matrix.json` (currently `darwin` and `linux`). The qualification runner uses its own current-source suite reports; other platforms use reports imported from the CI artifact at `verification/platform-reports/<platform>/<suite>/report.json`, with each report's hash-bound `source-evidence.json` manifest. Imported evidence must match the current commit and source fingerprint, be clean-tree evidence, and match the reviewed per-platform inventory. Missing evidence is NOT_RUN, invalid evidence is FAIL, and valid but blocking skips are INCOMPLETE. CI does not sign these artifacts; trust is limited to the workflow run and GitHub artifact transport.
+
 ## Required repository configuration
 
 Before enabling publication, a repository owner must configure the `engram-release` GitHub Actions environment with:

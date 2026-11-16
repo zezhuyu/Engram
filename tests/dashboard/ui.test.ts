@@ -652,3 +652,35 @@ test('replica UI exposes every state, capped size, and plain-text conflict rende
   assert.match(js, /node\('pre','',String\(item\.server\.text\)\)/); assert.match(js, /node\('pre','',String\(item\.local\.text\)\)/);
   assert.match(js, /setInterval\(paint,60000\)/); assert.match(js, /Replica · /); assert.match(js, /enrolledScopes/); assert.doesNotMatch(js, /\.innerHTML\b/);
 });
+
+test('served dashboard formats durations and renders Dream previous run and history precisely', async () => {
+  const app = assets['/assets/app.js']!.body;
+  const formatterStart = app.indexOf('function formatDuration('), formatterEnd = app.indexOf('\n', formatterStart);
+  assert.ok(formatterStart >= 0 && formatterEnd > formatterStart, 'duration formatter is in served app.js');
+  assert.match(app, /formatDuration\(Date\.now\(\)-chatPending\.startedAt\)/, 'chat action elapsed time uses the shared duration formatter');
+  const formatDuration = vm.runInNewContext(`${app.slice(formatterStart, formatterEnd)}; formatDuration`) as (ms: number | null | undefined) => string;
+  for (const [ms, expected] of [[37934, '38 s'], [999, '<1 s'], [59999, '59 s'], [60000, '1 min'], [65000, '1 min 05 s'], [189 * 60000, '3 h 09 min'], [3600000, '1 h'], [90000000, '1 d 01 h'], [null, '—'], [-1, '—'], [NaN, '—']] as Array<[number | null, string]>) {
+    assert.equal(formatDuration(ms), expected, `formatDuration(${ms})`);
+  }
+
+  const makeNode = (tag: string, className = '', text = '') => ({ tag, className, text, children: [] as any[], attrs: {} as Record<string, string>, get lastChild() { return this.children.at(-1); }, append(...nodes: any[]) { this.children.push(...nodes); }, setAttribute(name: string, value: string) { this.attrs[name] = value; } });
+  const startedAt = '2026-11-16T08:31:00.000Z';
+  const runStatus = { lastRun: { id: 'last', kind: 'adaptive', startedAt, finishedAt: startedAt, timezone: 'UTC', durationMs: 37934, status: 'completed', provider: 'local', documentsConsidered: 1, proposalsCreated: 0, insightsAccepted: 0, failureReason: null }, currentRun: null, runs: [ { id: 'active', kind: 'adaptive', startedAt, finishedAt: null, timezone: 'UTC', durationMs: null, status: 'running' }, { id: 'long', kind: 'adaptive', startedAt, finishedAt: startedAt, timezone: 'UTC', durationMs: 153 * 60000, status: 'completed' } ], nextRun: { time: null, timezone: 'UTC', trigger: null, whyLater: 'No schedule configured' }, scheduler: { configured: false, enabled: false, worker: { loaded: false, running: false } } };
+  const collect = (item: any): string => [item.text, ...(item.children ?? []).map(collect)].filter(Boolean).join(' ');
+  const pageStart = app.indexOf('async function dreamPage(){'), pageEnd = app.indexOf('\nconst groups=', pageStart);
+  assert.ok(pageStart >= 0 && pageEnd > pageStart, 'Dream renderer is available in served app.js');
+  const page = vm.runInNewContext(`${app.slice(formatterStart, formatterEnd)}; let dreamRelativeTimer; function tickRelativeTimes(){} ${app.slice(pageStart, pageEnd)}; dreamPage`, {
+    node: makeNode,
+    api: async (route: string) => { assert.equal(route, '/api/dream/run-status'); return runStatus; },
+    pageHeader: (title: string, description: string) => makeNode('header', '', `${title} ${description}`),
+    panel: (title: string) => makeNode('section', 'panel', title),
+    relativeTimeNode: (iso: string) => makeNode('span', '', iso),
+    dataTable: (title: string, headers: string[], rows: unknown[][]) => makeNode('table', 'data-table', `${title} ${headers.join(' ')} ${rows.map(row => row.join(' ')).join(' ')}`),
+    fmt: (value: unknown) => String(value ?? '—'), metricPanel: () => makeNode('section'), runAction: () => makeNode('button'), status: { dream: {}, wiki: {}, config: {}, proposals: {} },
+    setInterval: () => 1, clearInterval: () => undefined, Date,
+  }) as () => Promise<any>;
+  const rendered = collect(await page());
+  assert.match(rendered, /Previous run[\s\S]*38 s/);
+  assert.match(rendered, /Running/);
+  assert.match(rendered, /2 h 33 min/);
+});

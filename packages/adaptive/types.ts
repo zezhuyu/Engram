@@ -58,6 +58,7 @@ export interface AdaptiveConfig {
   autoAccept: 'none' | 'low-risk';
   workspaces: { include: string[] | null; exclude: string[] };
   resources: { maxLoadAverage: number; maxRssMiB: number; activityPollMs: number };
+  lowLoadStart: { enabled: boolean; afterMinutesInWindow: number; relaxedInactivityMinutes: number; maxLoadPerCore: number };
   baselineMaxItems: number; maxModelCallsPerCycle: number; dreamMode: 'micro' | 'deep' | 'strategic';
   /** Opt-in, debounced micro Dream after accepted source / insight / wiki changes. Off by default; independent of the daily cycle. */
   micro: { enabled: boolean; debounceMinutes: number; maxPerDay: number; kinds: string[] };
@@ -65,7 +66,7 @@ export interface AdaptiveConfig {
   deadLetterAfterAttempts: number;
 }
 export interface Cursors { workspaces: Record<string, number>; global: number; /** last journal sequence examined by the micro-Dream trigger */ micro?: number; /** last journal sequence scanned for purge events */ purge?: number }
-export interface DayTelemetry { events: number[]; covered: boolean[] }
+export interface DayTelemetry { events: number[]; covered: boolean[]; load?: Array<{ samples: number; meanPerCore: number }> }
 export interface Telemetry { days: Record<string, DayTelemetry>; lastTickAt?: string; lastEventSequence: number; learned?: { startLocal: string; changedOn: string; score: number } }
 export interface Lease { owner: string; pid: number; cycleId: string; expiresAt: string }
 export type SnapshotRef = { cycleId: string; watermark: number; allowPost?: string[] };

@@ -10,14 +10,15 @@ import { getSkipClassification } from './lib/skip-classifications.js';
 import { assertSyntheticEvidenceAllowed, evaluateReleaseEvidence, evaluateProfileGateStatuses } from './lib/release-evaluation.js';
 import { archiveAttestationMatches, currentSourceEvidence } from './lib/source-evidence.js';
 import { inventoryDrift, MANDATORY_SUITE_NAMES } from './lib/suite-inventory.js';
+import { aggregatePlatformEvidence, currentPlatformEvidence, loadPlatformEvidence } from './lib/platform-evidence.js';
 
 process.env.GIT_OPTIONAL_LOCKS = '0';
 
 /**
  * Release aggregator. The decision is computed from machine-readable reports, never from prose. It does NOT run the suites:
- * run `npm run verify:acid|security|search|intelligence|recovery` (and benchmark) first. A missing or stale report is NOT_RUN.
+ * run the mandatory `verify:*` suites on each supported platform first and provide imported reports for other platforms. Missing evidence is NOT_RUN.
  */
-type Status = 'PASS' | 'FAIL' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
+type Status = 'PASS' | 'FAIL' | 'INCOMPLETE' | 'SKIPPED' | 'NOT_RUN' | 'UNSUPPORTED';
 type Area = 'STORAGE' | 'MEMORY' | 'USER_INTELLIGENCE' | 'WIKI' | 'DREAM' | 'QUERY' | 'UNIX' | 'INTELLIGENCE' | 'PERFORMANCE' | 'PLATFORM';
 const AREAS: Area[] = ['STORAGE', 'MEMORY', 'USER_INTELLIGENCE', 'WIKI', 'DREAM', 'QUERY', 'UNIX', 'INTELLIGENCE', 'PERFORMANCE', 'PLATFORM'];
 interface Gate { id: string; title: string; severity: 'P0' | 'P1'; area: Area; status: Status; cases: number; evidence: string; limitation: string }
@@ -61,6 +62,12 @@ if (inventoryDriftFailures.length) {
   for (const failure of inventoryDriftFailures) console.error(`  ${failure}`);
 }
 const matrix = await read<{ supportedPlatforms: string[]; decisionNotes: string[] }>(inputPath('release-matrix.json')) ?? { supportedPlatforms: [], decisionNotes: [] };
+const platformEvidenceDir = process.env.MDB_PLATFORM_REPORTS_DIR ?? 'verification/platform-reports';
+const supportedPlatformEvidence = await Promise.all(matrix.supportedPlatforms.map(platform => platform === process.platform
+  ? currentPlatformEvidence(platform, suites, { inventories: Object.fromEntries(MANDATORY_SUITE_NAMES.map(name => [name, inventoryFor(name)])), trusted: provenance })
+  : loadPlatformEvidence(platformEvidenceDir, platform, { inventories: Object.fromEntries(MANDATORY_SUITE_NAMES.map(name => [name, inventoryFor(name)])), trusted: provenance })));
+const platformStatus = aggregatePlatformEvidence(supportedPlatformEvidence);
+const platformLimitation = supportedPlatformEvidence.map(result => `${result.platform}: ${result.source} (${result.status}${result.status === 'NOT_RUN' ? '; one or more suite reports missing' : ''})`).join('; ');
 type MandatoryStatus = 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NOT_RUN';
 type MandatoryGate = { id: 'PREFERENCES' | 'REMOTE_CAPTURE' | 'AGENT_IDENTITY' | 'DREAM_ENGINE' | 'DREAM_SCHEDULER' | 'DREAM_LEARNING' | 'ADAPTIVE_SCHEDULER' | 'WORKSPACE_DAILY_SUMMARY' | 'WORKSPACE_SCOPED_INSIGHT' | 'GLOBAL_PROFILE_CONSOLIDATION'; status: MandatoryStatus; evidence: string[]; detail: string };
 const mandatory = await read<{ gates: MandatoryGate[] }>('verification/v1-gates.json') ?? { gates: (['PREFERENCES', 'REMOTE_CAPTURE', 'AGENT_IDENTITY', 'DREAM_ENGINE'] as const).map(id => ({ id, status: 'NOT_RUN' as const, evidence: [], detail: 'No v1 gate evidence report exists.' })) };
@@ -128,7 +135,7 @@ const gates: Gate[] = [
   { id: 'S5', title: 'Backup under write load, restore validation, corrupt backup refused', severity: 'P0', area: 'STORAGE', ...fromSuite('recovery'), evidence: 'verification/recovery/report.json', limitation: 'Same host; purge does not reach existing backups' },
   { id: 'S6', title: 'Zero ACL / non-disclosure leaks in tested surfaces', severity: 'P0', area: 'STORAGE', ...fromSuite('security'), evidence: 'verification/security/report.json', limitation: 'Local disk access bypasses ACLs' },
   { id: 'S7', title: 'Filesystem search correct; SQLite parity, stale fallback, corruption fallback, rebuild, integrity checks', severity: 'P0', area: 'STORAGE', ...fromSuite('search'), evidence: 'verification/search/report.json', limitation: 'No ranking-quality or semantic claim' },
-  { id: 'S8', title: 'Supported platforms pass or release is explicitly restricted', severity: 'P0', area: 'PLATFORM', status: matrix.supportedPlatforms.length && matrix.supportedPlatforms.every(p => p === process.platform) && effectiveStatus('platforms') === 'PASS' ? 'PASS' : suites.platforms ? 'FAIL' : 'NOT_RUN', cases: matrix.supportedPlatforms.length + (suites.platforms?.counts.total ?? 0), evidence: 'verification/release-matrix.json, verification/platforms/report.json', limitation: `Supported: ${matrix.supportedPlatforms.join(', ') || 'none declared'}. Linux NOT_RUN, so Linux is NOT a supported release platform.` },
+  { id: 'S8', title: 'All declared supported platforms pass mandatory suites', severity: 'P0', area: 'PLATFORM', status: matrix.supportedPlatforms.length ? platformStatus : 'NOT_RUN', cases: supportedPlatformEvidence.reduce((sum, item) => sum + item.suites.length, 0), evidence: 'fixtures/inputs/release-matrix.json, verification/*/report.json, verification/platform-reports/', limitation: `Supported: ${matrix.supportedPlatforms.join(', ') || 'none declared'}. ${platformLimitation || 'No platform evidence declared.'}` },
   { id: 'S9', title: 'Power-loss durability', severity: 'P0', area: 'STORAGE', status: powerLossStatus, cases: powerLossStatus === 'PASS' ? (powerCut?.points?.length ?? 0) + 1 : 0, evidence: durability ? 'verification/durability/report.json' : '-', limitation: powerLossLimitation },
   { id: 'I1', title: 'Deterministic pipelines (profile, retrospective, critic, privacy, budgets, errors) and provider adapter', severity: 'P0', area: 'INTELLIGENCE', ...fromSuite('intelligence'), evidence: 'verification/intelligence/report.json', limitation: 'Fake and one local real model only' },
   { id: 'M1', title: 'Passive capture: redaction, spool, fail-open hook, identity binding, recall tools (M1)', severity: 'P0', area: 'MEMORY', ...fromSuite('memory'), evidence: 'verification/memory/report.json', limitation: 'Claude and Codex payloads were live-tested; this single-host run does not prove remote cross-machine outage/restart delivery. Codex exec did not dispatch Stop.' },
@@ -163,7 +170,7 @@ gates.push(budget('keyword p95', metricPass(keyword, 150), big && keyword ? `${k
 const inventoryPass = inventoryDriftFailures.length === 0 && mandatorySuitesEffectivePass([...MANDATORY_SUITE_NAMES], suites, Object.fromEntries(MANDATORY_SUITE_NAMES.map(name => [name, inventoryFor(name)])), sourceEvidence.files, provenance);
 const explainedSkips = MANDATORY_SUITE_NAMES.flatMap(name => { const report = suites[name]; return (report?.tests ?? []).filter(test => test.status === 'SKIPPED').map(test => { const classification = getSkipClassification(`${name}/${test.name}`); return `${name}/${test.name}=SKIPPED(${classification?.reviewedBy === 'pending-owner-review' ? 'unreviewed' : classification?.reason ?? 'unclassified'})`; }); });
 gates.push({ id: 'INVENTORY', title: 'All mandatory suite inventories exact and current-platform reports usable', severity: 'P0', area: 'STORAGE', status: inventoryPass ? 'PASS' : 'FAIL', cases: MANDATORY_SUITE_NAMES.length, evidence: 'scripts/lib/suite-inventory.json and verification/*/report.json', limitation: `${inventoryPass ? '' : `${inventoryDriftFailures.length} inventory drift issue(s); every mandatory report must be current, consistent and usable.`}${explainedSkips.length ? ` Allowed skips: ${explainedSkips.join(', ')}.` : ''}` });
-gates.push({ id: 'PLATFORM', title: 'Platform qualification (alias of S8)', severity: 'P0', area: 'PLATFORM', status: gates.find(g => g.id === 'S8')?.status ?? 'NOT_RUN', cases: gates.find(g => g.id === 'S8')?.cases ?? 0, evidence: 'verification/release-matrix.json, verification/platforms/report.json', limitation: 'Alias used by explicit profile matrices.' });
+gates.push({ id: 'PLATFORM', title: 'Platform qualification (alias of S8)', severity: 'P0', area: 'PLATFORM', status: gates.find(g => g.id === 'S8')?.status ?? 'NOT_RUN', cases: gates.find(g => g.id === 'S8')?.cases ?? 0, evidence: 'fixtures/inputs/release-matrix.json, verification/*/report.json, verification/platform-reports/', limitation: platformLimitation || 'Alias used by explicit profile matrices.' });
 
 const verdictFor = (area: Gate['area']) => { const g = gates.filter(x => x.area === area); const p0 = g.filter(x => x.severity === 'P0'); if (p0.some(x => x.status === 'FAIL')) return 'FAIL'; if (p0.some(x => x.status !== 'PASS')) return 'INCOMPLETE'; if (g.some(x => x.status === 'FAIL')) return 'FAIL'; if (g.some(x => x.status !== 'PASS' && x.severity === 'P1')) return area === 'PERFORMANCE' ? 'INCOMPLETE' : 'PASS'; return 'PASS'; };
 const verdicts = Object.fromEntries(AREAS.map(a => [a, verdictFor(a)])) as Record<Area, string>; const storage = verdicts.STORAGE;

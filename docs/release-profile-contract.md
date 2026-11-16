@@ -83,6 +83,22 @@ loops, are rejected.
 
 ## JSON read sites
 
+S8 (also exposed as the PLATFORM alias) requires all 13 mandatory suites to be
+effective PASS on every platform in `fixtures/inputs/release-matrix.json`.
+The qualification runner uses current-run evidence for its own platform and
+imports other platform reports (and their hash-bound
+`source-evidence.json` manifests) from
+`MDB_PLATFORM_REPORTS_DIR/<platform>/<suite>/report.json` (default
+`verification/platform-reports`). Imported reports must be regular non-symlink
+files no larger than 8 MiB, have clean tree state, match the directory and
+suite names, and bind to the exact current commit and source fingerprint. The
+existing inventory and skip hash policy applies independently for that
+platform. Missing reports produce NOT_RUN; malformed, mismatched, or failing
+reports produce FAIL; valid reports with blocking skips produce INCOMPLETE.
+CI transports Darwin reports as a workflow artifact without a signature, so
+the evidence trust boundary is the producing workflow run and artifact
+service, not cryptographic artifact signing.
+
 Release-gate inputs and release evidence below use `parseStrictJson` (directly
 or through `loadSuiteReport` / the release verifier's `read` helper). Other JSON
 decoding remains ordinary `JSON.parse` only for runtime protocol messages,

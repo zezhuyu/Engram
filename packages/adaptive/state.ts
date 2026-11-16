@@ -12,6 +12,7 @@ export const defaultConfig = (): AdaptiveConfig => ({
   enabled: false, paused: false, timezone: systemTimeZone(), targetLocalTime: '03:00', quietStart: '00:00', quietEnd: '07:00', mode: 'adaptive',
   minHistoryDays: 14, historyWindowDays: 28, inactivityMinutes: 60, expectedDurationHours: 2, telemetryRetentionDays: 90, autoAccept: 'none',
   workspaces: { include: null, exclude: [] }, resources: { maxLoadAverage: Math.max(1, os.cpus().length * 0.75), maxRssMiB: 1536, activityPollMs: 500 },
+  lowLoadStart: { enabled: true, afterMinutesInWindow: 90, relaxedInactivityMinutes: 10, maxLoadPerCore: 0.5 },
   baselineMaxItems: 200, maxModelCallsPerCycle: 60, dreamMode: 'deep',
   micro: { enabled: false, debounceMinutes: 10, maxPerDay: 6, kinds: ['user_insight', 'insight', 'wiki_page', 'source'] }, deadLetterAfterAttempts: 5
 });
@@ -25,8 +26,8 @@ export class AdaptiveStore {
   /** Short critical sections only: file IO, never model work. */
   locked<T>(action: () => Promise<T>): Promise<T> { return withVaultLock(this.root, action); }
 
-  async config(): Promise<AdaptiveConfig> { const stored = await this.read<Partial<AdaptiveConfig>>(`${DIR}/config.json`); const base = defaultConfig(); return { ...base, ...stored, resources: { ...base.resources, ...stored?.resources }, workspaces: { ...base.workspaces, ...stored?.workspaces }, micro: { ...base.micro, ...stored?.micro } }; }
-  async setConfig(patch: Partial<AdaptiveConfig>): Promise<AdaptiveConfig> { return this.locked(async () => { const next = { ...(await this.config()), ...patch, resources: { ...(await this.config()).resources, ...patch.resources }, workspaces: { ...(await this.config()).workspaces, ...patch.workspaces }, micro: { ...(await this.config()).micro, ...patch.micro } }; await this.write(`${DIR}/config.json`, next); return next; }); }
+  async config(): Promise<AdaptiveConfig> { const stored = await this.read<Partial<AdaptiveConfig>>(`${DIR}/config.json`); const base = defaultConfig(); return { ...base, ...stored, resources: { ...base.resources, ...stored?.resources }, workspaces: { ...base.workspaces, ...stored?.workspaces }, micro: { ...base.micro, ...stored?.micro }, lowLoadStart: { ...base.lowLoadStart, ...stored?.lowLoadStart } }; }
+  async setConfig(patch: Partial<AdaptiveConfig>): Promise<AdaptiveConfig> { return this.locked(async () => { const config = await this.config(); const next = { ...config, ...patch, resources: { ...config.resources, ...patch.resources }, workspaces: { ...config.workspaces, ...patch.workspaces }, micro: { ...config.micro, ...patch.micro }, lowLoadStart: { ...config.lowLoadStart, ...patch.lowLoadStart } }; await this.write(`${DIR}/config.json`, next); return next; }); }
 
   async cursors(): Promise<Cursors> { return (await this.read<Cursors>(`${DIR}/cursors.json`)) ?? { workspaces: {}, global: 0 }; }
   async advanceCursors(update: (c: Cursors) => void): Promise<Cursors> { return this.locked(async () => { const c = await this.cursors(); update(c); await this.write(`${DIR}/cursors.json`, c); return c; }); }
