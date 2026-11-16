@@ -20,7 +20,7 @@ I want to set up Engram (https://github.com/zezhuyu/Engram), a local Markdown me
    - the other questions the reference lists for the role I pick: vault location, how other machines will reach the server over HTTPS, the server URL and token for a client, workspace name, capture consent, and optional model for Dream
    Wait for my answers.
 
-3. Then install and configure everything yourself: download the release for my OS and chip, install the app, set up the services, create one scoped credential per agent, wire every agent I chose (MCP entry, capture hooks, the Engram instructions block), and verify with the checks in the reference.
+3. Then install and configure everything yourself. Download the pre-built app for my OS and chip from https://github.com/zezhuyu/Engram/releases (the newest release; verify it against SHA256SUMS), install it, set up the services, create one scoped credential per agent, wire every agent I chose (MCP entry, capture hooks, the Engram instructions block), and verify with the checks in the reference.
 
 4. Stop and ask me before you: use sudo, change network exposure, edit shell startup files or agent config I did not mention, enable a remote model, or overwrite anything.
 
