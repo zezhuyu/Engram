@@ -67,6 +67,18 @@ async function recentGatewayWrites(vault: Vault): Promise<Array<{ at: string; ta
   }
   return writes;
 }
+/** Whether Engram should bring the tunnel services up by itself. On unless the owner pressed Stop; Start turns it back on. */
+export async function openAIAutoStart(root: string): Promise<boolean> {
+  try { return (await readStore(root)).openai?.autoStart !== false; } catch { return true; }
+}
+/** Best effort: the service action already succeeded, so a failure to remember the choice must not turn it into an error. */
+async function setOpenAIAutoStart(root: string, enabled: boolean): Promise<void> {
+  try {
+    const store = await readStore(root);
+    if ((store.openai?.autoStart !== false) === enabled) return;
+    await writeStore(root, { ...store, openai: { ...(store.openai ?? {}), autoStart: enabled } });
+  } catch { /* the preference is simply not recorded */ }
+}
 export async function openAIConfig(root: string, vault?: Vault) {
   const all = await readStore(root), saved = all.openai ?? {}, env = await readEnv(path.join(configDir(), 'chatgpt-tunnel.env'));
   const rows: GatewayWorkspace[] = Array.isArray(saved.workspaces) ? saved.workspaces : [];
@@ -337,7 +349,7 @@ export async function openAIStatus(root: string, platform: NodeJS.Platform = pro
   const uptimeMs = tunnelService.pid ? Math.max(0, now - (loggedStart ?? tunnelFirstSeen.get(tunnelService.pid) ?? now)) : null;
   const state = deriveTunnelState({ loaded: tunnelService.loaded, running: tunnelService.running, ready, uptimeMs, failureReason: tunnelFailure, statusUnknown: tunnelService.statusUnknown });
   const failure = state === 'failing' ? tunnelFailure ?? 'Tunnel client is not running; inspect its launch service and recent logs.' : tunnelFailure;
-  return { gateway: { state: keyedGateway.statusUnknown ? 'unknown' : gatewayHealth ? 'healthy' : 'stopped', healthy: !!gatewayHealth, health: gatewayHealth, ...(failureReason ? { failureReason } : {}) }, keyedGateway, tunnelClient: { ...tunnelService, state, ready, healthUrl: healthUrl ?? null, uptimeSeconds: uptimeMs === null ? null : Math.floor(uptimeMs / 1000), failureReason: failure ?? null, lastLogAt: tunnelLogAt, recentLogLines: summary.recentLogLines }, binaryFound: binary.found, profilePresent: !!(await fs.stat(profilePath).catch(() => undefined)), logAgeMs };
+  return { autoStart: await openAIAutoStart(root), gateway: { state: keyedGateway.statusUnknown ? 'unknown' : gatewayHealth ? 'healthy' : 'stopped', healthy: !!gatewayHealth, health: gatewayHealth, ...(failureReason ? { failureReason } : {}) }, keyedGateway, tunnelClient: { ...tunnelService, state, ready, healthUrl: healthUrl ?? null, uptimeSeconds: uptimeMs === null ? null : Math.floor(uptimeMs / 1000), failureReason: failure ?? null, lastLogAt: tunnelLogAt, recentLogLines: summary.recentLogLines }, binaryFound: binary.found, profilePresent: !!(await fs.stat(profilePath).catch(() => undefined)), logAgeMs };
 }
 export type ServiceStatus = { loaded: boolean; running: boolean; pid: number | null; lastExitCode: number | null; restartCount: number | null; statusUnknown?: true };
 export function parseSystemdServiceStatus(output: string, exitCode: number | null): ServiceStatus {
@@ -449,7 +461,7 @@ export function controlOpenAIServices(root: string, action: 'start' | 'stop' | '
 async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'restart', vault?: Vault, platform: NodeJS.Platform = process.platform): Promise<boolean> {
   if (action === 'start') {
     const current = await openAIStatus(root, platform);
-    if (current.gateway.healthy && current.keyedGateway.running && current.tunnelClient.state === 'connected') return true;
+    if (current.gateway.healthy && current.keyedGateway.running && current.tunnelClient.state === 'connected') { await setOpenAIAutoStart(root, true); return true; }
   }
   if (action !== 'stop' && vault) await syncChatGateway(root, vault);
   if (action !== 'stop') {
@@ -472,7 +484,7 @@ async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'resta
       await call(executable, ['--user', operation, label]);
     } else throw new Error('OpenAI tunnel services are supported on macOS and Linux');
   };
-  if (action === 'stop') { await run(labels[1]!, 'stop'); await run(labels[0]!, 'stop'); return false; }
+  if (action === 'stop') { await run(labels[1]!, 'stop'); await run(labels[0]!, 'stop'); await setOpenAIAutoStart(root, false); return false; }
   if (action === 'restart') { await run(labels[1]!, 'stop').catch(() => undefined); await run(labels[0]!, 'restart'); }
   else await run(labels[0]!, 'start');
   if (!await waitForGatewayHealth()) {
@@ -481,9 +493,29 @@ async function runOpenAIServices(root: string, action: 'start' | 'stop' | 'resta
     throw new Error('Gateway did not become healthy. ' + safeGatewayLogLine(log));
   }
   await run(labels[1]!, action === 'restart' ? 'restart' : 'start');
+  await setOpenAIAutoStart(root, true);
   return false;
 }
 export async function restartOpenAIServicesIfRunning(root: string): Promise<void> {
   const statuses = await Promise.all(['dev.engram.keyed-gateway','dev.engram.tunnel-client'].map(label => serviceStatus(label)));
   if (statuses.some(status => status.loaded)) await controlOpenAIServices(root, 'restart');
+}
+
+export type TunnelEnsureResult = { action: 'running' | 'started' | 'disabled' | 'not-configured' | 'unsupported' | 'failed'; detail?: string };
+/**
+ * Bring the ChatGPT tunnel services up when Engram starts, if they are configured and the owner has not stopped them. A service that is already running is left alone,
+ * even while the tunnel is still connecting, so a slow handshake never causes a restart loop. Failures are reported, never thrown.
+ */
+export async function ensureOpenAIServicesRunning(root: string, vault?: Vault, platform: NodeJS.Platform = process.platform): Promise<TunnelEnsureResult> {
+  if (platform !== 'darwin' && platform !== 'linux') return { action: 'unsupported' };
+  try {
+    if (!await openAIAutoStart(root)) return { action: 'disabled' };
+    const missing = await validateOpenAIStart(root);
+    if (missing.length) return { action: 'not-configured', detail: missing.join(', ') };
+    const services = await Promise.all(['dev.engram.keyed-gateway', 'dev.engram.tunnel-client'].map(label => serviceStatus(label, platform)));
+    if (services.some(service => service.statusUnknown)) return { action: 'failed', detail: 'service manager status is unavailable' };
+    if (services.every(service => service.running)) return { action: 'running' };
+    await controlOpenAIServices(root, 'start', vault, platform);
+    return { action: 'started' };
+  } catch (error) { return { action: 'failed', detail: (error as Error).message }; }
 }

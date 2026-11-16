@@ -61,7 +61,8 @@ final class EngramApp: NSObject, NSApplicationDelegate {
             add(menu, "Stop daemon", #selector(stopWorker))
             add(menu, "Show logs", #selector(showLog))
             menu.addItem(.separator())
-            add(menu, "Quit", #selector(quit))
+            add(menu, "Quit Menu Bar App (daemon keeps running)", #selector(quit))
+            add(menu, "Quit Engram Completely…", #selector(quitCompletely))
             item.menu = menu
             do {
                 try prepare()
@@ -85,6 +86,7 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         startupItem = add(menu, "Start at Login", #selector(toggleStartup))
         menu.addItem(.separator())
         add(menu, "Quit Menu Bar App (service keeps running)", #selector(quit))
+        add(menu, "Quit Engram Completely…", #selector(quitCompletely))
         item.menu = menu
         do {
             try prepare()
@@ -337,6 +339,35 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
     @objc func quit() { NSApp.terminate(nil) }
+    /// Stops everything this app role runs, then quits the menu bar app. "Quit Menu Bar App" deliberately leaves the background service alone; this is the way to stop it all.
+    /// Nothing is deleted or reconfigured, and a login item that is still enabled starts the app again at the next login.
+    var launchdLabelsToStop: [String] {
+        role == "client" ? [] : [label, "dev.engram.intelligence-worker", "dev.engram.tunnel-client", "dev.engram.keyed-gateway"]
+    }
+    @objc func quitCompletely() {
+        if bootService {
+            showError(NSError(domain: "Engram", code: 1, userInfo: [NSLocalizedDescriptionKey: "This service starts at system boot. Stop it with the supplied install-macos-boot.mjs uninstall command using sudo, then quit the menu bar app."]))
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Quit Engram \(role.capitalized) completely?"
+        alert.informativeText = role == "client"
+            ? "This stops the delivery daemon, the local dashboard and replica sync, then quits the menu bar app. Memory queued on this Mac waits until Engram starts again."
+            : "This stops the server, its dashboard, the Dream worker and the ChatGPT tunnel, then quits the menu bar app. Other machines cannot reach this server until Engram starts again."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Quit Completely")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        timer?.invalidate()
+        if role == "client" {
+            do { _ = try mdb("stop") } catch { /* quit anyway: an already stopped daemon reports an error */ }
+        } else {
+            // Stop the tunnel and Dream worker first so nothing keeps calling the server while it goes down. The plists stay in place, so nothing is uninstalled.
+            for name in launchdLabelsToStop.reversed() { launchctl(["bootout", "\(domain)/\(name)"]) }
+            if files.fileExists(atPath: workerPlist.path) { try? files.removeItem(at: workerPlist) }
+        }
+        NSApp.terminate(nil)
+    }
 }
 
 let app = NSApplication.shared

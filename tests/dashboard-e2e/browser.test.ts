@@ -55,6 +55,11 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
   vaultRoot = await tempDirectory('engram-dashboard-e2e-vault-');
   profile = await tempDirectory('engram-dashboard-e2e-chrome-');
   const authFile = path.join(vaultRoot, 'auth', 'dashboard.json');
+  // The dashboard under test writes connector files (tunnel ID, API key) under HOME/XDG_CONFIG_HOME. Never let that be the real home: an earlier version of this test
+  // overwrote the developer's real ChatGPT tunnel key with the fake secret below.
+  const isolatedHome = path.join(vaultRoot, 'home'); await mkdir(path.join(isolatedHome, '.config'), { recursive: true });
+  const isolatedEnv: NodeJS.ProcessEnv = { ...process.env, HOME: isolatedHome, XDG_CONFIG_HOME: path.join(isolatedHome, '.config'), XDG_STATE_HOME: path.join(isolatedHome, '.state'), XDG_CACHE_HOME: path.join(isolatedHome, '.cache'), XDG_DATA_HOME: path.join(isolatedHome, '.data'), ENGRAM_TUNNEL_AUTOSTART: 'off' };
+  for (const name of Object.keys(isolatedEnv)) if (/^(ENGRAM_(DATA_DIR|USER_CONFIG|STATE_DIR|CACHE_DIR|OUTBOX|REMOTE_SPOOL|REPLICA_DIR|TOKEN.*|MCP_.*)|MDB_ROOT)$/.test(name)) delete isolatedEnv[name];
   const engram = new Engram(vaultRoot);
   const fakeBin = path.join(vaultRoot, 'fake-bin'); await mkdir(fakeBin, { recursive: true });
   const fakeCli = path.join(fakeBin, 'claude'); await writeFile(fakeCli, '#!/bin/sh\nexit 0\n'); await chmod(fakeCli, 0o755);
@@ -63,7 +68,7 @@ test('dashboard browser end-to-end security and workflow flows', { skip: skipRea
   await engram.close();
   const dashboardPort = await freePort(); browserPort = await freePort();
   dashboard = spawn(process.execPath, [path.join(repository, 'bin/mdb.js'), 'dashboard', '--root', vaultRoot, '--host', '127.0.0.1', '--port', String(dashboardPort)], {
-    cwd: repository, env: { ...process.env, MDB_DASHBOARD_ALERT: 'false', PATH: fakeBin + path.delimiter + (process.env.PATH || ''), MDB_DASHBOARD_AUTH_FILE: authFile, MDB_DASHBOARD_ENABLED: 'true' }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: repository, env: { ...isolatedEnv, MDB_DASHBOARD_ALERT: 'false', PATH: fakeBin + path.delimiter + (process.env.PATH || ''), MDB_DASHBOARD_AUTH_FILE: authFile, MDB_DASHBOARD_ENABLED: 'true' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
   dashboard.stdout?.on('data', chunk => { stdout += String(chunk); });

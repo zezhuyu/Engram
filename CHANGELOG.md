@@ -8,6 +8,11 @@
 - The client navigation is This device, Workspaces, Cached projects, Server, and Settings. The Server form now uses Review changes and Apply changes with a password re-check.
 - The content security policy gained `font-src 'self'`.
 
+- The ChatGPT tunnel services now start with the server dashboard when the connector is set up, are checked every two minutes, and stay off only after the owner presses Stop (`ENGRAM_TUNNEL_AUTOSTART=off` disables this).
+- Both macOS menu bar apps have **Quit Engram Completely…**, which asks first, stops every service that app runs (client: delivery daemon, dashboard, replica sync; server: worker and dashboard, Dream worker, ChatGPT tunnel) and quits. The existing quit item is relabelled and still leaves services running.
+- The server dashboard status pill shows Disconnected, not the last good result, when the backend cannot be reached.
+- Profile domains: Discovered topics list and a Discover now action.
+
 ### Removed
 - Remote administration from the client dashboard: saved dashboard connections, the `X-Engram-Connection` proxy, and the `/api/client/connections` routes.
 

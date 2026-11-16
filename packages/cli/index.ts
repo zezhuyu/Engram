@@ -459,7 +459,7 @@ export async function execute(argv: string[]): Promise<unknown> {
       const requestedHost = text(flags, 'host') ?? (flags['allow-remote'] ? '0.0.0.0' : process.env.MDB_DASHBOARD_HOST ?? '127.0.0.1');
       let dashboard;
       const idleMs = idleMinutes > 0 ? idleMinutes * 60_000 : testIdleMs && testIdleMs >= 1 && testIdleMs <= 60_000 ? testIdleMs : undefined;
-      try { dashboard = await createDashboardServer({ engram: client, host: requestedHost, port, clientMode: !!flags.client, ...(idleMs ? { idleMs } : {}) }); }
+      try { dashboard = await createDashboardServer({ engram: client, host: requestedHost, port, clientMode: !!flags.client, autoStartTunnel: !flags.client, ...(idleMs ? { idleMs } : {}) }); }
       catch (error) { throw new MDBError('INVALID_ARGUMENT', (error as Error).message); }
       const { passwordFilePath, passwordIsSet } = await import('../dashboard/password.js');
       process.stderr.write(`Dashboard password file: ${await passwordFilePath(root)}\n`);

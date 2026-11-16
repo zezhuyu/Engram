@@ -51,7 +51,7 @@ import { cacheDir } from '../memory/context-hook.js';
 import { resolveStoragePath } from '../core/root.js';
 import { getClientServer, previewClientServer, applyClientServer } from './client-server.js';
 import { openRemoteSession } from '../memory/remote-client.js';
-import { openAIConfig, openAIStatus, saveOpenAIConfig, upsertOpenAIWorkspace, removeOpenAIWorkspace, rotateOpenAIWorkspace, controlOpenAIServices, restartOpenAIServicesIfRunning, setOpenAIByNameEnabled, setOpenAIWorkspaceWriteAccess, setOpenAIWriteEnabled, serviceStatus } from './openai-tunnel.js';
+import { ensureOpenAIServicesRunning, openAIConfig, openAIStatus, saveOpenAIConfig, upsertOpenAIWorkspace, removeOpenAIWorkspace, rotateOpenAIWorkspace, controlOpenAIServices, restartOpenAIServicesIfRunning, setOpenAIByNameEnabled, setOpenAIWorkspaceWriteAccess, setOpenAIWriteEnabled, serviceStatus } from './openai-tunnel.js';
 import { anthropicTunnelStatus, saveAnthropicTunnel, generateAnthropicCertificates, controlAnthropicTunnel } from './anthropic-tunnel.js';
 import { readDreamRunStatus } from '../adaptive/dream-status.js';
 import { PROFILE_DOMAINS, validateDomains } from '../profile/domains.js';
@@ -67,7 +67,7 @@ const clientWorkspacesCache = new Map<string, { at: number; value: unknown }>();
 const clientWorkspaceLastKnown = new Map<string, { at: number; rows: ClientWorkspaceRow[] }>();
 const parsedBodies = new WeakMap<IncomingMessage, unknown>();
 type Action = { id: string; type: string; state: 'running' | 'complete' | 'failed' | 'cancelled'; startedAt: string; result?: unknown; error?: string; timer?: NodeJS.Timeout; controller: AbortController };
-export interface DashboardOptions { engram: Engram; host?: string; allowRemote?: boolean; port?: number; token?: string; idleMs?: number; actionTimeoutMs?: number; chatTimeoutMs?: number; rateLimit?: number; failedTokenLimit?: number; sessionIdleMs?: number; sessionMaxAgeMs?: number; maxSessions?: number; urlNoteEnv?: NodeJS.ProcessEnv; authLocation?: DashboardAuthLocationOptions; tlsCert?: string; tlsKey?: string; clientMode?: boolean; resolveHost?: HostResolver; serviceManager?: (action: 'install') => Promise<unknown> }
+export interface DashboardOptions { engram: Engram; /** Start the configured ChatGPT tunnel services with this dashboard and keep them up. The CLI turns it on; tests leave it off. */ autoStartTunnel?: boolean; host?: string; allowRemote?: boolean; port?: number; token?: string; idleMs?: number; actionTimeoutMs?: number; chatTimeoutMs?: number; rateLimit?: number; failedTokenLimit?: number; sessionIdleMs?: number; sessionMaxAgeMs?: number; maxSessions?: number; urlNoteEnv?: NodeJS.ProcessEnv; authLocation?: DashboardAuthLocationOptions; tlsCert?: string; tlsKey?: string; clientMode?: boolean; resolveHost?: HostResolver; serviceManager?: (action: 'install') => Promise<unknown> }
 export interface DashboardHandle { server: Server; host: string; port: number; token: string; close(): Promise<void> }
 const SESSION_IDLE_MS = 12 * 60 * 60_000, SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 export function dashboardEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -344,7 +344,7 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
     return write;
   };
   const idle = options.idleMs && options.idleMs > 0 ? setInterval(() => { if (Date.now() - lastRequest >= options.idleMs!) void close(); }, Math.min(options.idleMs, 60_000)) : undefined; idle?.unref();
-  const close = async () => { if (closed) return; closed = true; if (idle) clearInterval(idle); for (const controller of urlNoteControllers.values()) controller.abort(); await new Promise<void>(resolve => server.close(() => resolve())); if (!clientMode) await engram!.search.close(); };
+  let close = async () => { if (closed) return; closed = true; if (idle) clearInterval(idle); for (const controller of urlNoteControllers.values()) controller.abort(); await new Promise<void>(resolve => server.close(() => resolve())); if (!clientMode) await engram!.search.close(); };
   const runAction = (type: string, work: (signal: AbortSignal) => Promise<unknown>): Action | undefined => {
     const existingId = active.get('action');
     if (existingId) return actions.get(existingId)?.type === type ? actions.get(existingId) : undefined;
@@ -1259,6 +1259,13 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
   await new Promise<void>((resolve, reject) => { server.once('error', error => { const e = error as NodeJS.ErrnoException; reject(e.code === 'EADDRINUSE' ? new Error(`Dashboard address ${host}:${options.port ?? 0} is already in use`) : error); }); server.listen(options.port ?? 0, host, () => { server.removeAllListeners('error'); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('Could not bind dashboard server');
   process.once('SIGINT', () => { void close(); });
+  if (options.autoStartTunnel && !clientMode && process.env.ENGRAM_TUNNEL_AUTOSTART !== 'off') {
+    // Start the tunnel with Engram instead of waiting for a click, then keep checking so a crashed or unloaded service comes back.
+    const ensureTunnel = () => { if (!closed) void ensureOpenAIServicesRunning(stateRoot, options.engram.vault).catch(() => undefined); };
+    const first = setTimeout(ensureTunnel, 3_000), recurring = setInterval(ensureTunnel, 120_000);
+    first.unref(); recurring.unref();
+    const closeServer = close; close = async () => { clearTimeout(first); clearInterval(recurring); await closeServer(); };
+  }
   return { server, host, port: address.port, token, close };
 }
 function addressPort(server: Server): number { const address = server.address(); return address && typeof address !== 'string' ? address.port : -1; }

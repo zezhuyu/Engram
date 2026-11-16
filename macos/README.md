@@ -42,7 +42,7 @@ In the client dashboard, **Server** is the capture endpoint form. It previews ch
 
 For the server, configure its existing `ENGRAM_DATA_DIR`, HTTP credential or OAuth validation settings, and ingress options. HTTP defaults to loopback on port 3333 with the remote-web toolset. Public access still requires authenticated HTTPS ingress.
 
-Use Edit Configuration, then Stop Background Service and Start Background Service to apply changes. Quitting the menu bar app leaves the independently supervised worker running. Start at Login controls future user-login startup; turning it off leaves the currently running worker alive until it is stopped or the session ends. Stopping a worker removes its login worker plist. If Start at Login remains enabled, opening the app at the next login starts it again.
+Use Edit Configuration, then Stop Background Service and Start Background Service to apply changes. Quitting the menu bar app leaves the independently supervised worker running. To stop everything, choose **Quit Engram Completely…**: after a confirmation it stops the worker (and, on a server, the dashboard, the Dream worker and the ChatGPT tunnel) and then quits the app. Nothing is uninstalled; with Start at Login on, the app starts again at the next login. Start at Login controls future user-login startup; turning it off leaves the currently running worker alive until it is stopped or the session ends. Stopping a worker removes its login worker plist. If Start at Login remains enabled, opening the app at the next login starts it again.
 
 ## Startup before user login
 

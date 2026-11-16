@@ -25,6 +25,21 @@ test('macOS app source installs the managed CLI on every app launch and exposes 
   assert.match(shim, /engram-managed-shim v1/);
 });
 
+test('both menu bar apps offer a confirmed full quit that stops every service they run, next to the quit that leaves them running', async () => {
+  const swift = await readFile(new URL('../macos/EngramApp.swift', import.meta.url), 'utf8');
+  assert.match(swift, /"Quit Menu Bar App \(daemon keeps running\)", #selector\(quit\)/);
+  assert.match(swift, /"Quit Menu Bar App \(service keeps running\)", #selector\(quit\)/);
+  assert.equal((swift.match(/"Quit Engram Completely…", #selector\(quitCompletely\)/g) ?? []).length, 2, 'client and server menus both have it');
+  const body = swift.slice(swift.indexOf('@objc func quitCompletely()'), swift.indexOf('let app = NSApplication.shared'));
+  assert.match(body, /alert\.runModal\(\) == \.alertFirstButtonReturn/, 'it asks first and cancel does nothing');
+  assert.match(body, /mdb\("stop"\)/, 'the client daemon, dashboard and replica service are stopped');
+  assert.match(body, /bootout/, 'the server worker and its helpers are stopped');
+  for (const label of ['dev.engram.intelligence-worker', 'dev.engram.tunnel-client', 'dev.engram.keyed-gateway']) assert.ok(swift.includes(label), label);
+  assert.match(body, /NSApp\.terminate/, 'the menu bar app itself quits last');
+  assert.doesNotMatch(body, /removeItem\(at: (?!workerPlist)/, 'nothing but the worker launch definition is removed');
+  assert.match(body, /system boot[\s\S]*sudo/, 'a boot-time service is not stopped without the administrator command');
+});
+
 async function fixture(role, config, mode = 0o600) {
   const root = await mkdtemp(join(tmpdir(), 'engram mac test '));
   const home = join(root, 'home');

@@ -291,6 +291,7 @@ Set these in `server.env`, `client.env`, or the person's shell as noted. Only th
 | `MDB_DASHBOARD_TLS_CERT`, `MDB_DASHBOARD_TLS_KEY` | TLS for a remote dashboard listener |
 | `MDB_DASHBOARD_REMOTE_ADMIN=true` | Allow bearer dashboard credentials from other machines (off by default) |
 | `MDB_DASHBOARD_IDLE_MINUTES`, `MDB_DASHBOARD_UPLOAD_LIMIT_BYTES` | Session idle time, upload size |
+| `ENGRAM_TUNNEL_AUTOSTART=off` | Do not start the configured ChatGPT tunnel services automatically with the server dashboard (default: start them when set up and not stopped by the owner) |
 
 ## Permission strings
 

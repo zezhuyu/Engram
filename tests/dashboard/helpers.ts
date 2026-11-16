@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import { Engram } from '../../packages/sdk/index.js';
 
@@ -11,10 +11,19 @@ export async function disposableVault() {
   const root = await mkdtemp(path.join(testParent, 'engram-dashboard-test-'));
   const priorAuthFile = process.env.MDB_DASHBOARD_AUTH_FILE;
   process.env.MDB_DASHBOARD_AUTH_FILE = path.join(root, '.test-auth', 'auth.json');
+  // A dashboard writes connector files (tunnel ID, API key, launcher scripts) under HOME and XDG_CONFIG_HOME. Point both at the test vault so no test can ever touch the
+  // developer's real ~/.config/engram (a browser test once overwrote a real ChatGPT tunnel key that way).
+  // A test that already pointed HOME somewhere else keeps its own location.
+  const priorHome = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  const touchesRealHome = !process.env.HOME || path.resolve(process.env.HOME) === path.resolve(userInfo().homedir);
+  if (touchesRealHome) {
+    process.env.HOME = path.join(root, '.test-home'); process.env.XDG_CONFIG_HOME = path.join(root, '.test-home', '.config');
+    await mkdir(process.env.XDG_CONFIG_HOME, { recursive: true });
+  }
   const engram = new Engram(root);
   await engram.init({ sqlite: false });
   // A dashboard timer or audit write can still be in flight when the server has just closed; retry the removal instead of failing the test with ENOTEMPTY.
-  return { root, engram, cleanup: async () => { await engram.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); if (priorAuthFile === undefined) delete process.env.MDB_DASHBOARD_AUTH_FILE; else process.env.MDB_DASHBOARD_AUTH_FILE = priorAuthFile; } };
+  return { root, engram, cleanup: async () => { await engram.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); if (priorAuthFile === undefined) delete process.env.MDB_DASHBOARD_AUTH_FILE; else process.env.MDB_DASHBOARD_AUTH_FILE = priorAuthFile; for (const [name, value] of Object.entries(priorHome)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } } };
 }
 export const tempPath = (root: string, ...parts: string[]) => path.join(root, ...parts);
 

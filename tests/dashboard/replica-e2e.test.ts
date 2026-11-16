@@ -20,6 +20,7 @@ import { disposableVault } from './helpers.js';
 test('dashboard replica API reports bounded workspace bytes and resolves a real HTTP conflict without losing either revision', async t => {
   const envRoot = await mkdtemp(path.join(os.tmpdir(), 'engram-dashboard-replica-e2e-'));
   const prior = { ENGRAM_REPLICA_DIR: process.env.ENGRAM_REPLICA_DIR, ENGRAM_TRUST_FILE: process.env.ENGRAM_TRUST_FILE, HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME };
+  process.env.HOME = path.join(envRoot, 'home'); process.env.XDG_CONFIG_HOME = path.join(envRoot, 'home', '.config'); await mkdir(process.env.XDG_CONFIG_HOME, { recursive: true });
   const replicaDir = path.join(envRoot, 'replicas'); process.env.ENGRAM_REPLICA_DIR = replicaDir; process.env.ENGRAM_TRUST_FILE = path.join(envRoot, 'trusted-projects.json');
   const owner = new Engram(path.join(envRoot, 'origin')); await owner.vault.init(); await owner.createWorkspace('proj'); await owner.createWorkspace('alpha');
   await owner.vault.grant('proj', 'replica-agent', ['read', 'write']);
