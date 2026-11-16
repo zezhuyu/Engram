@@ -23,6 +23,7 @@ const stateDir = (env: Record<string, string | undefined> = process.env): string
 async function activityFile(root: string, env: Record<string, string | undefined> = process.env): Promise<string> { const real = await fs.realpath(root).catch(() => path.resolve(root)); return path.join(stateDir(env), 'activity', `${createHash('sha256').update(real).digest('hex').slice(0, 32)}.json`); }
 async function scheduleEnabled(root: string): Promise<boolean> { try { return (JSON.parse(await fs.readFile(await safePath(root, '.mdb/adaptive/config.json'), 'utf8')) as { enabled?: boolean }).enabled === true; } catch { return false; } }
 export async function touchActivity(root: string, now = new Date(), env: Record<string, string | undefined> = process.env): Promise<void> {
+  if (env.MDB_BACKGROUND_PIPELINE === '1') return;
   try {
     if (!(await scheduleEnabled(root))) return;
     await ensureStorageDirectory('state', env);

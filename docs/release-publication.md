@@ -2,6 +2,8 @@
 
 The CI workflow runs release qualification after the Linux GNU, Linux reliability, and macOS jobs succeed on every push or pull request. Untagged commits skip the semantic-tag reachability step and are reported as qualification runs; version tags (`vMAJOR.MINOR.PATCH`, with optional prerelease/build metadata) must point to a commit reachable from `main`. The publish job is scheduled after package creation and qualification succeed. Its first authorization check requires an owner-signed authorization bound to the exact source, commit, and version tag, and the protected `engram-release` environment requires separate owner review. The release-creation command itself is restricted to version-tag refs and creates prereleases.
 
+Release qualification accepts a suite's `SKIPPED` report only when every skip has a reviewed platform-specific or GNU-tool classification matching the runner and the inventory's classification hash. Reviewed real-model and real-host skips remain blocking because they indicate missing required evidence; see the [release profile contract](release-profile-contract.md).
+
 ## Required repository configuration
 
 Before enabling publication, a repository owner must configure the `engram-release` GitHub Actions environment with:

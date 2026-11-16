@@ -152,13 +152,51 @@ export function verifyReleaseAuthorization(
     && trustedSignature(record, publicKey, 'signature');
 }
 
-export interface SuiteEvidenceLike { suite?: string; treeState?: string; status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string; message?: string; detail?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[]; environment?: Record<string, unknown> }
+export interface SuiteEvidenceLike { suite?: string; treeState?: string; status?: string; exitCode?: number | null; counts?: { pass?: number; fail?: number; skipped?: number; total?: number }; tests?: Array<{ name?: string; status?: string; message?: string; detail?: string }>; cases?: number; caseDetails?: Array<{ name?: string; status?: string }>; caseFailures?: unknown[]; environment?: Record<string, unknown>; evidenceSource?: { files?: Record<string, string>; fingerprint?: string }; fingerprint?: string; source?: { fingerprint?: string }; git_commit?: string; commit?: string }
 export interface SuiteInventory { minimumTests: number; requiredTests: string[]; requiredCases: string[]; casesByPlatform?: Record<string, string[]>; allowedSkippedTests?: Record<string, Array<{ name: string; classificationId: string; classificationHash: string }>> }
 /** A suite-level PASS cannot erase an individual skipped mandatory test. */
 export function suiteEvidenceStatus(report: SuiteEvidenceLike | undefined): string {
   if (!report) return 'NOT_RUN';
   if (report.status === 'PASS' && report.tests?.some(test => test.status === 'SKIPPED')) return 'SKIPPED';
   return report.status ?? 'NOT_RUN';
+}
+/** Apply reviewed platform skip policy without changing the suite runner's recorded status. */
+export function effectiveSuiteStatus(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined, context?: { currentFiles: Record<string, string>; trusted?: Pick<TrustedProvenance, 'fingerprint' | 'commit'>; registry?: { get: typeof getSkipClassification; hash: typeof skipClassificationHash } }): string {
+  if (!report || !inventory) return 'NOT_RUN';
+  if (report.status !== 'SKIPPED') return report.status ?? 'NOT_RUN';
+  if (report.exitCode !== 0 || !report.tests?.length || report.tests.some(test => test.status === 'FAIL')
+    || report.caseFailures?.length !== 0 || report.caseDetails?.some(test => test.status === 'FAIL')
+    || report.counts?.fail !== 0 || report.counts.skipped !== report.tests.filter(test => test.status === 'SKIPPED').length) return 'SKIPPED';
+  if (!context || !['clean', 'no-git'].includes(String(report.treeState))
+    || !sourceEvidenceMatches(report, context.currentFiles, context.trusted)
+    || !suiteReportConsistent(report, inventory, false, undefined, true)) return 'SKIPPED';
+  const platform = typeof report.environment?.platform === 'string' ? report.environment.platform : '';
+  const skipped = report.tests.filter(test => test.status === 'SKIPPED');
+  const allowed = inventory.allowedSkippedTests?.[platform] ?? [];
+  const entries = new Map(allowed.map(item => [item.name, item]));
+  const registry = context.registry ?? { get: getSkipClassification, hash: skipClassificationHash };
+  const acceptable = skipped.length > 0 && skipped.every(test => {
+    if (!test.name) return false;
+    const classification = registry.get(entries.get(test.name)?.classificationId ?? '');
+    const item = entries.get(test.name);
+    return !!classification && !!item && classification.test === test.name
+      && (!report.suite || classification.suite === report.suite)
+      && classification.platforms.includes(platform)
+      && (classification.class === 'platform-specific' || classification.class === 'gnu-tools')
+      && classification.reviewedBy !== 'pending-owner-review'
+      && registry.hash(classification) === item.classificationHash;
+  });
+  return acceptable ? 'PASS' : 'SKIPPED';
+}
+export function suiteDerivedGateStatus(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined, currentFiles: Record<string, string>, trusted: Pick<TrustedProvenance, 'fingerprint' | 'commit'>, caseStatuses: Array<string | undefined>, missingEvidence = false): 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NOT_RUN' {
+  if (!report) return 'NOT_RUN';
+  const suiteStatus = effectiveSuiteStatus(report, inventory, { currentFiles, trusted });
+  if (suiteStatus !== 'PASS') return suiteStatus === 'FAIL' ? 'FAIL' : 'INCOMPLETE';
+  if (caseStatuses.some(status => status === 'FAIL')) return 'FAIL';
+  return !missingEvidence && caseStatuses.length > 0 && caseStatuses.every(status => status === 'PASS') ? 'PASS' : 'INCOMPLETE';
+}
+export function mandatorySuitesEffectivePass(names: string[], reports: Record<string, SuiteEvidenceLike | undefined>, inventories: Record<string, SuiteInventory | undefined>, currentFiles: Record<string, string>, trusted: Pick<TrustedProvenance, 'fingerprint' | 'commit'>): boolean {
+  return names.every(name => effectiveSuiteStatus(reports[name], inventories[name], { currentFiles, trusted }) === 'PASS');
 }
 export function suiteReportConsistent(report: SuiteEvidenceLike | undefined, inventory: SuiteInventory | undefined, allowPending = process.env.MDB_ALLOW_PENDING_SKIP_CLASSIFICATIONS === '1', profile?: ReleaseProfileName, requireTrustedTree = false): boolean {
   // Arithmetic consistency alone cannot establish suite completeness: an
@@ -397,4 +435,4 @@ export function classifyRelease(input: PolicyInput, trustedPublicKey?: string): 
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import { getSkipClassification, skipClassificationHash, GENERIC_SKIP_REASON } from './skip-classifications.js';
+import { getSkipClassification, skipClassificationHash, GENERIC_SKIP_REASON, type SkipClassification } from './skip-classifications.js';

@@ -150,6 +150,7 @@ function number(flags: Flags, name: string): number | undefined { const value = 
 const list = (flags: Flags, name: string): string[] | undefined => text(flags, name)?.split(',').map(s => s.trim()).filter(Boolean);
 /** `mdb memory ...`: passive capture hook, spool draining, adapters, and on-demand recall. */
 async function memoryCommand(client: Engram, root: string, sub: string | undefined, third: string | undefined, flags: Flags): Promise<unknown> {
+  if (process.env.MDB_BACKGROUND_PIPELINE === '1' && ['capture', 'context', 'handoff-check'].includes(sub ?? '')) return '';
   if (sub === 'capture') { // lifecycle hook: silent, fail-open, never touches the vault or a model
     try {
       const input = await readStdin();
@@ -785,7 +786,7 @@ export async function execute(argv: string[]): Promise<unknown> {
     case 'backup': if (sub === 'restore') { const restored = await Vault.restoreBackup(required(third, 'source'), required(fourth, 'destination')); const { bumpEpoch } = await import('../replication/feed.js'); const epoch = await bumpEpoch(); return { root: restored.root, serverEpoch: epoch, replicasMustResync: true }; } return v.backup(resolve(id()));
   }
   throw new MDBError('INVALID_ARGUMENT', 'Unknown command. Run mdb help.');
-  } finally { process.removeListener('SIGINT', interrupt); try { if (command!=='replica'&&!selectedReplica && !(command === 'init' && flags['dry-run']) && !(command === 'project' && sub === 'unbind') && !['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third)) await touchActivity(root); } finally { await client.close(); } }
+  } finally { process.removeListener('SIGINT', interrupt); try { if (command!=='replica'&&!selectedReplica && !(command === 'init' && flags['dry-run']) && !(command === 'project' && sub === 'unbind') && !['init', 'help', 'intelligence'].includes(command) && !isReadOnlyCommand(command, sub, third) && process.env.MDB_BACKGROUND_PIPELINE !== '1') await touchActivity(root); } finally { await client.close(); } }
 }
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const unix = detectUnix(argv); if (unix) { process.exitCode = await unixMain(unix.command, unix.rest, unix.root); process.stdin.destroy(); return; } // Unix-style text tools: own option parsing and exit codes (docs/unix.md)

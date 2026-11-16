@@ -63,6 +63,8 @@ export function cliChildEnvironment(binary: string, source: NodeJS.ProcessEnv = 
     if (overrides.baseUrl) env.ANTHROPIC_BASE_URL = overrides.baseUrl;
     if (overrides.apiKey) env.ANTHROPIC_API_KEY = overrides.apiKey;
   } else {
+    // The Dream's model child must not execute host-installed hooks or inherit their side effects.
+    env.MDB_BACKGROUND_PIPELINE = '1';
     if (overrides.apiKey) env.OPENAI_API_KEY = overrides.apiKey;
   }
   return env;
@@ -71,7 +73,7 @@ export function cliChildEnvironment(binary: string, source: NodeJS.ProcessEnv = 
 /** Non-interactive argument vectors. Tools are disabled / sandboxed read-only, nothing is persisted, and the prompt travels on stdin, never in argv. */
 export function cliArguments(kind: CliKind, options: { model?: string; extraArgs?: string[]; outputFile?: string; cwd: string }): string[] {
   if (kind === 'claude') return ['-p', '--output-format', 'text', '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--setting-sources', '', ...(options.model ? ['--model', options.model] : []), ...(options.extraArgs ?? [])];
-  return ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '--color', 'never', '-C', options.cwd, ...(options.outputFile ? ['-o', options.outputFile] : []), ...(options.model ? ['-m', options.model] : []), ...(options.extraArgs ?? []), '-'];
+  return ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '--color', 'never', '-C', options.cwd, ...(options.outputFile ? ['-o', options.outputFile] : []), ...(options.model ? ['-m', options.model] : []), ...(options.extraArgs ?? []), '--ignore-user-config', '--disable', 'hooks', '-c', 'project_doc_max_bytes=0', '-'];
 }
 
 /** Runs a local coding-agent CLI (claude or codex) as a one-shot text generator. The CLI is treated like any other untrusted model. */

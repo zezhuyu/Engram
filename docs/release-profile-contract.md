@@ -60,13 +60,15 @@ Mandatory skipped tests are described in the tracked
 `scripts/lib/skip-classifications.json` registry. Inventory entries point to a
 classification ID and SHA-256 hash; the verifier checks its suite, platform,
 prerequisite, reason, profile scope and review status. A classification applies
-only to profiles named in `requiredByProfiles`. A skip remains `SKIPPED` and
-keeps the mandatory suite gate non-PASS. The suite runner reports `SKIPPED`
-whenever any top-level test is skipped; only a suite with no skips can report
-`PASS`. A successful process exit (`exitCode: 0`) does not turn skipped
-coverage into passing evidence. The inventory may still capture a structurally
-valid `SKIPPED` report for review, but release policy does not treat it as
-`GO`-equivalent evidence for the skipped test.
+only to profiles named in `requiredByProfiles`. The suite runner retains
+`SKIPPED` whenever any top-level test is skipped. Release policy treats that
+report as effective `PASS` only when it is otherwise successful, structurally
+consistent, current-source and clean-tree, and every skip has a reviewed
+`platform-specific` or `gnu-tools` classification for that platform bound to
+the inventory hash. Reviewed `real-model` and `real-host` skips remain blocking:
+they represent missing required evidence. Missing, pending, wrong-platform,
+unclassified, or hash-mismatched skips also remain non-PASS. A successful
+process exit (`exitCode: 0`) alone does not make a skip acceptable.
 `pending-owner-review` is not an approval. Other `reviewedBy` values are still self-asserted; authenticating them requires the owner-controlled approver identity/key decision (O-01). `MDB_ALLOW_PENDING_SKIP_CLASSIFICATIONS=1`
 permits local inventory development diagnostics only; release verification
 remains fail-closed by default.
