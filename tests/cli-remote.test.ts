@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path, { resolve } from 'node:path';
 import { Engram } from '../packages/sdk/index.js';
@@ -18,7 +18,7 @@ import { recordCase } from './helpers/report.js';
 type Cleanup = { after(fn: () => void | Promise<void>): void };
 const MCP = resolve('bin/mdb-mcp.js'), MDB = resolve('bin/mdb.js');
 const freePort = () => new Promise<number>(res => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as { port: number }).port; s.close(() => res(p)); }); });
-async function world(t: Cleanup) {
+async function world(t: Cleanup, toolset?: string) {
   const root = await mkdtemp(path.join(tmpdir(), 'engram-cli-remote-root-'));
   let child: ChildProcess | undefined;
   const stop = async () => { const c = child; child = undefined; if (c) await stopOwnedChildProcess(c, 2_000); };
@@ -29,7 +29,7 @@ async function world(t: Cleanup) {
   const owner = new Engram(root); await owner.vault.init(); await owner.createWorkspace('proj');
   const cred = await createHttpCredential(owner.vault, 'agent-cli', ['workspace:proj:read', 'workspace:proj:write']); await owner.vault.grant('proj', 'agent-cli', ['read', 'write']);
   const port = await freePort(); const url = `http://127.0.0.1:${port}/mcp`;
-  const start = async () => { const c = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: String(port) } }); child = c; let err = ''; await new Promise<void>((res, rej) => { c.stderr!.setEncoding('utf8'); c.stderr!.on('data', (d: string) => { err += d; if (/MCP HTTP listening/.test(err)) res(); }); c.once('exit', code => rej(new Error(`server exit ${code}`))); }); };
+  const start = async () => { const c = spawn(process.execPath, [MCP, '--root', root], { env: { ...process.env, MDB_MCP_TRANSPORT: 'http', MDB_MCP_HTTP_HOST: '127.0.0.1', MDB_MCP_HTTP_PORT: String(port), ...(toolset ? { MDB_MCP_TOOLSET: toolset } : {}) } }); child = c; let err = ''; await new Promise<void>((res, rej) => { c.stderr!.setEncoding('utf8'); c.stderr!.on('data', (d: string) => { err += d; if (/MCP HTTP listening/.test(err)) res(); }); c.once('exit', code => rej(new Error(`server exit ${code}`))); }); };
   await start();
   const base = await mkdtemp(path.join(tmpdir(), 'engram-cli-remote-')); t.after(() => rm(base, { recursive: true, force: true }));
   const env = { ...process.env, TK: cred.token, ENGRAM_OUTBOX: path.join(base, 'outbox'), ENGRAM_TRUST_FILE: path.join(base, 'trust.json'), ENGRAM_USER_CONFIG: path.join(base, 'user.json'), ENGRAM_CACHE_DIR: path.join(base, 'cache'), ENGRAM_REMOTE_SPOOL: path.join(base, 'spool') } as NodeJS.ProcessEnv; delete env.ENGRAM_URL;
@@ -100,4 +100,55 @@ test('inside a project bound to a server the plain commands go to that server wi
   const viaEnv = w.mdb(['search', 'BOUND-4419', '--json'], { env: { ...w.env, ENGRAM_URL: w.url, ENGRAM_TOKEN_ENV: 'TK' } }); assert.ok(JSON.stringify(viaEnv.json).includes('BOUND-4419'));
   const noToken = w.mdb(['search', 'x', '--json'], { cwd: dir, env: { ...w.env, TK: '' } }); assert.notEqual(noToken.status, 0); assert.match(noToken.stderr, /TK is not set/);
   recordCase({ suite: 'cli', name: 'remote-mode-bound-project-and-overrides', status: 'PASS' });
+});
+
+test('on a Client-only machine a bare mdb command talks to the server and never builds a private vault; a machine with server config, --local and --root stay local', async t => {
+  const w = await world(t);
+  const home = path.join(w.base, 'client-home'), config = path.join(home, '.config', 'engram'), localVault = path.join(home, '.Engram');
+  await mkdir(config, { recursive: true });
+  const tokenFile = path.join(config, 'client.token'); await writeFile(tokenFile, w.env.TK + '\n', { mode: 0o600 });
+  await writeFile(path.join(config, 'client.env'), `ENGRAM_MCP_URL=${w.url}\nENGRAM_TOKEN_FILE=${tokenFile}\nENGRAM_WORKSPACE=proj\n`, { mode: 0o600 });
+  const env = { ...w.env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.config') } as NodeJS.ProcessEnv; delete env.ENGRAM_URL; delete env.ENGRAM_TOKEN; delete env.MDB_ROOT; delete env.ENGRAM_DATA_DIR;
+  const mdb = (args: string[], over: NodeJS.ProcessEnv = env) => w.mdb(args, { env: over });
+
+  // No server flag, no environment variable, no project: the Client's saved URL and token file are used.
+  const put = mdb(['put', '--kind', 'note', '--title', 'Client machine note', '--body', 'CLIENTONLY-4821 written with a bare mdb command.', '--json']); assert.equal(put.status, 0, put.stderr);
+  const id = put.json.id as string; assert.ok(id);
+  assert.equal(mdb(['get', id, '--json']).json.body, 'CLIENTONLY-4821 written with a bare mdb command.');
+  assert.equal((await w.owner.vault.get(id)).body, 'CLIENTONLY-4821 written with a bare mdb command.', 'the note is in the SERVER vault');
+  assert.ok(JSON.stringify(mdb(['workspace', 'list', '--json']).json).includes('proj'));
+  await assert.rejects(access(localVault), 'no local vault was created on the client machine');
+
+  // --local keeps a command on a local vault, even on a client machine.
+  const local = path.join(w.base, 'forced-local'); assert.equal(mdb(['init', '--root', local, '--no-sqlite']).status, 0);
+  assert.equal(JSON.stringify(mdb(['workspace', 'list', '--root', local, '--json']).json).includes('proj'), false, '--root means the local vault');
+
+  // A machine that also has Server configuration keeps working on its own vault.
+  await writeFile(path.join(config, 'server.env'), 'MDB_MCP_HTTP_PORT=3333\n', { mode: 0o600 });
+  const serverMachine = mdb(['workspace', 'list', '--json'], { ...env, MDB_ROOT: local });
+  assert.equal(JSON.stringify(serverMachine.json).includes('proj'), false, 'with server.env the command is local');
+  await rm(path.join(config, 'server.env'));
+
+  // A token file anyone else could read is refused with a clear message instead of being sent.
+  await chmod(tokenFile, 0o644);
+  const unsafe = mdb(['workspace', 'list', '--json']); assert.notEqual(unsafe.status, 0); assert.match(unsafe.stderr, /token file .* mode 0600 or 0400/);
+});
+
+test('against the production remote-web tool set a Client-only machine runs the everyday commands through the engram_* tools, and says plainly what that server cannot do', async t => {
+  const w = await world(t, 'remote-web');
+  const home = path.join(w.base, 'web-home'), config = path.join(home, '.config', 'engram'); await mkdir(config, { recursive: true });
+  const tokenFile = path.join(config, 'client.token'); await writeFile(tokenFile, w.env.TK + '\n', { mode: 0o600 });
+  await writeFile(path.join(config, 'client.env'), `ENGRAM_MCP_URL=${w.url}\nENGRAM_TOKEN_FILE=${tokenFile}\nENGRAM_WORKSPACE=proj\n`, { mode: 0o600 });
+  const env = { ...w.env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.config') } as NodeJS.ProcessEnv; delete env.ENGRAM_URL; delete env.ENGRAM_TOKEN; delete env.MDB_ROOT; delete env.ENGRAM_DATA_DIR;
+  const mdb = (args: string[]) => w.mdb(args, { env });
+  const put = mdb(['put', '--kind', 'note', '--title', 'Web toolset note', '--body', 'WEBSET-9913 written through engram_create.', '--workspace', 'proj', '--json']); assert.equal(put.status, 0, put.stderr);
+  const id = (put.json.id ?? put.json.objectId) as string; assert.ok(id, JSON.stringify(put.json));
+  assert.equal((await w.owner.vault.get(id)).body, 'WEBSET-9913 written through engram_create.', 'the note is on the server');
+  const got = mdb(['get', id, '--json']); assert.equal(got.status, 0, got.stderr); assert.equal(got.json.body, 'WEBSET-9913 written through engram_create.');
+  assert.equal(mdb(['history', id, '--json']).status, 0);
+  assert.ok(JSON.stringify(mdb(['search', 'WEBSET-9913', '--scope', 'workspace:proj', '--json']).json).includes('WEBSET-9913'));
+  const patched = mdb(['patch', id, '--revision', got.json.revisionId, '--body', 'WEBSET-9913 edited.', '--json']); assert.equal(patched.status, 0, patched.stderr);
+  assert.equal(mdb(['memory', 'recent', '--workspace', 'proj', '--limit', '3', '--json']).status, 0);
+  assert.equal(mdb(['capabilities', '--json']).status, 0);
+  const unsupported = mdb(['workspace', 'list', '--json']); assert.notEqual(unsupported.status, 0); assert.match(unsupported.stderr, /not available through this server's remote tool set/);
 });

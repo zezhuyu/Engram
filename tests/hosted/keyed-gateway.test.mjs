@@ -47,7 +47,7 @@ test('ChatGPT defaults to personal, resolves readable names, and rejects scope o
       { name: 'engram_chat_recent', description: 'Recent chats', inputSchema: { properties: { limit: { type: 'number' } }, required: [] } },
       { name: 'engram_chat_find', description: 'Find chats', inputSchema: { properties: { query: { type: 'string' } }, required: ['query'] } },
       { name: 'engram_preference_record', description: 'Record preference', inputSchema: { properties: { claim: { type: 'string' } }, required: ['claim'] } }
-    ] } : { content: [{ type: 'text', text: message.params?.arguments?.objectId ? JSON.stringify({ workspace_id: message.params.arguments.objectId === 'beta-object' ? 'beta' : 'alpha' }) : 'fixture result' }] };
+    ] } : { content: [{ type: 'text', text: message.params?.arguments?.objectId ? JSON.stringify({ id: message.params.arguments.objectId, scope: message.params.arguments.objectId === 'profile-object' ? { type: 'global', area: 'profile' } : message.params.arguments.objectId === 'secret-object' ? { type: 'workspace', workspaceId: 'zeta' } : { type: 'workspace', workspaceId: message.params.arguments.objectId === 'beta-object' ? 'beta' : 'alpha' } }) : 'fixture result' }] };
     res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'dynamic-session' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
   });
   const upstreamPort = await listen(upstream); t.after(() => close(upstream));
@@ -100,6 +100,21 @@ test('ChatGPT defaults to personal, resolves readable names, and rejects scope o
   assert.equal(sameWorkspaceObject.result.isError, undefined);
   const otherWorkspaceObject = await call(12, 'engram_get', { workspace: 'alpha', objectId: 'beta-object' });
   assert.equal(otherWorkspaceObject.result.content[0].text, 'Workspace not found.');
+  // No workspace named: the object's own workspace is found, but only among the names the gateway exposes.
+  assert.equal((await call(30, 'engram_get', { objectId: 'alpha-object' })).result.isError, undefined, 'a get without workspace resolves alpha');
+  assert.equal((await call(31, 'engram_get', { objectId: 'beta-object' })).result.isError, undefined, 'a get without workspace resolves beta');
+  assert.equal((await call(32, 'engram_get', { objectId: 'profile-object' })).result.isError, undefined, 'a profile hit opens without repeating workspace');
+  assert.equal(forwarded.at(-1).auth, `Bearer ${tokens.project}`, 'profile objects are read with the dynamic credential');
+  assert.equal((await call(33, 'engram_get', { objectId: 'secret-object' })).result.content[0].text, 'Workspace not found.', 'a workspace the gateway does not expose stays hidden');
+  assert.equal((await call(34, 'engram_get', { objectId: 'mdb://workspaces/alpha/objects/alpha-object' })).result.isError, undefined, 'a URI is accepted as the object id');
+  assert.equal(forwarded.some(item => item.params?.arguments?.objectId === 'alpha-object'), true, 'the forwarded call carries the bare object id');
+  // Profile preferences come back in every workspace's projection, so they open under the workspace that returned them, read with the dynamic credential...
+  assert.equal((await call(35, 'engram_get', { workspace: 'alpha', objectId: 'profile-object' })).result.isError, undefined, 'a profile object opens under an explicit workspace');
+  assert.equal(forwarded.at(-1).auth, `Bearer ${tokens.project}`);
+  assert.equal((await call(36, 'engram_get', { workspace: 'personal', objectId: 'profile-object' })).result.isError, undefined);
+  // ...but they can never be changed through a workspace name, and other workspaces' objects stay refused.
+  assert.equal((await call(37, 'engram_patch', { workspace: 'personal', objectId: 'profile-object', expectedRevisionId: 'r1', idempotencyKey: 'patch-2' })).result.content[0].text, 'Workspace not found.', 'profile objects are read-only here');
+  assert.equal((await call(38, 'engram_get', { workspace: 'alpha', objectId: 'secret-object' })).result.content[0].text, 'Workspace not found.');
   const crossWorkspacePatch = await call(13, 'engram_patch', { workspace: 'gamma', objectId: 'beta-object', expectedRevisionId: 'r1', idempotencyKey: 'patch-1' });
   assert.equal(crossWorkspacePatch.result.content[0].text, 'Workspace not found.');
 });

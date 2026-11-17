@@ -277,7 +277,16 @@ final class EngramApp: NSObject, NSApplicationDelegate {
         // launchd reads this at the next login; the current UI is already running.
     }
     var bootService: Bool { launchctl(["print", "system/org.engram.\(role).boot"]).0 == 0 }
+    /// "Quit Engram Completely" stops the Dream worker along with the server worker. Opening the app must bring back every helper agent that is installed, or the nightly Dream run silently stops until the next login.
+    func restoreHelperAgents() {
+        guard role == "server" else { return }
+        for name in ["dev.engram.intelligence-worker"] {
+            let plist = agentDir.appendingPathComponent("\(name).plist")
+            if files.fileExists(atPath: plist.path), launchctl(["print", "\(domain)/\(name)"]).0 != 0 { launchctl(["bootstrap", domain, plist.path]) }
+        }
+    }
     func startService() throws {
+        restoreHelperAgents()
         if bootService { return }
         let loaded = launchctl(["print", "\(domain)/\(label)"]).0 == 0
         try writePlist(workerDefinition(), workerPlist)

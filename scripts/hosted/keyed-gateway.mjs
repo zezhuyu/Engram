@@ -55,7 +55,7 @@ async function up(entry, method, params, id = 1, sessionId) {
 let toolCache;
 const SCOPE_FIELDS = ['scope', 'scopes'];
 const workspaceNames = [...new Set([...entries.map(e => e.name), ...(allowAnyWorkspaceByName ? dynamicNames : []), 'profile', 'user-insight', 'wiki'])];
-const withWorkspace = tool => ({ ...tool, description: `${tool.description ?? ''} Engram stores ChatGPT’s shared memory in personal: conversations are in chat and stated or accepted preferences are in preferences. Omit the workspace to use personal. Start a new conversation unless the user explicitly asks to continue a specific one. Use engram_project_projection for relevant project context instead of requesting the whole database.`.trim(), inputSchema: { ...tool.inputSchema, properties: { workspace: { type: 'string', description: `Memory space name. Omit to use personal. Reserved names: profile and user-insight. Reachable names: ${workspaceNames.join(', ')}.`, enum: workspaceNames }, ...Object.fromEntries(Object.entries(tool.inputSchema?.properties ?? {}).filter(([k]) => ![...SCOPE_FIELDS, 'workspaceId', 'collectionId', 'collection'].includes(k))) }, required: (tool.inputSchema?.required ?? []).filter(k => ![...SCOPE_FIELDS, 'workspaceId', 'collectionId', 'collection'].includes(k)) } });
+const withWorkspace = tool => ({ ...tool, description: `${tool.description ?? ''} Engram stores ChatGPT’s shared memory in personal: conversations are in chat and stated or accepted preferences are in preferences. Omit the workspace to use personal. Start a new conversation unless the user explicitly asks to continue a specific one. Accepted profile statements are under the reserved workspace name profile: pass workspace profile to search them. engram_get takes the objectId from a search result and finds its workspace by itself when you omit workspace. Use engram_project_projection for relevant project context instead of requesting the whole database.`.trim(), inputSchema: { ...tool.inputSchema, properties: { workspace: { type: 'string', description: `Memory space name. Omit to use personal. Reserved names: profile and user-insight. Reachable names: ${workspaceNames.join(', ')}.`, enum: workspaceNames }, ...Object.fromEntries(Object.entries(tool.inputSchema?.properties ?? {}).filter(([k]) => ![...SCOPE_FIELDS, 'workspaceId', 'collectionId', 'collection'].includes(k))) }, required: (tool.inputSchema?.required ?? []).filter(k => ![...SCOPE_FIELDS, 'workspaceId', 'collectionId', 'collection'].includes(k)) } });
 const forceScope = (entry, name, args) => { if (!entry.scope) return args; const out = { ...args }; for (const key of [...SCOPE_FIELDS, 'workspaceId', 'collectionId']) delete out[key]; if (name === 'engram_search') out.scopes = [entry.scope]; else if (name === 'engram_create' || name === 'engram_capabilities') out.scope = entry.scope; else if (name === 'engram_project_projection' && entry.scope.type === 'workspace') out.workspaceId = entry.scope.workspaceId; return out; };
 const objectInScope = async (entry, objectId, backendSession, requestId) => {
   const response = await up(entry, 'tools/call', { name: 'engram_get', arguments: { objectId } }, requestId, backendSession);
@@ -64,8 +64,26 @@ const objectInScope = async (entry, objectId, backendSession, requestId) => {
   try {
     const document = JSON.parse(result.content?.find(item => item.type === 'text')?.text ?? 'null');
     if (entry.scope.type === 'global') return document?.scope?.type === 'global' && document?.scope?.area === entry.scope.area;
+    // Engram documents carry their location in `scope`; `workspace_id` is only the legacy field name.
+    if (document?.scope?.type === 'workspace') return document.scope.workspaceId === entry.scope.workspaceId;
     return document?.workspace_id === entry.scope.workspaceId && !document?.area;
   } catch { return false; }
+};
+// ChatGPT may pass the object's URI where an object ID is expected; accept both forms.
+const normalizeObjectId = raw => { const m = /\/objects\/([^/?#]+)/.exec(String(raw)); return String(raw).startsWith('mdb://') && m ? m[1] : raw; };
+// engram_get/patch with no workspace named: find which exposed name the object really belongs to (a workspace this gateway lists, or the reserved profile/wiki areas)
+// so a search hit from `profile` can be opened without repeating the workspace. It only maps to names the gateway already exposes; the normal scope check still runs after.
+const resolveObjectName = async (objectId, clientSession, requestId) => {
+  if (!dynamicToken) return undefined;
+  const probe = { name: 'resolve', token: dynamicToken, tokenEnv: dynamicTokenEnv, window: [] };
+  const backendSession = clientSession ? await upstreamSession(probe, clientSession) : undefined;
+  const result = JSON.parse((await up(probe, 'tools/call', { name: 'engram_get', arguments: { objectId } }, requestId, backendSession)).text).result;
+  if (!result || result.isError) return undefined;
+  let document; try { document = JSON.parse(result.content?.find(item => item.type === 'text')?.text ?? 'null'); } catch { return undefined; }
+  const where = document?.scope;
+  if (where?.type === 'workspace') return lookup(where.workspaceId) ? where.workspaceId : undefined;
+  if (where?.type === 'global' && ['profile', 'wiki'].includes(where.area)) return lookup(where.area) ? where.area : undefined;
+  return undefined;
 };
 // A read-only entry must not tell the chat that writes are possible: Engram reports the credential's own access, the gateway narrows it.
 const readOnlyCapabilities = result => {
@@ -95,9 +113,14 @@ async function handle(msg, remote, sessionId) {
   if (msg.method === 'tools/list') return reply({ tools: await tools(sessionId) });
   if (msg.method === 'tools/call') {
     const { name, arguments: args = {} } = msg.params ?? {}; const { workspace, ...rest } = args;
-    const selectedWorkspace = workspace === undefined ? (name === 'engram_project_projection' && typeof rest.workspaceId === 'string' ? rest.workspaceId : 'personal') : workspace;
+    if ((name === 'engram_get' || name === 'engram_patch') && typeof rest.objectId === 'string') rest.objectId = normalizeObjectId(rest.objectId);
+    let selectedWorkspace = workspace === undefined ? (name === 'engram_project_projection' && typeof rest.workspaceId === 'string' ? rest.workspaceId : 'personal') : workspace;
     if (typeof selectedWorkspace !== 'string' || !/^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$/.test(selectedWorkspace) || Object.keys(rest).some(key => ['scope', 'scopes', 'workspaceId', 'collectionId', 'collection'].includes(key) && !(name === 'engram_project_projection' && key === 'workspaceId'))) { log('DENY invalid-workspace', name); return reply({ isError: true, content: [{ type: 'text', text: 'Workspace not found.' }] }); }
-    const entry = lookup(selectedWorkspace); if (!entry) { log('DENY unknown-workspace', name); return reply({ isError: true, content: [{ type: 'text', text: 'Workspace not found.' }] }); }
+    if (name === 'engram_get' && workspace === undefined && typeof rest.objectId === 'string') {
+      const resolved = await resolveObjectName(rest.objectId, sessionId, msg.id).catch(() => undefined);
+      if (resolved && resolved !== selectedWorkspace) { log('ROUTE', name, selectedWorkspace, '->', resolved); selectedWorkspace = resolved; }
+    }
+    let entry = lookup(selectedWorkspace); if (!entry) { log('DENY unknown-workspace', name); return reply({ isError: true, content: [{ type: 'text', text: 'Workspace not found.' }] }); }
     if (['profile', 'user-insight'].includes(selectedWorkspace) && !['engram_search', 'engram_get', 'engram_profile_statement'].includes(name)) return reply({ isError: true, content: [{ type: 'text', text: 'This tool is not available for the reserved profile memory name.' }] });
     if (selectedWorkspace === 'wiki' && !['engram_search', 'engram_get', 'engram_create', 'engram_patch', 'engram_capabilities'].includes(name)) return reply({ isError: true, content: [{ type: 'text', text: 'This tool is not available for the reserved global wiki name.' }] });
     if (name === 'engram_profile_statement' && !['profile', 'user-insight'].includes(selectedWorkspace)) return reply({ isError: true, content: [{ type: 'text', text: 'Choose the reserved profile memory name to update profile memory.' }] });
@@ -106,11 +129,18 @@ async function handle(msg, remote, sessionId) {
     if (WRITE_TOOLS.has(name) && !writesEnabled) return reply({ isError: true, content: [{ type: 'text', text: 'ChatGPT writes are disabled for this connector.' }] });
     if (!ALLOWED.has(name)) { log('DENY tool', entry.name, name); return reply({ isError: true, content: [{ type: 'text', text: 'This tool is not available through the gateway.' }] }); }
     const now = Date.now(); entry.window = entry.window.filter(t => now - t < 60_000); if (entry.window.length >= PER_MINUTE) { log('LIMIT', entry.name); return reply({ isError: true, content: [{ type: 'text', text: 'rate limit reached, retry shortly.' }] }); } entry.window.push(now);
-    const backendSession = sessionId ? await upstreamSession(entry, sessionId) : undefined;
+    let backendSession = sessionId ? await upstreamSession(entry, sessionId) : undefined;
     if ((name === 'engram_get' || name === 'engram_patch') && typeof rest.objectId === 'string') {
       if (!(await objectInScope(entry, rest.objectId, backendSession, msg.id))) {
-        log('DENY object-scope', entry.name, name);
-        return reply({ isError: true, content: [{ type: 'text', text: 'Workspace not found.' }] });
+        // The projection of any workspace includes the owner's accepted profile preferences, so those objects stay readable (not writable) under the workspace that
+        // returned them. Every other object outside the named workspace remains refused.
+        const profile = name === 'engram_get' && entry.name !== 'profile' ? lookup('profile') : undefined;
+        const profileSession = profile && sessionId ? await upstreamSession(profile, sessionId) : undefined;
+        if (profile && await objectInScope(profile, rest.objectId, profileSession, msg.id)) { log('ROUTE', name, entry.name, '->', 'profile'); entry = profile; backendSession = profileSession; }
+        else {
+          log('DENY object-scope', entry.name, name, String(rest.objectId).slice(0, 80));
+          return reply({ isError: true, content: [{ type: 'text', text: 'Workspace not found.' }] });
+        }
       }
     }
     const response = await up(entry, 'tools/call', { name, arguments: forceScope(entry, name, rest) }, msg.id, backendSession); const res = JSON.parse(response.text); log('CALL', entry.name, name, res.error ? 'error' : res.result?.isError ? 'denied-by-engram' : 'ok');

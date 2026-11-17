@@ -1,5 +1,7 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { lstat, readFile } from 'node:fs/promises';
+import os from 'node:os';
+import { join, resolve } from 'node:path';
 import { MDBError } from '../core/types.js';
 import { findTrustedBinding } from '../core/project-trust.js';
 import { proxyCall } from '../memory/mcp-proxy.js';
@@ -10,7 +12,7 @@ import { proxyCall } from '../memory/mcp-proxy.js';
  * trusted Engram project binding in the current directory. `--root` always means the local vault. Calls go through the same path as the agent proxy, so task, note and handoff writes made while the
  * server is unreachable are kept in the local outbox (and merged into the server's version when it returns) instead of being lost; reads fail with an explicit error.
  */
-export interface RemoteTarget { url: string; tokenEnv: string; token: string; workspaceId?: string; via: 'flag' | 'environment' | 'project' }
+export interface RemoteTarget { url: string; tokenEnv: string; token: string; workspaceId?: string; via: 'flag' | 'environment' | 'project' | 'client' }
 type Flags = Record<string, string | boolean>;
 const text = (flags: Flags, name: string, fallback?: string): string | undefined => typeof flags[name] === 'string' ? flags[name] as string : fallback;
 const num = (flags: Flags, name: string): number | undefined => { const v = text(flags, name); if (v === undefined) return undefined; const n = Number(v); if (!Number.isSafeInteger(n)) throw new MDBError('INVALID_ARGUMENT', `--${name} must be an integer`); return n; };
@@ -27,12 +29,31 @@ const scopeFlag = (flags: Flags): Record<string, unknown> | undefined => {
 };
 const compact = (o: Record<string, unknown>): Record<string, unknown> => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== false));
 
+/**
+ * A Client-only machine (it has a Client app configuration but no Server configuration) keeps no vault of its own, so a bare `mdb` command there talks to the server using
+ * the URL and token file the Client app already stores. Without this, an agent that ran `mdb put` or `mdb workspace create` would quietly build a private local vault whose
+ * notes never reach the server (and so never reach Dream). A machine that also runs the server keeps working on its own vault, and --root or --local always means a local vault.
+ */
+async function clientMachineTarget(workspaceId: string | undefined, env: NodeJS.ProcessEnv): Promise<RemoteTarget | undefined> {
+  const dir = join(env.XDG_CONFIG_HOME || join(env.HOME || os.homedir(), '.config'), 'engram');
+  if (await lstat(join(dir, 'server.env')).then(() => true, () => false)) return undefined;
+  const raw = await readFile(join(dir, 'client.env'), 'utf8').catch(() => undefined); if (raw === undefined) return undefined;
+  const value = (name: string): string | undefined => raw.split(/\r?\n/).map(line => new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*(.*?)\\s*$`).exec(line)?.[1]).find(Boolean)?.replace(/\s+#.*$/, '').replace(/^['"]|['"]$/g, '');
+  const url = value('ENGRAM_MCP_URL'), tokenFile = value('ENGRAM_TOKEN_FILE'); if (!url || !tokenFile) return undefined;
+  const file = resolve(tokenFile.startsWith('~/') ? join(env.HOME || os.homedir(), tokenFile.slice(2)) : tokenFile);
+  const info = await lstat(file).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && info.uid !== process.getuid())) throw new MDBError('INVALID_ARGUMENT', `The Client token file ${file} must be a regular file owned by you with mode 0600 or 0400`);
+  const token = (await readFile(file, 'utf8')).trim(); if (!token) throw new MDBError('INVALID_ARGUMENT', `The Client token file ${file} is empty`);
+  const workspace = workspaceId ?? value('ENGRAM_WORKSPACE');
+  return { url, tokenEnv: 'ENGRAM_TOKEN_FILE', token, ...(workspace ? { workspaceId: workspace } : {}), via: 'client' };
+}
+
 export async function remoteTarget(flags: Flags, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): Promise<RemoteTarget | undefined> {
   if (text(flags, 'root') || flags.local) return undefined; // an explicit local vault always wins
   const explicit = text(flags, 'server') ?? text(flags, 'mcp-url') ?? env.ENGRAM_URL;
   let url: string | undefined, tokenEnv: string | undefined, workspaceId = text(flags, 'workspace'), via: RemoteTarget['via'] = 'flag';
   if (explicit) { url = explicit; tokenEnv = text(flags, 'token-env') ?? env.ENGRAM_TOKEN_ENV ?? 'ENGRAM_TOKEN'; via = text(flags, 'server') || text(flags, 'mcp-url') ? 'flag' : 'environment'; }
-  else { const found = await findTrustedBinding(cwd, env).catch(() => undefined); if (!found?.trusted || !found.binding.serverUrl || !found.binding.credentialRef || found.binding.mode==='replica') return undefined; url = found.binding.serverUrl; tokenEnv = found.binding.credentialRef; workspaceId ??= found.binding.workspaceId; via = 'project'; }
+  else { const found = await findTrustedBinding(cwd, env).catch(() => undefined); if (!found?.trusted || !found.binding.serverUrl || !found.binding.credentialRef || found.binding.mode==='replica') return clientMachineTarget(workspaceId, env); url = found.binding.serverUrl; tokenEnv = found.binding.credentialRef; workspaceId ??= found.binding.workspaceId; via = 'project'; }
   const token = env[tokenEnv!]; if (!token) throw new MDBError('INVALID_ARGUMENT', `Environment variable ${tokenEnv} is not set (it holds the credential for ${url})`);
   return { url: url!, tokenEnv: tokenEnv!, token, ...(workspaceId ? { workspaceId } : {}), via };
 }
@@ -89,10 +110,39 @@ export async function mapCommand(command: string, args: string[], flags: Flags):
   }
 }
 
+const pick = (input: Record<string, unknown>, keys: string[]): Record<string, unknown> => Object.fromEntries(keys.filter(key => input[key] !== undefined).map(key => [key, input[key]]));
+/**
+ * The production server exposes the smaller `remote-web` tool set (engram_* tools, no mdb_* tools). Translate a CLI request to its engram_* equivalent, with the arguments that tool accepts;
+ * write calls get an idempotency key so a retry cannot duplicate. Commands with no equivalent there say so instead of failing with "Unknown tool".
+ */
+export function toWebToolset(mapped: { tool: string; input: Record<string, unknown> }): { tool: string; input: Record<string, unknown> } {
+  const { tool, input } = mapped;
+  switch (tool) {
+    case 'mdb_search': case 'mdb_grep': return { tool: 'engram_search', input: pick(input, ['query', 'mode', 'regex', 'caseSensitive', 'scopes', 'kinds', 'tags', 'since', 'until', 'limit', 'cursor', 'includeHistory', 'allowFallback']) };
+    case 'mdb_context': return { tool: 'engram_context', input: { ...pick(input, ['query', 'scopes']), budgetTokens: typeof input.budgetTokens === 'number' ? input.budgetTokens : 4000 } };
+    case 'mdb_get': return { tool: 'engram_get', input: pick(input, ['objectId', 'revisionId']) };
+    case 'mdb_history': return { tool: 'engram_history', input: pick(input, ['objectId']) };
+    case 'mdb_put': return { tool: 'engram_create', input: { ...pick(input, ['scope', 'kind', 'title', 'body', 'tags']), source: 'mdb-cli', idempotencyKey: typeof input.idempotencyKey === 'string' ? input.idempotencyKey : randomUUID() } };
+    case 'mdb_patch': return { tool: 'engram_patch', input: { ...pick(input, ['objectId', 'expectedRevisionId', 'title', 'body', 'tags']), idempotencyKey: typeof input.idempotencyKey === 'string' ? input.idempotencyKey : randomUUID() } };
+    case 'mdb_memory_recent': return { tool: 'engram_recent', input: pick(input, ['scope', 'workspaceId', 'collectionId', 'types', 'from', 'to', 'limit', 'detail', 'tokenBudget']) };
+    case 'mdb_memory_timeline': return { tool: 'engram_timeline', input: pick(input, ['scope', 'workspaceId', 'collectionId', 'types', 'from', 'to', 'limit', 'detail', 'tokenBudget', 'sessionId', 'aroundId', 'window']) };
+    case 'mdb_memory_search': return { tool: 'engram_search', input: pick(input, ['query', 'mode', 'limit']) };
+    case 'mdb_memory_get': return { tool: 'engram_get_many', input: { objectIds: input.ids } };
+    case 'mdb_capabilities': return { tool: 'engram_capabilities', input: {} };
+    case 'mdb_workspace_create': return { tool: 'engram_workspace_ensure', input: { projectName: input.workspaceId, workspaceId: input.workspaceId } };
+    default: throw new MDBError('CAPABILITY_UNAVAILABLE', `${tool.replace(/^mdb_/, 'mdb ').replaceAll('_', ' ')} is not available through this server's remote tool set. Run it on the server machine or use its dashboard.`);
+  }
+}
+
 export async function runRemote(target: RemoteTarget, args: string[], flags: Flags): Promise<unknown> {
   const mapped = await mapCommand(args[0]!, args, flags); const options = { url: target.url, token: target.token, ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}), ...(text(flags, 'outbox') ? { outbox: resolve(text(flags, 'outbox')!) } : {}) };
   if (mapped === 'list') { const reply = await proxyCall(options, 'tools/list'); if (reply.isError) throw new MDBError('SERVER_UNREACHABLE', reply.text); return ((reply.value as { tools?: Array<{ name: string; description?: string }> }).tools ?? []).map(t => ({ name: t.name, description: (t.description ?? '').split(/(?<=\.)\s/)[0] })); }
-  const reply = await proxyCall(options, 'tools/call', { name: mapped.tool, arguments: mapped.input });
+  let reply = await proxyCall(options, 'tools/call', { name: mapped.tool, arguments: mapped.input });
+  if (reply.isError && mapped.tool.startsWith('mdb_') && /unknown tool/i.test(reply.text)) {
+    // Not an argument problem: ask the server which tools it has, and if it only offers the engram_* set, retry with the equivalent call.
+    const listed = await proxyCall(options, 'tools/list'); const names = new Set(((listed.value as { tools?: Array<{ name: string }> } | undefined)?.tools ?? []).map(tool => tool.name));
+    if (!listed.isError && names.size && !names.has(mapped.tool)) { const alt = toWebToolset(mapped); reply = await proxyCall(options, 'tools/call', { name: alt.tool, arguments: alt.input }); }
+  }
   if (reply.isError) { const error = (reply.value as { error?: { code?: string; message?: string } } | undefined)?.error; throw new MDBError(error?.code ?? 'REMOTE_ERROR', error?.message ?? reply.text); }
   return reply.value;
 }

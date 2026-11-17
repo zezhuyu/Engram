@@ -276,17 +276,27 @@ function allowedOrigin(origin: string | undefined, env: NodeJS.ProcessEnv): bool
     .split(',').map(item => item.trim()).filter(Boolean);
   return allowed.includes(origin);
 }
-function readHttpBody(request: IncomingMessage, limit = MAX_HTTP_BODY): Promise<unknown> {
-  return new Promise((resolveBody, reject) => {
+/** How long a client may take to deliver a request body. The body is read while the caller holds an admission permit, so a stalled sender must not hold it forever. */
+export const HTTP_BODY_READ_TIMEOUT_MS = 60_000;
+export function readHttpBody(request: IncomingMessage, limit = MAX_HTTP_BODY, timeoutMs = HTTP_BODY_READ_TIMEOUT_MS): Promise<unknown> {
+  return new Promise((resolveBody, rejectBody) => {
+    // Settle exactly once and always unhook, so a disconnect or a stall can never leave the handler (and its admission permit) waiting.
+    let settled = false; let timer: NodeJS.Timeout | undefined;
+    const cleanup = () => { settled = true; if (timer) clearTimeout(timer); request.off('data', onData); request.off('end', onEnd); request.off('error', onError); request.off('aborted', onAbort); request.off('close', onAbort); };
+    const reject = (error: Error) => { if (settled) return; cleanup(); rejectBody(error); };
+    const resolve = (value: unknown) => { if (settled) return; cleanup(); resolveBody(value); };
     const declared = Number(request.headers['content-length'] ?? 0);
-    if (Number.isFinite(declared) && declared > limit) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
+    if (Number.isFinite(declared) && declared > limit) { settled = true; rejectBody(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
     const chunks: Buffer[] = []; let size = 0, oversized = false;
-    request.on('data', chunk => { size += chunk.length; if (size > limit && !oversized) { oversized = true; request.pause(); reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); } else if (!oversized) chunks.push(chunk); });
-    request.on('end', () => {
+    function onData(chunk: Buffer) { size += chunk.length; if (size > limit && !oversized) { oversized = true; request.pause(); reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); } else if (!oversized) chunks.push(chunk); }
+    function onEnd() {
       if (oversized) { reject(Object.assign(new Error('Request body too large'), { statusCode: 413 })); return; }
-      try { resolveBody(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(Object.assign(new Error('Parse error'), { statusCode: 400 })); }
-    });
-    request.on('error', reject);
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(Object.assign(new Error('Parse error'), { statusCode: 400 })); }
+    }
+    function onError(error: Error) { reject(error); }
+    function onAbort() { if (!request.readableEnded) reject(Object.assign(new Error('Client closed the connection before the request body was complete'), { statusCode: 400, clientAborted: true })); }
+    request.on('data', onData); request.on('end', onEnd); request.on('error', onError); request.on('aborted', onAbort); request.on('close', onAbort);
+    timer = setTimeout(() => reject(Object.assign(new Error('Request body was not received in time'), { statusCode: 408 })), timeoutMs); timer.unref();
   });
 }
 function jsonResponse(response: ServerResponse, status: number, body?: unknown, headers: Record<string, string> = {}): void {

@@ -144,7 +144,8 @@ test('macOS LaunchAgent definition is user scoped and root and opt-out are rejec
   await assert.rejects(fs.access(plist));
   await assert.rejects(fs.access(dashboardPlist)); await assert.rejects(fs.access(wrapper));
   const launchCalls = await fs.readFile(f.calls, 'utf8');
-  assert.match(launchCalls, /bootstrap gui\/501/); assert.match(launchCalls, /kickstart -k/); assert.match(launchCalls, /bootout gui\/501/);
+  assert.match(launchCalls, /bootstrap gui\/501/); assert.match(launchCalls, /bootout gui\/501/);
+  assert.doesNotMatch(launchCalls, /kickstart -k/, 'start leaves a service that is already running alone (a restart would only open a gap before launchd respawns it)');
   await assert.rejects(manageClientService({ ...common, action: 'install', uid: 0 }, f.env), /refusing to manage.*root/);
   await assert.rejects(manageClientService({ ...common, action: 'install' }, { ...f.env, ENGRAM_AUTO_RECONNECT: '0' }), /disabled/);
 });
@@ -236,3 +237,77 @@ for (const platform of ['macos', 'linux'] as const) {
     assert.deepEqual({ outbox: noop.outbox, dashboard: noop.dashboard, changed: noop.changed }, { outbox: 'unchanged', dashboard: 'unchanged', changed: false });
   });
 }
+
+test('macOS reinstall waits for launchd to finish unloading, so replica sync is never left unloaded by "Bootstrap failed: 5"', async t => {
+  const f = await fixture(t), state = path.join(f.root, 'launchd'), replicas = path.join(f.root, 'replicas'), prior = process.env.ENGRAM_REPLICA_DIR;
+  process.env.ENGRAM_REPLICA_DIR = replicas; t.after(() => { if (prior === undefined) delete process.env.ENGRAM_REPLICA_DIR; else process.env.ENGRAM_REPLICA_DIR = prior; });
+  await fs.mkdir(path.join(state, 'loaded'), { recursive: true }); await fs.mkdir(path.join(state, 'unloading'), { recursive: true });
+  // launchd model: bootout returns at once but the job stays loaded for three more `print` calls, and bootstrap fails with exit 5 until it is gone.
+  const fake = `#!/bin/sh
+S='${state}'
+case "$1" in
+  print) label="\${2##*/}"
+    if [ -f "$S/unloading/$label" ]; then n=$(cat "$S/unloading/$label"); n=$((n+1)); if [ "$n" -ge 3 ]; then rm -f "$S/loaded/$label" "$S/unloading/$label"; exit 113; fi; echo "$n" > "$S/unloading/$label"; fi
+    if [ -f "$S/loaded/$label" ]; then printf 'state = running\\npid = 4321\\nlast exit code = 0\\n'; exit 0; fi; exit 113;;
+  bootout) label="\${2##*/}"; if [ -f "$S/loaded/$label" ]; then echo 0 > "$S/unloading/$label"; exit 0; fi; exit 113;;
+  bootstrap) label="$(basename "$3" .plist)"; if [ -f "$S/loaded/$label" ]; then echo 'Bootstrap failed: 5: Input/output error' >&2; exit 5; fi; touch "$S/loaded/$label"; exit 0;;
+  kickstart) echo 'kickstart failed: 113: Could not find specified service' >&2; exit 113;;
+esac
+exit 0
+`;
+  await fs.writeFile(path.join(f.bin, 'launchctl'), fake, { mode: 0o755 });
+  await initializeReplica({ serverUrl: 'https://memory.example', tokenFile: f.tokenFile, name: 'service-client', baseDir: replicas });
+  const options = { action: 'install' as const, platform: 'macos' as const, home: f.home, uid: 501, url: 'https://memory.example/mcp', tokenFile: f.tokenFile };
+  await manageClientService(options, f.env);
+  const loaded = async () => (await fs.readdir(path.join(state, 'loaded'))).sort();
+  assert.deepEqual(await loaded(), ['dev.engram.client-dashboard', 'dev.engram.outbox-watch', 'dev.engram.replica-sync']);
+  // Installing again while everything is loaded boots each job out and back in; that must succeed and leave all three loaded.
+  await fs.rm(path.join(f.home, 'Library/LaunchAgents/dev.engram.replica-sync.plist'));   // a changed unit: install has to boot the loaded job out and back in
+  const again = await manageClientService(options, f.env) as { replicaSync: { installed: boolean } };
+  assert.equal(again.replicaSync.installed, true);
+  assert.deepEqual(await loaded(), ['dev.engram.client-dashboard', 'dev.engram.outbox-watch', 'dev.engram.replica-sync']);
+  // launchd can refuse kickstart for a job it bootstrapped a moment ago; a loaded job already runs (RunAtLoad), so start succeeds instead of raising an error.
+  const started = await manageClientService({ action: 'start', platform: 'macos', home: f.home, uid: 501 }, f.env) as { started: boolean; replicaSync: { started: boolean } };
+  assert.equal(started.started, true); assert.equal(started.replicaSync.started, true);
+});
+
+test('start brings up a loaded service that is not running, and leaves a running one untouched', async t => {
+  const f = await fixture(t), replicas = path.join(f.root, 'replicas'), prior = process.env.ENGRAM_REPLICA_DIR;
+  process.env.ENGRAM_REPLICA_DIR = replicas; t.after(() => { if (prior === undefined) delete process.env.ENGRAM_REPLICA_DIR; else process.env.ENGRAM_REPLICA_DIR = prior; });
+  await initializeReplica({ serverUrl: 'https://memory.example', tokenFile: f.tokenFile, name: 'service-client', baseDir: replicas });
+  const options = { platform: 'macos' as const, home: f.home, uid: 501, url: 'https://memory.example/mcp', tokenFile: f.tokenFile };
+  await manageClientService({ ...options, action: 'install' }, f.env);
+  // Re-running install with nothing changed (the Client app does it at every launch) must not restart a replica service that is already loaded.
+  const bootouts = async () => ((await fs.readFile(f.calls, 'utf8')).match(/bootout gui\/501\/dev\.engram\.replica-sync/g) ?? []).length;
+  const bootoutsBefore = await bootouts();
+  await manageClientService({ ...options, action: 'install' }, f.env);
+  assert.equal(await bootouts(), bootoutsBefore, 'an unchanged replica unit is left loaded');
+  const kickstarts = async () => ((await fs.readFile(f.calls, 'utf8')).match(/kickstart -k gui\/501\/[\w.-]+/g) ?? []);
+  const before = (await kickstarts()).length;
+  await manageClientService({ ...options, action: 'start' }, f.env);        // the fake reports every job as running
+  assert.equal((await kickstarts()).length, before, 'nothing running is kicked');
+  // Now every job is loaded but waiting (not running): start must kick all three.
+  const waiting = `#!/bin/sh\nprintf '%s\\n' "$*" >> '${f.calls}'\ncase "$*" in *print*) printf 'state = waiting\\n';; esac\n`;
+  await fs.writeFile(path.join(f.bin, 'launchctl'), waiting, { mode: 0o755 });
+  await manageClientService({ ...options, action: 'start' }, f.env);
+  const kicked = (await kickstarts()).slice(before).join(' ');
+  for (const label of ['dev.engram.outbox-watch', 'dev.engram.client-dashboard', 'dev.engram.replica-sync']) assert.match(kicked, new RegExp(label.replaceAll('.', '\\.')), label);
+});
+
+test('after an app update start restarts services still running the old version, and only those', async t => {
+  const f = await fixture(t), replicas = path.join(f.root, 'replicas'), prior = process.env.ENGRAM_REPLICA_DIR;
+  process.env.ENGRAM_REPLICA_DIR = replicas; t.after(() => { if (prior === undefined) delete process.env.ENGRAM_REPLICA_DIR; else process.env.ENGRAM_REPLICA_DIR = prior; });
+  await initializeReplica({ serverUrl: 'https://memory.example', tokenFile: f.tokenFile, name: 'service-client', baseDir: replicas });
+  const options = { platform: 'macos' as const, home: f.home, uid: 501, url: 'https://memory.example/mcp', tokenFile: f.tokenFile };
+  await manageClientService({ ...options, action: 'install' }, f.env);
+  const kickstarts = async () => ((await fs.readFile(f.calls, 'utf8')).match(/kickstart -k gui\/501\/[\w.-]+/g) ?? []).length;
+  // A fake ps reports what the running service process looks like: its command line and when it started.
+  const fakePs = (startedAt: string) => `#!/bin/sh\ncase "$*" in *command=*) echo "/node /Applications/Engram Client.app/.../mdb.js replica daemon";; *lstart=*) echo "${startedAt}";; esac\n`;
+  const before = await kickstarts();
+  await fs.writeFile(path.join(f.bin, 'ps'), fakePs('Fri Dec 31 23:59:59 2100'), { mode: 0o755 });   // started in the future: newer than the installed files
+  await manageClientService({ ...options, action: 'start' }, f.env);
+  assert.equal(await kickstarts(), before, 'a service newer than the installed app is left alone');
+  await fs.writeFile(path.join(f.bin, 'ps'), fakePs('Mon Jan  1 00:00:00 2024'), { mode: 0o755 });    // started long before the installed files: still the old version
+  await manageClientService({ ...options, action: 'start' }, f.env);
+  assert.equal((await kickstarts()) - before, 3, 'outbox watcher, dashboard and replica sync are all restarted onto the new version');
+});

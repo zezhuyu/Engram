@@ -210,7 +210,7 @@ Dream schedule: `mdb intelligence schedule status|configure|pause|resume|tick|wo
 
 ## Command reference
 
-`mdb COMMAND [arguments] [--root PATH] [--json]`. `mdb help` prints the authoritative list. Remote mode: add `--server URL [--token-env VAR] [--workspace ID]` (or set `ENGRAM_URL`) to run most commands against a server instead of a local vault; `--root` or `--local` forces local.
+`mdb COMMAND [arguments] [--root PATH] [--json]`. `mdb help` prints the authoritative list. Remote mode: add `--server URL [--token-env VAR] [--workspace ID]` (or set `ENGRAM_URL`) to run most commands against a server instead of a local vault; `--root` or `--local` forces local. **On a Client-only machine** (a Client app configuration, `~/.config/engram/client.env`, and no `server.env`) a bare `mdb put`, `get`, `search`, `grep`, `workspace list`, `note upsert` and the other server-backed commands automatically use the server URL and token file stored there, so notes written by hand reach the server (and Dream). The token file must be mode `0600` or `0400`. Against the production `remote-web` tool set the CLI translates to the server's `engram_*` tools automatically: `put`, `get`, `patch`, `history`, `search`, `grep`, `context`, `memory recent|timeline|search|get`, `capabilities`, `note|task|handoff upsert` and `workspace create` (needs `workspace:create`) work; `workspace list`, `collection list`, `insight`, `wiki` and `profile` commands have no equivalent there and say so (run them on the server machine or use its dashboard). A machine that also runs the server, `--root`, and `--local` keep using a local vault. `mdb init` still creates a local vault only when you run it.
 
 | Area | Commands |
 |---|---|

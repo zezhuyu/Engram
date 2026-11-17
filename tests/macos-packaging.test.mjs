@@ -38,6 +38,8 @@ test('both menu bar apps offer a confirmed full quit that stops every service th
   assert.match(body, /NSApp\.terminate/, 'the menu bar app itself quits last');
   assert.doesNotMatch(body, /removeItem\(at: (?!workerPlist)/, 'nothing but the worker launch definition is removed');
   assert.match(body, /system boot[\s\S]*sudo/, 'a boot-time service is not stopped without the administrator command');
+  assert.match(swift, /func restoreHelperAgents\(\)[\s\S]*dev\.engram\.intelligence-worker[\s\S]*bootstrap/, 'opening the app brings back the Dream worker that a full quit stopped');
+  assert.match(swift, /func startService\(\) throws \{\s*restoreHelperAgents\(\)/, 'and does so before anything else in service start');
 });
 
 async function fixture(role, config, mode = 0o600) {
