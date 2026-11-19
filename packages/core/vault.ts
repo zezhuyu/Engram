@@ -284,7 +284,7 @@ export class Vault {
   }
   private async rawDocument(objectId:string,revisionId?:string):Promise<Document> { return profileAsync('vault.raw_document', () => this.rawDocumentUnprofiled(objectId, revisionId)); }
   private async rawDocumentUnprofiled(objectId:string,revisionId?:string):Promise<Document> {
-    validId(objectId);if(revisionId)validId(revisionId);await this.refreshJournal();const index=this.journalCache!;const found=revisionId?index.byRevision.get(revisionId):index.latest.get(objectId);const event=found&&found.objectId===objectId?found:undefined;
+    validId(objectId);if(revisionId)validId(revisionId);await this.refreshJournal();const index=this.journalCache;if(!index)throw inaccessible();const found=revisionId?index.byRevision.get(revisionId):index.latest.get(objectId);const event=found&&found.objectId===objectId?found:undefined;
     if(!event||index.purged.has(objectId))throw inaccessible();await this.requireAccess(event.scope,'read');
     try{return await this.documentForEvent(event);}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')throw inaccessible();throw e;}
   }

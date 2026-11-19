@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { serverRouteUrl, serverBasePath } from '../core/server-url.js';
 import { createServer as createHttpsServer } from 'node:https';
 import { TLSSocket } from 'node:tls';
 import { isIP } from 'node:net';
@@ -509,12 +510,12 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
           try {
             const parsed = new URL(captureUrl); captureHost = parsed.host;
             if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password) {
-              const cached = captureReachabilityCache.get(parsed.origin);
+              const cached = captureReachabilityCache.get(parsed.origin + serverBasePath(captureUrl));
               if (cached && Date.now() - cached.checkedAt < 10_000) reachable = cached.reachable;
               else {
-                reachable = await fetch(new URL('/version', parsed.origin), { signal: AbortSignal.timeout(3_000), redirect: 'manual' }).then(response => response.ok).catch(() => false);
+                reachable = await fetch(serverRouteUrl(parsed, '/version'), { signal: AbortSignal.timeout(3_000), redirect: 'manual' }).then(response => response.ok).catch(() => false);
                 if (captureReachabilityCache.size >= 64) captureReachabilityCache.delete(captureReachabilityCache.keys().next().value!);
-                captureReachabilityCache.set(parsed.origin, { checkedAt: Date.now(), reachable });
+                captureReachabilityCache.set(parsed.origin + serverBasePath(captureUrl), { checkedAt: Date.now(), reachable });
               }
             } else reachable = false;
           } catch { reachable = false; }

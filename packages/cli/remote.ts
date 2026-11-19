@@ -59,7 +59,7 @@ export async function remoteTarget(flags: Flags, cwd = process.cwd(), env: NodeJ
 }
 
 /** CLI commands that have a server equivalent. Everything else keeps working on a local vault. */
-export const REMOTE_COMMANDS = new Set(['search', 'grep', 'context', 'get', 'history', 'put', 'patch', 'workspace', 'collection', 'memory', 'insight', 'profile', 'capabilities', 'task', 'note', 'handoff', 'remote', 'wiki']);
+export const REMOTE_COMMANDS = new Set(['search', 'grep', 'context', 'get', 'history', 'put', 'patch', 'delete', 'restore', 'diff', 'workspace', 'collection', 'memory', 'insight', 'profile', 'capabilities', 'task', 'note', 'handoff', 'remote', 'wiki']);
 const REMOTE_SUBCOMMANDS: Record<string, string[]> = { profile: ['domains'], workspace: ['list', 'create'], collection: ['list'], memory: ['recent', 'timeline', 'search', 'get'], insight: ['search'], task: ['upsert'], note: ['upsert'], handoff: ['write'], remote: ['tools', 'call'], wiki: ['lint', 'propose', 'proposals'] };
 export const usesServer = (command: string, sub: string | undefined): boolean => REMOTE_COMMANDS.has(command) && (!REMOTE_SUBCOMMANDS[command] || REMOTE_SUBCOMMANDS[command]!.includes(sub ?? ''));
 
@@ -86,6 +86,9 @@ export async function mapCommand(command: string, args: string[], flags: Flags):
     case 'search': case 'grep': return { tool: command === 'grep' ? 'mdb_grep' : 'mdb_search', input: searchArgs() };
     case 'context': return { tool: 'mdb_context', input: { ...searchArgs(), ...(num(flags, 'budget') ? { budgetTokens: num(flags, 'budget') } : {}) } };
     case 'get': return { tool: 'mdb_get', input: compact({ objectId: need(sub, 'object ID'), revisionId: text(flags, 'revision') }) };
+    case 'delete': return { tool: 'mdb_delete', input: { objectId: need(sub, 'object ID'), expectedRevisionId: need(text(flags, 'revision'), '--revision') } };
+    case 'restore': return { tool: 'mdb_restore', input: { objectId: need(sub, 'object ID'), revisionId: need(third, 'revision to restore'), expectedRevisionId: need(text(flags, 'revision'), '--revision') } };
+    case 'diff': return { tool: 'mdb_diff', input: { objectId: need(sub, 'object ID'), fromRevisionId: need(third, 'from revision'), toRevisionId: need(args[3], 'to revision') } };
     case 'history': return { tool: 'mdb_history', input: { objectId: need(sub, 'object ID') } };
     case 'put': return { tool: 'mdb_put', input: compact({ scope, kind: text(flags, 'kind', 'note'), title: need(text(flags, 'title'), '--title'), body: await bodyOf(flags), tags: csv(flags, 'tags'), status: text(flags, 'status'), idempotencyKey: text(flags, 'idempotency-key') }) };
     case 'patch': return { tool: 'mdb_patch', input: compact({ objectId: need(sub, 'object ID'), expectedRevisionId: need(text(flags, 'revision'), '--revision'), title: text(flags, 'title'), body: text(flags, 'body') || text(flags, 'file') ? await bodyOf(flags) : undefined, tags: csv(flags, 'tags'), status: text(flags, 'status') }) };

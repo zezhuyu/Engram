@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline';
+import { serverBasePath } from '../core/server-url.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -321,6 +322,7 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
   const port = env.MDB_MCP_HTTP_PORT === undefined ? 3333 : Number(env.MDB_MCP_HTTP_PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('MDB_MCP_HTTP_PORT must be an integer from 0 to 65535');
   const indexMaintainer = new Engram(root, { actorId: 'engram-http-index-maintenance', permissions: ['*'] });
+  const basePath = serverBasePath(env.MDB_MCP_PUBLIC_URL ?? '');
   const resource = oauthMetadata ? new URL(oauthMetadata.resource) : undefined;
   const protectedResourcePath = resource && resource.pathname !== '/' ? `/.well-known/oauth-protected-resource${resource.pathname}` : '/.well-known/oauth-protected-resource';
   const sessions = new Map<string, { initialized: boolean; expires: number; authId: string; protocolVersion: string; defaultWorkspace?: string }>();
@@ -373,6 +375,8 @@ async function runHttp(root: string, toolsForActor: (actor: ActorContext) => Too
     let endpoint: URL;
     try { endpoint = new URL(request.url ?? '/', 'http://localhost'); }
     catch { jsonResponse(response, 400, { error: 'Invalid request target' }); return; }
+    // Behind a gateway mounted at a prefix (MDB_MCP_PUBLIC_URL=https://host/engram/mcp) the prefix may or may not be stripped upstream; accept both.
+    if (basePath && (endpoint.pathname === basePath || endpoint.pathname.startsWith(basePath + '/'))) endpoint.pathname = endpoint.pathname.slice(basePath.length) || '/';
     if (oauthMetadata && (endpoint.pathname === '/.well-known/oauth-protected-resource' || endpoint.pathname === protectedResourcePath)) { jsonResponse(response, 200, oauthMetadata); return; }
     const allowedHosts = (env.MDB_MCP_HTTP_ALLOWED_HOSTS ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
     if (allowedHosts.length && !allowedHosts.includes((request.headers.host ?? '').toLowerCase())) { jsonResponse(response, 403, { error: 'Host not allowed' }); return; }
