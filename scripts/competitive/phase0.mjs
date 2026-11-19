@@ -6,7 +6,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { loadCorpus, oracle, sha256, gz, ripgrepPath } from './lib.mjs';
 
-const corpus = process.argv[2] ?? '/Volumes/sambigdisk1/code/engram-audit2/bench/100k';
+const corpus = process.argv[2] ?? 'verification/benchmarks/corpora/competitive-100k';
 const out = 'verification/performance'; await fs.mkdir(`${out}/raw/golden`, { recursive: true });
 const manifest = JSON.parse(await fs.readFile(path.join(corpus, '.engram-benchmark-manifest.json'), 'utf8'));
 const t0 = Date.now(); const docs = await loadCorpus(corpus); console.error(`parsed ${docs.length} documents in ${Date.now() - t0} ms`);

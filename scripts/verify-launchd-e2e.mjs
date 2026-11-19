@@ -2,7 +2,7 @@
 // Unattended Dream verification with a REAL user-level launchd agent, the REAL clock and a LOCAL model (Ollama on loopback). Disposable vault, synthetic documents only.
 //
 // What it is allowed to do, and nothing else:
-//   * create a vault under /Volumes/.../.tmp-dream-launchd-<id> (or $TMPDIR) holding synthetic documents (no user memories),
+//   * create a vault under $TMPDIR/.tmp-dream-launchd-<id> (or ENGRAM_E2E_PARENT) holding synthetic documents (no user memories),
 //   * write ONE plist, ~/Library/LaunchAgents/dev.engram.intelligence-worker.e2e<id>.plist, load it into the user's GUI domain (launchctl bootstrap gui/$UID),
 //   * kill/restart ONLY that label, and ALWAYS boot it out and delete the plist and the vault afterwards.
 // It refuses non-loopback model endpoints, refuses a label that is already loaded, and never touches any other LaunchAgent. Nothing is sent to an external model provider.
@@ -14,7 +14,7 @@ import path from 'node:path';
 const repo = path.resolve(new URL('..', import.meta.url).pathname); const cli = path.join(repo, 'bin/mdb.js'); const uid = process.getuid();
 const id = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14); const label = `dev.engram.intelligence-worker.e2e${id}`; const domain = `gui/${uid}`;
 const plistPath = path.join(os.homedir(), 'Library/LaunchAgents', `${label}.plist`);
-const scratchParent = process.env.ENGRAM_E2E_PARENT ?? '/Volumes/sambigdisk1/code'; const root = path.join(scratchParent, `.tmp-dream-launchd-${id}`); const logFile = path.join(os.tmpdir(), `engram-launchd-e2e-${id}.log`);
+const scratchParent = process.env.ENGRAM_E2E_PARENT ?? os.tmpdir(); const root = path.join(scratchParent, `.tmp-dream-launchd-${id}`); const logFile = path.join(os.tmpdir(), `engram-launchd-e2e-${id}.log`);
 const MODEL = process.env.ENGRAM_E2E_MODEL ?? 'gpt-oss:latest'; const OLLAMA = 'http://127.0.0.1:11434';
 const sleep = ms => new Promise(r => setTimeout(r, ms)); const checks = []; const log = (...a) => console.error(new Date().toISOString().slice(11, 19), ...a);
 const check = (name, pass, detail) => { checks.push({ name, pass: !!pass, ...(detail === undefined ? {} : { detail }) }); log(pass ? 'PASS' : 'FAIL', name, detail === undefined ? '' : JSON.stringify(detail).slice(0, 300)); return !!pass; };

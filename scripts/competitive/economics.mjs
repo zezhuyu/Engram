@@ -4,11 +4,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { execFileSync } from 'node:child_process';
-const label = process.argv[2] ?? 'final', fsCopy = process.argv[3] ?? '/Volumes/sambigdisk1/code/engram-audit2/competitive/fs-only-100k'; const main = '/Volumes/sambigdisk1/code/engram-audit2/bench/100k'; const out = 'verification/performance';
+const label = process.argv[2] ?? 'final', fsCopy = process.argv[3] ?? 'verification/benchmarks/competitive/fs-only-100k'; const main = 'verification/benchmarks/corpora/competitive-100k'; const out = 'verification/performance';
 const du = p => { try { return Number(execFileSync('du', ['-sk', p], { encoding: 'utf8' }).split('\t')[0]) * 1024; } catch { return null; } };
 const { Vault } = await import('../../dist/packages/core/vault.js'); const { FilesystemSearch } = await import('../../dist/packages/search-files/index.js'); const { buildFsIndex } = await import('../../dist/packages/search-files/postings.js');
 const manifest = JSON.parse(await fs.readFile(`${out}/competitive-100k-manifest.json`, 'utf8')); const run = JSON.parse(await fs.readFile(`${out}/raw/${label}-samples.json`, 'utf8'));
-const pb = JSON.parse(await fs.readFile('/Volumes/sambigdisk1/code/engram-audit2/competitive/purpose-built.sqlite.build.json', 'utf8'));
+const pb = JSON.parse(await fs.readFile('verification/benchmarks/competitive/purpose-built.sqlite.build.json', 'utf8'));
 const mainManifest = JSON.parse(await fs.readFile(path.join(main, '.engram-benchmark-manifest.json'), 'utf8'));
 const sizes = { corpusMarkdownBytes: mainManifest.bodyBytes, corpusTotalBytesOnDisk: du(main), engramFsTrigramIndexBytes: du(`${fsCopy}/.mdb/indexes/fs-trigram`), engramManifestBytes: (await fs.stat(`${fsCopy}/.mdb/indexes/manifest.v4.jsonl`)).size, engramSqliteIndexBytes: du(`${main}/.mdb/indexes`) - (await fs.stat(`${main}/.mdb/indexes/manifest.v4.jsonl`).then(s => s.size, () => 0)) - (du(`${main}/.mdb/indexes/fs-trigram`) ?? 0), purposeBuiltSqliteBytes: pb.dbBytes };
 // Build costs (measured now, FS copy): trigram index only; the manifest is rebuilt separately by deleting it.

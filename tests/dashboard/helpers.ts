@@ -1,11 +1,10 @@
-import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import { Engram } from '../../packages/sdk/index.js';
 
 // Test vaults live on the data volume when it exists (the system temp directory is subject to the tmp-trust rules); elsewhere they fall back to the system temp directory.
-const testParent = process.env.ENGRAM_DASHBOARD_TEST_DIR ?? (existsSync('/Volumes/sambigdisk1') ? '/Volumes/sambigdisk1' : tmpdir());
+const testParent = process.env.ENGRAM_DASHBOARD_TEST_DIR ?? tmpdir();
 
 export async function disposableVault() {
   const root = await mkdtemp(path.join(testParent, 'engram-dashboard-test-'));

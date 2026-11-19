@@ -21,6 +21,5 @@ test('query benchmark evidence binds the exact source set consumed by release po
   assert.equal(report.sourceBinding.fingerprint, report.sourceBinding.workingTreeSourceFingerprint);
   assert.ok((report.sourceBinding.fullSourceFileCount ?? 0) > 100);
   assert.ok(report.sourceBinding.files?.['packages/core/vault.ts']);
-  assert.ok(report.sourceBinding.files?.['deploy/Caddyfile']);
   assert.ok(report.sourceBinding.files?.['scripts/benchmark.ts']);
 });

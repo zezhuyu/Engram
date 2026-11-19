@@ -35,7 +35,7 @@ test('a malformed request target receives 400 and does not terminate the MCP HTT
 
 test('without the opt-in a non-loopback plain-HTTP bind is refused, even on a tailnet address or 0.0.0.0', async t => {
   const { root } = await disposableVault(t);
-  for (const host of ['0.0.0.0', '100.77.249.102']) {
+  for (const host of ['0.0.0.0', '100.90.0.1']) {
     const child = spawnSync(process.execPath, [MCP, '--root', root], { encoding: 'utf8', env: baseEnv(root, { MDB_MCP_HTTP_HOST: host, MDB_MCP_HTTP_PORT: '0', MDB_MCP_HTTP_ALLOWED_HOSTS: 'x.example:1' }), timeout: 20_000 });
     assert.equal(child.status, 1, host); assert.match(child.stderr, /requires MDB_MCP_HTTP_ALLOWED_HOSTS and an HTTPS MDB_MCP_PUBLIC_URL/);
   }

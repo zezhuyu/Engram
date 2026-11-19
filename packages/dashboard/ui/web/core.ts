@@ -339,6 +339,13 @@ function startApp() {
     setHealth();
     fetch('/api/auth/status').then(r => r.json()).then(info => {
         passwordSet = !!info.passwordSet;
+        if (info.limited) {
+            for (let i = screens.length - 1; i >= 0; i--)
+                if (!['overview', 'chat', 'wiki-review'].includes(screens[i][0]))
+                    screens.splice(i, 1);
+            page = screenFromHash();
+            navRender();
+        }
         if (passwordSet) {
             sessionMode = true;
             document.querySelector('#logout').hidden = false;

@@ -11,8 +11,8 @@ import { plans } from './shell.mjs';
 import { rng, sha256, stats } from './lib.mjs';
 
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
-const corpus = arg('corpus', '/Volumes/sambigdisk1/code/engram-audit2/bench/100k'); const label = arg('label', 'baseline'); const iterations = Number(arg('iterations', 20)), warmups = Number(arg('warmups', 3)); const slowIterations = Number(arg('slow-iterations', 5));
-const fsCorpus = arg('fs-corpus', '/Volumes/sambigdisk1/code/engram-audit2/competitive/fs-only-100k'); const only = arg('only')?.split(','); const systems = (arg('systems', 'shell-floor,shell-topk,engram-cli-fs,engram-cli-sqlite,engram-fs,engram-sqlite,sqlite-fts,sqlite-fts-hydrated')).split(','); const sqliteFile = arg('sqlite-db', '/Volumes/sambigdisk1/code/engram-audit2/competitive/purpose-built.sqlite');
+const corpus = arg('corpus', 'verification/benchmarks/corpora/competitive-100k'); const label = arg('label', 'baseline'); const iterations = Number(arg('iterations', 20)), warmups = Number(arg('warmups', 3)); const slowIterations = Number(arg('slow-iterations', 5));
+const fsCorpus = arg('fs-corpus', 'verification/benchmarks/competitive/fs-only-100k'); const only = arg('only')?.split(','); const systems = (arg('systems', 'shell-floor,shell-topk,engram-cli-fs,engram-cli-sqlite,engram-fs,engram-sqlite,sqlite-fts,sqlite-fts-hydrated')).split(','); const sqliteFile = arg('sqlite-db', 'verification/benchmarks/competitive/purpose-built.sqlite');
 const out = 'verification/performance'; await fs.mkdir(`${out}/raw`, { recursive: true });
 const manifest = JSON.parse(readFileSync(`${out}/competitive-100k-manifest.json`, 'utf8')); const golden = (w, kind) => JSON.parse(zlib.gunzipSync(readFileSync(`${out}/raw/golden/${w}.${kind}.json.gz`)));
 const workloads = manifest.workloads.filter(w => !only || only.includes(w.name)); const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'engram-competitive-'));

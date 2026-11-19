@@ -90,6 +90,14 @@ async function readBody(req: IncomingMessage, limit = BODY_LIMIT): Promise<unkno
   const bytes = await readLimited(req, limit);
   try { return parseStrictJson(bytes.toString('utf8'), 'Dashboard request'); } catch { throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'INVALID_JSON' }); }
 }
+/** Peers outside this machine see only the pages in LIMITED_REMOTE_SCREENS, so only the APIs those pages use are reachable to them. */
+const isLocalPeer = (address: string | undefined): boolean => address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+const limitedRemoteApiAllowed = (method: string | undefined, path: string): boolean => {
+  if (method === 'GET' && (path === '/api/status' || path === '/api/chat/capabilities' || path === '/api/proposals' || path.startsWith('/api/documents/'))) return true;
+  if (path === '/api/auth/status' || path === '/api/auth/login' || path === '/api/auth/logout' || path === '/api/auth/setup') return true;
+  if (path === '/api/chat' || path === '/api/proposals' || path.startsWith('/api/proposals/')) return true;
+  return false;
+};
 function loopback(host: string): boolean { return host === '127.0.0.1' || host === '::1'; }
 function privateBind(host: string): boolean {
   if (host === '0.0.0.0' || host === '::' || loopback(host)) return false;
@@ -386,8 +394,10 @@ export async function createDashboardServer(options: DashboardOptions): Promise<
     }
     const source = req.socket.remoteAddress ?? 'unknown';
     if (!validRequestOrigin(req, addressPort(server), remoteMode, host)) return fail(res, 403, 'FORBIDDEN', 'Request not authorized');
+    const limitedScope = !isLocalPeer(req.socket.remoteAddress);
+    if (limitedScope && !limitedRemoteApiAllowed(req.method, path)) return fail(res, 403, 'LOCAL_ONLY', 'This page is only available on the machine running Engram');
     const root = stateRoot;
-    if (req.method === 'GET' && path === '/api/auth/status') return send(res, 200, { passwordSet, clientMode });
+    if (req.method === 'GET' && path === '/api/auth/status') return send(res, 200, { passwordSet, clientMode, limited: limitedScope });
     if (req.method === 'POST' && (path === '/api/auth/setup' || path === '/api/auth/login')) {
       if (req.headers.origin !== requestOrigin(req)) return fail(res, 403, 'FORBIDDEN', 'Request not authorized');
       let body: any; try { body = await readBody(req); } catch (error) { const e = error as Error & { status?: number; code?: string }; return fail(res, e.status ?? 400, e.code ?? 'INVALID_REQUEST', e.message); }

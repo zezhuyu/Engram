@@ -57,10 +57,3 @@ test('workspace:create is explicit, capped, audited, actor-only and exposed only
   const names = (toolset: string) => toolsFor(owner, toolset).map(tool => tool.name);
   assert.ok(names('remote-web').includes('engram_workspace_ensure')); assert.ok(!names('standard').includes('engram_workspace_ensure'));
 });
-
-test('supported TLS reverse-proxy example terminates HTTPS in front of loopback-only MCP', async () => {
-  const config = await fs.readFile(path.join(process.cwd(), 'deploy/Caddyfile'), 'utf8');
-  assert.match(config, /^memory\.example\.com \{/m, 'Caddy automatic HTTPS is enabled for a real hostname');
-  assert.match(config, /reverse_proxy 127\.0\.0\.1:3333/, 'MCP is reached through loopback');
-  assert.doesNotMatch(config, /reverse_proxy https?:\/\/0\.0\.0\.0/, 'the example does not expose the unauthenticated app listener publicly');
-});

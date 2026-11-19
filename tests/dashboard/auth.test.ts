@@ -41,7 +41,7 @@ const authLocation = (root: string) => ({ env: { MDB_DASHBOARD_AUTH_FILE: path.j
 test('public authentication status reports client mode for first-time sign-in guidance', async t => {
   const v = await disposableVault(), server = await createDashboardServer({ engram: v.engram, token: 'z'.repeat(64), clientMode: true, idleMs: 60_000, authLocation: authLocation(v.root) });
   t.after(async () => { await server.close(); await v.cleanup(); });
-  assert.deepEqual((await call(server.port, '/api/auth/status')).body, { passwordSet: false, clientMode: true });
+  assert.deepEqual((await call(server.port, '/api/auth/status')).body, { passwordSet: false, clientMode: true, limited: false });
 });
 
 test('dashboard password setup requires bootstrap token, enforces policy, stores only a protected scrypt hash', async t => {

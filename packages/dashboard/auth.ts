@@ -27,7 +27,9 @@ export function allowedRemoteHost(host: string | undefined, port: number, bindHo
   if (!parsed || parsed.port !== port) return false;
   const name = parsed.name;
   if (bindHost === '0.0.0.0' || bindHost === '::') {
-    if (name === 'localhost' || name === '127.0.0.1' || name === '::1' || name === machineName.toLowerCase()) return true;
+    const machine = machineName.toLowerCase().replace(/\.local$/, '');
+    if (name === 'localhost' || name === '127.0.0.1' || name === '::1' || name === machineName.toLowerCase() || name === machine || name === `${machine}.local`) return true;
+    if ((process.env.ENGRAM_DASHBOARD_ALLOWED_HOSTS ?? '').split(',').some(item => item.trim().toLowerCase() === name)) return true;
     return isIP(name) !== 0;
   }
   return name === bindHost.toLowerCase();

@@ -11,7 +11,7 @@ import { loadCorpus, stats } from './lib.mjs';
 
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const url = arg('url'); if (!url) throw new Error('--url postgres://... is required (use a disposable server)');
-const corpus = arg('corpus', '/Volumes/sambigdisk1/code/engram-audit2/bench/100k'); const label = arg('label', 'postgres');
+const corpus = arg('corpus', 'verification/benchmarks/corpora/competitive-100k'); const label = arg('label', 'postgres');
 const iterations = Number(arg('iterations', 20)), warmups = Number(arg('warmups', 3));
 const out = 'verification/performance';
 const manifest = JSON.parse(readFileSync(`${out}/competitive-100k-manifest.json`, 'utf8'));

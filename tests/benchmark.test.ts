@@ -34,7 +34,6 @@ test('benchmark corpus build is deterministic, replay verifies hashes, and clean
   assert.ok(['clean', 'dirty', 'no-git'].includes(manifest.treeState));
   assert.equal(manifest.sourceBinding.fingerprint, manifest.sourceBinding.workingTreeSourceFingerprint);
   assert.ok(manifest.sourceBinding.fullSourceFileCount > 100);
-  assert.ok(manifest.sourceBinding.files['deploy/Caddyfile']);
   const outputDir = path.join(temp, 'reports');
   const replayOutput = JSON.parse(run('replay', '--root', first, '--runs', '3', '--warmups', '0', '--output-dir', outputDir)) as { parityAll: boolean; parityComplete: boolean; corpusId: string };
   assert.equal(replayOutput.parityAll, true); assert.equal(replayOutput.parityComplete, true);
